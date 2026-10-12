@@ -292,10 +292,79 @@ requirements (7) and (14) commit us to: a modeler session that runs for hours,
 and a REPL where the user redefines things all afternoon. An arena that is
 never collected is a leak with a long fuse.
 
-So: mark-sweep, with the explicit stack as the root set (§5), **plus** an
-arena fast path for a bounded evaluation that is known to end — which is
-exactly the leaf-function and scene-build case. The collector exists; the
-arena is an optimization that skips it.
+So: mark-sweep, with the explicit stack as the root set (§5). The settled
+design is below.
+
+### DECIDED 2026-10-12: precise, non-moving, single-threaded mark-sweep
+
+**Precise mark-sweep. Non-moving. Single-threaded. Allocation-triggered.**
+Nothing cleverer, and three of those four are *consequences* of decisions
+already made rather than fresh choices.
+
+**Precise**, because §5 already pays for it. The root set is the explicit frame
+stack, plus a handle table for embedder-held values, plus the global cells
+(§8.2) and the interactive environment, plus any captured continuation chains.
+There is no conservative scanning of C frames and no LLVM statepoint work,
+which is the answer to ray's §5 *"a JIT needs a GC story"*.
+
+**Non-moving**, so an address stays an address. Embedder-held values and
+Rust-side references do not need an indirection layer, which is most of what
+makes requirement (2) pleasant — and frozen continuation frames can be
+*shared* rather than copied (§3.1's one-shot rung). A moving collector buys
+locality we cannot measure yet and taxes every handle forever; if a
+measurement ever asks for compaction, the handle table is the place it becomes
+possible.
+
+**Single-threaded, and this one is free.** §6 restricts leaf functions to pure
+code with no allocation, so compiled code running on rayon workers **never
+touches the GC heap**. The collector therefore never needs to be thread-safe,
+never needs to stop the world across threads, and needs no write barriers for
+cross-thread visibility. That is the payoff of the purity restriction, and it
+is worth more than the restriction costs.
+
+**Collection runs only at safepoints** — the same points that check interrupt,
+timeout and fuel (requirement 8). One mechanism, three customers: anywhere the
+VM can be stopped, it can also be collected.
+
+#### Rejected, with reasons
+
+- **`Rc` with leaked cycles** (Steel's choice). Closures plus `set!` make a
+  cycle in two lines, and a modeler session runs for hours. Not viable for
+  requirement (7) or (14).
+- **Arena-only, no collection** (ray's §5 suggestion). Right for `--batch` and
+  a scene build that ends; a leak with a long fuse across a REPL afternoon.
+- **An arena *fast path* alongside the collector** — which the first version of
+  this section called for, and which is now **cut from v1**. There is no
+  measured need: the one hot loop ([leaf-survey.md](leaf-survey.md)) is leaf
+  code that allocates nothing at all, and a scene build's real cost is on the
+  Rust side. Revisit if, and only if, a profile shows GC time inside a bounded
+  evaluation.
+- **NaN-boxing.** Tempting for a language where every value is `f64` — and
+  pointless here, because **the float-heavy path is compiled, not
+  interpreted.** Leaf functions work on unboxed `f64` with no `Value` at all,
+  so NaN-boxing would optimize precisely the path the leaf compiler removes.
+  v1 uses a plain 16-byte tagged enum: safe Rust, no 48-bit pointer
+  assumption, debuggable. Revisit on a measurement, not on principle.
+
+#### Policy, and the host's budget
+
+Collect when the heap exceeds a growth factor over the live set measured at
+the previous collection, with a floor so small programs never collect. CI runs
+a **shrunk-heap stress mode** that collects far more often than is sensible —
+that is S3's exit criterion, and it is how collector bugs stop being
+nondeterministic.
+
+Two things the host gets to set, both in the same family as fuel and timeout
+(requirement 8):
+
+- **A heap cap.** An allocation that would exceed it raises an ordinary Scheme
+  error at a safepoint rather than aborting the process. A runaway
+  AI-generated scene should be a failed evaluation, not a dead modeler.
+- **Finalizers**, for foreign objects whose Rust `Drop` must run — ports, and
+  any host value the embedder hands in. Kept deliberately small: a finalizer
+  runs after sweep, may not allocate, and may not resurrect its object. **Weak
+  references are not in v1** — R7RS does not require them and nothing in ray
+  wants one.
 
 ### 3.4 S0 means two different things
 
