@@ -1,0 +1,17 @@
+[package]
+name = "scm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "An R7RS-small Scheme: reader, printer, and (eventually) the rest"
+
+# LLVM lives behind these and they are EMPTY on purpose until S11. The point of
+# declaring them now is that `cargo build --no-default-features` is the guard
+# from the first commit that has a Cargo.toml (plan §5), and a guard that only
+# arrives with the thing it guards has never guarded anything.
+[features]
+default = []
+jit = []
+aot = []
+
+[dependencies]
