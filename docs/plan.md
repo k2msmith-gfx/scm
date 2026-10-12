@@ -9,7 +9,7 @@ shape, not a schedule.
 
 ---
 
-## 1. The requirements, and the two places they fight
+## 1. The requirements, and the three places they fight
 
 As given:
 
@@ -19,8 +19,22 @@ As given:
 4. Leverage LLVM — `inkwell` as the likely interface.
 5. Run standalone.
 6. Support JIT compilation.
+7. Strong REPL support.
 
-Five of those compose. Two pairs do not, and both have to be resolved by
+**Decided (2026-10-12): the first consumer is ray and the modeler.** That is
+not a detail, it is the forcing function. It promotes embedding and boot time
+from requirements to *the point*, it means the REPL of requirement (7) is a
+protocol before it is a terminal UI (§6), and it adds a requirement the list
+above does not state:
+
+> **8. A runtime that cannot abort the host.** ray has ~579 boundary
+> `unsafe`s and a panic cannot unwind out of `extern "C"`; a zero NURBS weight
+> killed a live modeler session mid-edit. And ray today has no interrupt, no
+> timeout and no fuel with which to throttle AI-generated code. scm owning its
+> own VM is what makes all three fixable, so they are requirements, not
+> features.
+
+Most of those compose. Three pairs do not, and each has to be resolved by
 *architecture* rather than by effort:
 
 **(2) vs (4): an LLVM dependency is not an easy dependency.** `llvm-sys`
@@ -50,6 +64,22 @@ Schemes, Steel included).
 JIT optimizes within frames rather than replacing the stack discipline.** See
 §3. This is the single most important decision in the document and everything
 downstream falls out of it.
+
+**(6) vs (7): a REPL may redefine anything, at any time.** A JIT earns its
+speed by assuming things — that `+` is the arithmetic primitive, that a called
+global is the closure it was last time, that a type stayed put. A REPL exists
+to break exactly those assumptions, and a *strong* REPL does it constantly.
+The naive resolutions are both bad: never inline anything (no JIT worth
+having), or snapshot the world and make redefinition not take effect (not a
+REPL).
+
+→ **Resolution: globals are mutable cells, never inlined values, and every
+JIT'd unit records what it assumed.** Redefining a global invalidates the
+compiled code that depended on it, which falls back to the VM tier and may be
+re-JIT'd later. This is standard practice in every production JIT and it is
+cheap *here* specifically because the explicit stack (§3) means a frame
+mid-execution can always be re-entered by the interpreter. Designing it in
+costs little; retrofitting it costs the JIT.
 
 ### Non-goals (for now)
 
@@ -223,36 +253,90 @@ startup; it has moved it.
 
 ---
 
-## 6. Staging
+## 6. The REPL is a protocol, not a prompt
+
+Requirement (7) is easy to under-build, because "a REPL" sounds like a
+read-eval-print loop and is actually six separate obligations. With ray and
+the modeler as the first consumer, the terminal REPL is **one client among
+several** — the others are Emacs over TCP, the modeler's editor pane, and the
+agent pane, all of which already exist on the Janet side and all of which send
+forms and want structured answers back.
+
+So the REPL is a **library-level API** with a wire protocol, and
+`scm-cli`'s prompt is the thinnest possible client of it. Getting this
+backwards — building a terminal loop and bolting a socket on later — is how
+the Janet side ended up with an eval channel per consumer.
+
+What "strong" has to mean:
+
+1. **Incremental, environment-addressed evaluation.** `eval` against a named,
+   persistent interactive environment, with definitions accumulating. R7RS
+   libraries are closed by design; the interactive environment is explicitly
+   not, and the two have to coexist (`(scheme repl)`'s
+   `interaction-environment`).
+2. **Redefinition that actually takes effect**, including of procedures
+   already captured in closures and already JIT-compiled — see §1's (6) vs (7)
+   resolution. This is the constraint that reaches furthest into the compiler.
+3. **Interruptible and bounded execution.** A safepoint check in the VM loop
+   gives `C-c` on a runaway loop, a wall-clock timeout, and a *fuel* budget.
+   This is requirement 8's third item and the one thing the Steel evaluation
+   found that Steel would not have given ray either. Owning the VM is what
+   makes it a 20-line feature instead of an impossibility.
+4. **Errors that carry source spans and a real backtrace.** The explicit stack
+   (§3) is *data*, so a backtrace is a walk over a live structure rather than
+   a reconstruction. Frames survive the error.
+5. **A reader that distinguishes "incomplete" from "wrong".** Multi-line entry
+   at the prompt, and the editor panes' paren handling, both depend on the
+   reader reporting *incomplete datum* rather than a parse error. This is an
+   S1 decision, not a REPL-stage decision, and it is easy to get wrong early.
+6. **Introspection.** Completion from the global environment, docstrings, and
+   an `(apropos)`/`(help)` equivalent. ray already generates its API manual
+   from live docstrings via `(curenv)`, and the ray-steel work found Steel had
+   no runtime docstrings at all — so scm should carry docstrings as *values*
+   from the start rather than as a comment convention an external tool scrapes.
+
+The stretch goal, which the explicit stack makes reachable and which no
+embedded Scheme in this evaluation offered: **a break REPL.** On an error,
+stop with the frames live, inspect them, and resume or restart. That is the
+Lisp meaning of "strong REPL", and it is a direct dividend of §3.
+
+## 7. Staging
 
 Each stage has an exit criterion that is a measurement, not a feeling. Rough
 sizes only — these are shapes of work, not estimates.
 
 | | stage | exit criterion |
 |---|---|---|
-| **S0** | **LLVM feasibility spike.** inkwell + LLVM 21 + LLJIT via `llvm-sys::orc2`, building and running one JIT'd function, on aarch64-darwin *and* x86-64-linux. Throwaway code. | a JIT'd `fn(i64)->i64` returns the right answer on both targets, and `cargo build` of a stub `scm` with no LLVM present still works |
-| **S1** | Reader, datum representation, writer, `(features)`. Fixnums/flonums. | read→write round-trip fuzzes clean on a corpus; `write`/`display` conform |
-| **S2** | T0 interpreter: explicit stack, environments, closures, proper tail calls. | a tail loop of 10^8 iterations is flat in memory (measured, not asserted) |
+| **S0** | **LLVM feasibility spike.** inkwell + LLVM 21 + LLJIT via `llvm-sys::orc2`, building and running one JIT'd function. macOS W^X/`MAP_JIT` and the hardened-runtime entitlement settled on real hardware. Throwaway code. | a JIT'd `fn(i64)->i64` returns the right answer on aarch64-darwin and x86-64-linux, and `cargo build` of a stub with no LLVM present still works |
+| **S1** | Reader, datum representation, writer, `(features)`. Fixnums/flonums. **Incomplete-vs-invalid datum reporting** (§6.5). | read→write round-trip fuzzes clean; a truncated datum reports *incomplete*, never a parse error |
+| **S2** | T0 interpreter: explicit stack, environments, closures, proper tail calls. Safepoints in the eval loop. | a tail loop of 10^8 iterations is flat in memory (measured, not asserted); `C-c` interrupts it |
 | **S3** | GC: non-moving mark-sweep, roots = explicit stack + handle table. | cyclic structure is collected; GC stress test under a shrunk heap; no leak under `set!` cycles |
-| **S4** | `syntax-rules`, the library system, `(scheme base)`. | the conformance number (§7) is reported for the first time |
+| **S4** | `syntax-rules`, the library system, `(scheme base)`. Globals as cells; docstrings as values. | the conformance number (§8) is reported for the first time |
 | **S5** | `call/cc` (multi-shot), `dynamic-wind`, `guard`/exceptions, `values`, `parameterize`, promises. | multi-shot re-entry tests pass; `dynamic-wind` ordering tests pass |
-| **S6** | The rest of R7RS-small: chars/strings/Unicode, ports, bytevectors, `eval`. | conformance ≥ 95% with every failure individually explained |
-| **S7** | **Embedding API.** Safe `Value` handles, rooting, host-function registration, error propagation as `Result`. | a sample Rust app embeds scm in < 30 lines; no panic crosses the API under a fuzzed host-call harness |
-| **S8** | Precompiled stdlib image; boot budget met. | `scm -e '(values)'` < 10 ms, in CI |
-| **S9** | T1 bytecode VM. | benchmark suite vs T0, and T0/T1 agree on every conformance test |
-| **S10** | T2 JIT (`--features jit`). | measured speedup over T1 on the benchmark suite; T1/T2 agree on every conformance test; `call/cc` captured inside JIT'd code still works |
-| **S11** | T3 AOT + `scm build` producing a native binary. | a hello-world binary runs on both targets with no toolchain present at runtime |
+| **S6** | **Embedding API.** Safe `Value` handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. | a sample Rust app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable from the host |
+| **S7** | **REPL core**: the eval protocol, interactive environment, redefinition, backtraces over live frames, introspection. Terminal client in `scm-cli`. | a non-terminal client (socket) and the terminal client share one API with no divergence; a runaway form at the prompt is interruptible; a backtrace names frames and spans |
+| **S8** | The rest of R7RS-small: chars/strings/Unicode, ports, bytevectors, `eval`. | conformance ≥ 95% with every failure individually explained |
+| **S9** | Precompiled stdlib image; boot budget met. | `scm -e '(values)'` < 10 ms, in CI, on both targets |
+| **S10** | T1 bytecode VM. | benchmark suite vs T0, and T0/T1 agree on every conformance test |
+| **S11** | T2 JIT (`--features jit`) with assumption tracking and invalidation. | measured speedup over T1; T1/T2 agree on every conformance test; `call/cc` captured inside JIT'd code still works; **redefining a global at the REPL invalidates JIT'd callers** |
+| **S12** | T3 AOT + `scm build` producing a native binary. | a hello-world binary runs on both targets with no toolchain present at runtime |
 
-The ordering is deliberate: **S7 and S8 come before the JIT.** Embedding and
-startup are requirements (2) and the thing that makes (5) pleasant; the JIT is
-a performance feature that cannot be evaluated until there is something
-correct to compare it against. If the schedule slips, it slips at S10/S11, and
-what ships is a conformant, embeddable, fast-booting interpreter — which is a
-useful artifact on its own.
+The ordering follows from ray being the first consumer. **Embedding (S6),
+the REPL (S7) and boot time (S9) all come before the JIT.** Those are what
+ray and the modeler would actually adopt; the JIT is a performance feature
+that cannot even be evaluated until there is something correct to compare it
+against. If the schedule slips, it slips at S11/S12 — and what exists is a
+conformant, embeddable, fast-booting, interruptible Scheme with a real REPL,
+which is precisely the artifact the ray-steel evaluation said was worth
+having. The LLVM work is then upside rather than exposure.
+
+S0 is out of order on purpose: it is the only stage whose *failure* would
+invalidate the plan, so it runs first and cheaply, and then nothing depends on
+an unverified bet for months.
 
 ---
 
-## 7. How "supports R7RS-small" becomes a number
+## 8. How "supports R7RS-small" becomes a number
 
 Conformance is not an opinion. From S4 onward, CI reports a percentage against
 vendored external suites, and the number goes in the README:
@@ -278,7 +362,7 @@ the pattern, and it took an afternoon.
 
 ---
 
-## 8. Risks, worst first
+## 9. Risks, worst first
 
 1. **The JIT's ceiling.** Keeping frames in memory (§3) caps how fast T2 can
    be. It is possible that T2 beats T1 by 2x where a conventional native
@@ -304,7 +388,7 @@ the pattern, and it took an afternoon.
 
 ---
 
-## 9. Prior art worth reading before writing
+## 10. Prior art worth reading before writing
 
 - **Chez Scheme** — the reference for fast native code *with* real `call/cc`
   (stack segments). Read this before finalizing §3.
@@ -321,18 +405,27 @@ the pattern, and it took an afternoon.
 
 ---
 
-## 10. Open questions
+## 11. Open questions
 
-1. **Who is the first consumer?** If scm is eventually ray's and the modeler's
-   scripting layer, then S7 (embedding) and S8 (boot) are the *point* and
-   should be pulled even earlier, the API shape should be designed against
-   ray's ~6,200-line prelude, and "a runtime that cannot abort the host" joins
-   the requirements. If scm is a language project in its own right,
-   conformance and S10/S11 lead. The plan above hedges; saying which would
-   sharpen it.
-2. **Does `call/cc` have to be multi-shot?** R7RS-small says yes, and §3 is
+**Answered 2026-10-12:** the first consumer is ray and the modeler (§1, and
+the staging in §7 follows from it). S0 runs first.
+
+Still open:
+
+1. **Does `call/cc` have to be multi-shot?** R7RS-small says yes, and §3 is
    designed around it. Escape-only continuations would be substantially
    cheaper and would permit a conventional native calling convention — at the
    cost of conformance. Worth saying out loud once, then never revisiting.
-3. **Run S0 now?** It is the only stage whose failure invalidates the plan, it
-   needs a multi-GB LLVM fetch, and it is a day or two of throwaway code.
+2. **Does ray's prelude get ported, or does ray keep Janet and scm earn its
+   way in?** The ray-steel census found ray's 6,217-line prelude is 99.6%
+   mechanical to translate, with 26 lines that need design (4 `defmacro`s, 7
+   quasiquotes, 5 `curenv`, 2 `peg/`, 4 `eval`) — and `homoiconic.janet`, which
+   walks a quoted tuple with `postwalk`, had no clear Steel translation at all.
+   That census is the estimate to re-use; it does not need re-doing. But the
+   decision of *when* to pay it is not an S-stage question, and the answer
+   shapes how much of the Janet surface the embedding API in S6 should imitate
+   rather than improve on.
+3. **One `homoiconic.janet` question specifically:** does scm expose the AST
+   as ordinary indexable data (Janet tuples) or as opaque syntax objects? Sets
+   of scopes (§4) pushes toward the latter, which is the choice that broke the
+   Steel translation. Decide at S4, not at S8.

@@ -16,6 +16,10 @@ aarch64 macOS.
 4. LLVM as the code generator, via `inkwell` for IR.
 5. A standalone `scm` binary.
 6. JIT compilation.
+7. Strong REPL support — which, with ray as the first consumer, means an eval
+   *protocol* with interrupt/timeout/fuel and live-frame backtraces, of which
+   the terminal prompt is one client.
+8. (Added) A runtime that cannot abort the host.
 
 ## Shape, in one paragraph
 
@@ -25,5 +29,8 @@ it sit four tiers: an AST interpreter kept forever as the semantic oracle, a
 bytecode VM as the default engine, an LLVM JIT, and LLVM AOT. LLVM is behind a
 feature flag that is off by default, so `cargo build` works with no toolchain
 installed. Every tier runs every conformance test and they must agree.
+
+First consumer is ray and the modeler, so embedding, the REPL and boot time
+all land before the JIT.
 
 See [docs/plan.md](docs/plan.md) for the argument, the staging, and the risks.
