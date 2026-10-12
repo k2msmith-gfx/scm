@@ -5,6 +5,12 @@ of the `scm` crate and nothing here should grow.
 
 - **s0-llvm** — S0: inkwell builds IR, legacy MCJIT runs it, ORCv2/LLJIT via
   `llvm-sys::orc2` runs it, and a second module is added afterwards.
+- **s0-leaf-survey** — S0: what an authored texel function and an authored
+  field actually cost in ray. `texcost.janet` sweeps make-texture 128..2048
+  and field-bake :res 48..128; `fb-build.janet` times fruit-bowl's scene build
+  with no render. Run from ray's root with its janet-featured binary:
+  `./target/release/ray --scene <file> --out /tmp/x.png --batch`.
+  Results in [../docs/leaf-survey.md](../docs/leaf-survey.md).
 - **s0-nollvm** — S0: the feature gate. Proves the default build needs no LLVM
   and that `--features jit` fails loudly without it.
 
