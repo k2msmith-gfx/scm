@@ -348,9 +348,92 @@ What the decision commits us to, concretely:
 4. **`ParamType::Key` maps straight onto it** across the bridge, with no
    coercion step to get wrong.
 
-Note what this does *not* settle: how keyword **parameters** are declared in a
-lambda list, and how `&opt` and `&named` are spelled. That is the other half of
-§4 and is still open — the datatype is the part that is decided.
+### DECIDED 2026-10-12: the lambda list keeps Janet's markers, with inline defaults
+
+```scheme
+(define (add-sphere-mesh center radius segments rings
+                         &opt material
+                         &named (smooth #t) name)
+  …)
+```
+
+**Markers are `&opt`, `&named`, `&keys`, in that fixed order**, after the
+required positionals. Janet's names, because ~25k lines of authored Janet use
+them and the translation should be mechanical: 105 `&opt`, 81 `&named`, 8
+`&keys` in `scripts/` alone. `&keys` binds the whole keyword collection as one
+value. True rest args stay R7RS: `(lambda (a . rest))`, no `&rest`.
+
+This is a **cheaper deviation than the keyword spelling**, and for a reason
+worth recording: `&` is an R7RS ⟨special initial⟩, so `&opt` is already a legal
+symbol. Nothing about the *reader* changes — only what `lambda` does with a
+parameter list. (In strict R7RS `(lambda (a &opt b) …)` is a two-argument
+procedure with a parameter named `&opt`; nobody writes that.)
+
+**The parameter name *is* the keyword.** `&named smooth` binds from `:smooth`.
+One name, not two — which is also what keeps a generated manual honest.
+
+#### Inline defaults are forced, because Scheme has no nil
+
+This is the part that cannot be translated literally, and getting it wrong
+would be silent. Janet writes defaults in the *body*, 80 times in the prelude:
+
+```janet
+(defn add-sphere-mesh-impl [center radius segments rings &opt material &named smooth name]
+  (default smooth true)   # = (if (nil? smooth) true smooth)
+```
+
+That works only because an absent argument is `nil` and **`nil` is not
+`false`**. Scheme has no nil; `#f` is the only false value. So if an absent
+`&named` bound `#f`, then `:smooth #f` and omitting `:smooth` would be
+indistinguishable, and a body-side `(default smooth #t)` would silently
+rewrite an explicit `#f` to `#t`.
+
+That is not hypothetical. ray documents the distinction:
+
+- `:smooth` — *"interpolated vertex normals · default true (**false = flat
+  facets**)"*, three sites
+- `:apply` in `camera-match` — *"**false** solves without touching the camera
+  or film · default true"*
+- `:repro` — `(default repro true)`
+
+A port that bound absent to `#f` would turn flat facets smooth, and make
+`:apply false` touch the camera anyway, with no error at all.
+
+**So defaults move into the lambda list**, where the default expression is
+evaluated only when the argument is absent and an explicit `#f` passes
+through untouched. Absent with no declared default binds **`#f`**, which
+preserves Janet's falsy-`nil` ergonomics so the 26 `(nil? x)` / `(if x …)`
+supplied-checks translate directly. Every parameter in ray where `#f` is
+meaningful already has a default, so no supplied-predicate is needed; if a
+case ever turns up, a CL-style third slot is the escape hatch to add *then*.
+
+Migrating the 80 `(default …)` calls into lambda lists is mechanical, and it
+deletes a drift source: today "default true" is written in the docstring prose
+*and* `(default smooth true)` in the code, two places that can disagree.
+
+#### One genuine ambiguity, with a rule
+
+21 prelude lambda lists have **both** `&opt` positionals and `&named`
+parameters, so this has to be answered rather than assumed:
+
+> A keyword argument begins the named section **only if it names a declared
+> `&named` parameter.** Otherwise it is an ordinary positional value.
+
+Both real cases fall out correctly:
+
+- `(add-sphere-impl c r :name :ball)` against
+  `[center radius &opt material &named name]` — `:name` *is* declared, so the
+  named section starts and `material` stays absent.
+- `(set-tone-map :aces)` — `set-tone-map` declares no `&named` called `aces`,
+  so `:aces` is the positional value it looks like. This matters: keywords are
+  passed as plain values at hundreds of call sites.
+
+Two errors, both at the call site: a declared keyword with no value after it
+("named argument `:x` has no value"), and — importantly — **an undeclared
+keyword in the named section**. Janet *silently ignores* an unknown named
+argument, which means a misspelled `:radiuss` does nothing and says nothing.
+scm rejects it by name. That is the same class of bug as the Steel black frame
+and the cheapest possible place to catch it.
 
 ### And it is a genuine deviation, which the first draft got wrong
 
