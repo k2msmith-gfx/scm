@@ -112,6 +112,15 @@ for the JIT.** Requirement (4) is satisfied; requirement (6) must not be built
 on MCJIT. Expect to write and own a small safe wrapper over LLJIT — budget it
 as real work, not glue.
 
+### 2.1b …and that is now demonstrated, not inferred
+
+**S0 ran on 2026-10-12 and passed on aarch64-darwin** — inkwell built the IR,
+and both legacy MCJIT and ORCv2/LLJIT via `llvm-sys::orc2` compiled and ran
+it, with a second module added incrementally afterwards. Full results,
+including six things learned that are not in this document, are in
+[s0-findings.md](s0-findings.md). x86-64 Linux remains unverified; S0 does not
+close until it is.
+
 ### 2.2 The toolchain is already available and pinnable
 
 `nixpkgs#llvmPackages.llvm` is **21.1.8**, matching inkwell's `llvm21-1`.
@@ -307,7 +316,7 @@ sizes only — these are shapes of work, not estimates.
 
 | | stage | exit criterion |
 |---|---|---|
-| **S0** | **LLVM feasibility spike.** inkwell + LLVM 21 + LLJIT via `llvm-sys::orc2`, building and running one JIT'd function. macOS W^X/`MAP_JIT` and the hardened-runtime entitlement settled on real hardware. Throwaway code. | a JIT'd `fn(i64)->i64` returns the right answer on aarch64-darwin and x86-64-linux, and `cargo build` of a stub with no LLVM present still works |
+| **S0** | **LLVM feasibility spike.** inkwell + LLVM 21 + LLJIT via `llvm-sys::orc2`, building and running one JIT'd function. macOS W^X/`MAP_JIT` and the hardened-runtime entitlement settled on real hardware. Throwaway code. | **PASSED on aarch64-darwin 2026-10-12** ([s0-findings.md](s0-findings.md)); x86-64-linux still to run; the no-LLVM build guard passes |
 | **S1** | Reader, datum representation, writer, `(features)`. Fixnums/flonums. **Incomplete-vs-invalid datum reporting** (§6.5). | read→write round-trip fuzzes clean; a truncated datum reports *incomplete*, never a parse error |
 | **S2** | T0 interpreter: explicit stack, environments, closures, proper tail calls. Safepoints in the eval loop. | a tail loop of 10^8 iterations is flat in memory (measured, not asserted); `C-c` interrupts it |
 | **S3** | GC: non-moving mark-sweep, roots = explicit stack + handle table. | cyclic structure is collected; GC stress test under a shrunk heap; no leak under `set!` cycles |
@@ -369,15 +378,20 @@ the pattern, and it took an afternoon.
    compiler would beat it by 10x, and that this is judged not worth the LLVM
    dependency. *Mitigation: S0 and S10 are cheap to reach relative to the
    whole, and the region analysis escape hatch exists. But this is the bet.*
-2. **LLVM as a dependency.** Version churn across LLVM 21→22→23, inkwell's
-   per-version feature flags, `llvm-config` discovery, and a multi-GB
-   toolchain. *Mitigation: pinned via flake; LLVM off by default; the
-   `--no-default-features` CI job.*
+2. **LLVM as a dependency.** Version churn is faster than it looks: `llvm-sys`
+   is already published at **231** (LLVM 23) while S0 validated 211, with
+   inkwell carrying one feature flag per LLVM version, plus `llvm-config`
+   discovery and a multi-GB toolchain. *Mitigation: pinned via flake; LLVM off
+   by default; a `--no-default-features` CI job that asserts both halves of the
+   gate — default builds with no LLVM, `--features jit` fails loudly without
+   it. Both halves verified in S0.*
 3. **macOS arm64 JIT specifics.** W^X enforcement means `MAP_JIT` plus
    `pthread_jit_write_protect_np` toggling, and the hardened runtime wants the
    `com.apple.security.cs.allow-jit` entitlement. This has bitten every JIT on
-   Apple Silicon. *Mitigation: it is the explicit subject of S0, on real
-   hardware, before anything depends on it.*
+   Apple Silicon. *Status after S0: LLJIT handled W^X with no `MAP_JIT` work
+   for an unsigned CLI binary. The signed-and-hardened case — which is how the
+   modeler would ship — is still unverified, so this shrinks but does not
+   close.*
 4. **R7RS-small is bigger than it reads.** Hygiene, the library system, the
    numeric tower, Unicode, and ports are each weeks. *Mitigation: the
    conformance number makes progress visible from S4, and §2.3 legitimately

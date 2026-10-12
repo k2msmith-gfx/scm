@@ -1,0 +1,12 @@
+[package]
+name = "scm-stub"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+default = []
+jit = ["dep:inkwell", "dep:llvm-sys"]
+
+[dependencies]
+inkwell = { version = "0.10", features = ["llvm21-1"], optional = true }
+llvm-sys = { version = "211", optional = true }
