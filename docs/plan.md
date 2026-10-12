@@ -366,20 +366,36 @@ so **`:` is a valid identifier initial and `:at` is a legal R7RS symbol.**
 Reading it as a keyword changes the meaning of conformant code. That is why
 Racket, Steel and Guile all spell it `#:at` — `#:` is not valid R7RS datum
 syntax, so it cannot collide. Janet spells it `:at`, which is where ray's
-house style comes from.
+house style comes from, and scm follows Janet here: we are taking the
+deviation on purpose rather than taking the prefix to avoid it.
 
 So this is a **third real deviation**, alongside multi-shot `call/cc` (§3.1),
 and it needs handling rather than hiding:
 
-- **`:at` reads as a keyword by default.** That is ray's spelling across 219
-  files and it is not being re-authored.
-- **`#:at` is accepted as a synonym**, at no cost. Any imported
-  R7RS/Racket-flavoured code uses that spelling, and supporting both means a
-  library written elsewhere does not have to care.
+- **`:at` reads as a keyword. Full stop — there is no prefix and no alias.**
+  That is ray's spelling across 219 files, it is not being re-authored, and
+  scm owns its own reader so there is nothing to work around.
+- **`#:at` is NOT accepted**, and that is deliberate (decided 2026-10-12).
+  Keywords are not in R7RS-small at all, so no portable conformant library
+  uses `#:at` either — only Racket/Guile/Steel-specific code does, which is
+  not portable anyway, and the wider ecosystem is split three ways regardless
+  (`#:at` in Racket/Guile/Steel, `at:` in SRFI-88 and Gambit, `:at` in Janet).
+  A second spelling would be a permanent tax on the reader, the printer, the
+  docs and the error messages, to save an `s/#:/:/` on a pasted snippet. If a
+  port ever genuinely needs it, it is a five-line reader branch — add it then,
+  and still never *emit* it.
 - **A reader parameter restores R7RS symbol reading**, for running the
   conformance suite and for any library that genuinely wants `:at` as a
-  symbol. Guile does exactly this with `(read-set! keywords …)`.
+  symbol. Guile does exactly this with `(read-set! keywords …)`. This one is
+  worth keeping, because the conformance number depends on it.
 - **Declared in `(features)`**, like every other deviation.
+
+**The real lesson from Steel was the alias, not the prefix.** Steel's reader
+spells keywords `#:at` and reads `:at` as a symbol, so preserving the house
+style there meant `(define :at #:at)` — and that alias is precisely what
+failed. Making `:at` native removes the alias, and with it the entire class of
+bug. Any future proposal to reintroduce a second spelling should be read with
+that in mind.
 
 Check at S5 whether `r7rs-tests.scm` uses a `:`-initial symbol anywhere — if
 it does, the conformance runs need the reader parameter, and a failure there
