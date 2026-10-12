@@ -84,7 +84,7 @@ fn variadic_and_rest_parameters() {
 #[test]
 fn arity_errors_name_the_procedure() {
     let e = eval_err("(define (f a b) a) (f 1)");
-    assert!(e.contains("f expects 2 arguments, got 1"), "got {e}");
+    assert!(e.contains("f expects 2 required arguments, got 1"), "got {e}");
 }
 
 #[test]

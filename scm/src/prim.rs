@@ -255,6 +255,28 @@ fn equal(e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
+fn list(e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(e.list(a))
+}
+
+fn length(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut v = one("length", a)?;
+    let mut n = 0i64;
+    loop {
+        match v {
+            Value::Null => return Ok(Value::Fixnum(n)),
+            Value::Obj(r) => match e.obj(r) {
+                Obj::Pair(_, cdr) => {
+                    n += 1;
+                    v = *cdr;
+                }
+                _ => return Err(err("length: not a proper list")),
+            },
+            _ => return Err(err("length: not a proper list")),
+        }
+    }
+}
+
 fn vector(e: &mut Engine, a: &[Value]) -> PResult {
     // `(vector …)` and `[…]` build the same thing, and it prints with
     // brackets because that is how ray writes a position.
@@ -336,6 +358,8 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("zero?", is_zero);
     vm.define_prim("eq?", eq);
     vm.define_prim("equal?", equal);
+    vm.define_prim("list", list);
+    vm.define_prim("length", length);
     vm.define_prim("vector", vector);
     vm.define_prim("vector-ref", vector_ref);
     vm.define_prim("vector-length", vector_length);

@@ -24,8 +24,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::heap::{Engine, Obj};
-use crate::value::{ObjRef, PrimId, SymId, Value};
+use crate::heap::{Engine, NamedParam, Obj, Param};
+use crate::value::{KwId, ObjRef, PrimId, SymId, Value};
 use crate::writer::write_str;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -93,6 +93,18 @@ enum Frame {
         define: bool,
         env: Option<ObjRef>,
     },
+    /// A missing argument's default expression is being evaluated.
+    ///
+    /// Defaults cannot be computed by the binder, because a default is an
+    /// expression and may mention earlier parameters -- so they run on the
+    /// explicit stack like everything else, which keeps them interruptible
+    /// and keeps the collector able to see them.
+    Defaults {
+        todo: Rc<Vec<(SymId, Value)>>,
+        idx: usize,
+        body: Rc<Vec<Value>>,
+        env: ObjRef,
+    },
     /// An element of a `[…]` vector is being evaluated. This is the whole
     /// reason the reader keeps a `bracket` flag: a bracket vector *evaluates*
     /// its elements, where `#(…)` is a constant (plan §4.5).
@@ -130,6 +142,14 @@ impl Frame {
                 env
             }
             Frame::Assign { env, .. } => env,
+            Frame::Defaults {
+                todo, body, env, ..
+            } => {
+                out.extend(todo.iter().map(|(_, e)| *e));
+                out.extend(body.iter().copied());
+                out.push(Value::Obj(*env));
+                return;
+            }
             Frame::VecElem { done, items, env, .. } => {
                 out.extend(done.iter().copied());
                 out.extend(items.iter().copied());
@@ -187,6 +207,22 @@ struct SpecialForms {
     set: SymId,
     lambda: SymId,
     begin: SymId,
+    /// The lambda-list markers (plan §4). Janet's names, kept because they are
+    /// unambiguous and familiar; `&` is an R7RS special initial, so these are
+    /// ordinary symbols and only `lambda` treats them specially.
+    amp_opt: SymId,
+    amp_named: SymId,
+    amp_keys: SymId,
+}
+
+/// A parsed lambda list.
+#[derive(Default)]
+struct Formals {
+    params: Vec<SymId>,
+    opt: Vec<Param>,
+    named: Vec<NamedParam>,
+    keys: Option<SymId>,
+    rest: Option<SymId>,
 }
 
 impl Vm {
@@ -199,6 +235,9 @@ impl Vm {
             set: engine.interner.symbol("set!"),
             lambda: engine.interner.symbol("lambda"),
             begin: engine.interner.symbol("begin"),
+            amp_opt: engine.interner.symbol("&opt"),
+            amp_named: engine.interner.symbol("&named"),
+            amp_keys: engine.interner.symbol("&keys"),
         };
         let mut vm = Vm {
             engine,
@@ -519,39 +558,145 @@ impl Vm {
         body: &[Value],
         env: Option<ObjRef>,
     ) -> VResult<Value> {
-        let (params, rest) = self.parse_formals(formals)?;
+        let f = self.parse_formals(formals)?;
         if body.is_empty() {
             return Err(self.err("a procedure body cannot be empty"));
         }
         Ok(self.engine.alloc(Obj::Closure {
             name,
-            params: Rc::new(params),
-            rest,
+            params: Rc::new(f.params),
+            opt: Rc::new(f.opt),
+            named: Rc::new(f.named),
+            keys: f.keys,
+            rest: f.rest,
             body: Rc::new(body.to_vec()),
             env,
         }))
     }
 
-    /// Required parameters plus an optional rest, which is as much of §4's
-    /// lambda list as S2 needs. `&opt` and `&named` are argument *binding*
-    /// and land with the verb bridge; they change no part of the machine.
-    fn parse_formals(&mut self, formals: Value) -> VResult<(Vec<SymId>, Option<SymId>)> {
-        let mut params = Vec::new();
+    /// Parse §4's lambda list:
+    ///
+    /// ```text
+    /// formals := sym | ( req* [&opt spec*] [&named spec*] [&keys sym] [. sym] )
+    /// spec    := sym | (sym default-expr)
+    /// ```
+    ///
+    /// The order is fixed, as it is in Janet, and a marker out of order is an
+    /// error rather than a parameter that happens to be spelled `&opt`.
+    fn parse_formals(&mut self, formals: Value) -> VResult<Formals> {
+        #[derive(PartialEq, Clone, Copy)]
+        enum Section {
+            Req,
+            Opt,
+            Named,
+            Keys,
+        }
+
+        let mut f = Formals::default();
+        let mut section = Section::Req;
         let mut cur = formals;
         loop {
             match cur {
-                Value::Null => return Ok((params, None)),
-                Value::Symbol(s) => return Ok((params, Some(s))),
-                Value::Obj(r) => match *self.engine.obj(r) {
-                    Obj::Pair(Value::Symbol(s), cdr) => {
-                        params.push(s);
-                        cur = cdr;
+                Value::Null => break,
+                // `(a . rest)` and a bare `args`.
+                Value::Symbol(s) => {
+                    if f.keys.is_some() {
+                        return Err(self.err("&keys and a dotted rest cannot both appear"));
                     }
-                    Obj::Pair(..) => return Err(self.err("parameter names must be symbols")),
-                    _ => return Err(self.err("malformed parameter list")),
-                },
+                    f.rest = Some(s);
+                    break;
+                }
+                Value::Obj(r) => {
+                    let Obj::Pair(car, cdr) = *self.engine.obj(r) else {
+                        return Err(self.err("malformed parameter list"));
+                    };
+                    cur = cdr;
+                    // A marker?
+                    if let Value::Symbol(s) = car {
+                        let next = if s == self.syms.amp_opt {
+                            Some(Section::Opt)
+                        } else if s == self.syms.amp_named {
+                            Some(Section::Named)
+                        } else if s == self.syms.amp_keys {
+                            Some(Section::Keys)
+                        } else {
+                            None
+                        };
+                        if let Some(next) = next {
+                            let order = |x: Section| match x {
+                                Section::Req => 0,
+                                Section::Opt => 1,
+                                Section::Named => 2,
+                                Section::Keys => 3,
+                            };
+                            if order(next) <= order(section) {
+                                let name = self.engine.interner.sym_name(s).to_string();
+                                return Err(self.err(format!(
+                                    "{name} is out of order; the lambda list goes \
+                                     required, &opt, &named, &keys"
+                                )));
+                            }
+                            section = next;
+                            continue;
+                        }
+                    }
+                    match section {
+                        Section::Req => match car {
+                            Value::Symbol(s) => f.params.push(s),
+                            _ => return Err(self.err("parameter names must be symbols")),
+                        },
+                        Section::Opt => f.opt.push(self.parse_param_spec(car)?),
+                        Section::Named => {
+                            let p = self.parse_param_spec(car)?;
+                            let name = self.engine.interner.sym_name(p.name).to_string();
+                            let kw = self.engine.interner.keyword(&name);
+                            f.named.push(NamedParam {
+                                name: p.name,
+                                kw,
+                                default: p.default,
+                            });
+                        }
+                        Section::Keys => match car {
+                            Value::Symbol(s) if f.keys.is_none() => f.keys = Some(s),
+                            Value::Symbol(_) => {
+                                return Err(self.err("&keys takes exactly one name"));
+                            }
+                            _ => return Err(self.err("&keys takes a symbol")),
+                        },
+                    }
+                }
                 _ => return Err(self.err("malformed parameter list")),
             }
+        }
+        if f.rest.is_some() && f.keys.is_some() {
+            return Err(self.err("&keys and a dotted rest cannot both appear"));
+        }
+        Ok(f)
+    }
+
+    /// `name` or `(name default-expr)`.
+    fn parse_param_spec(&mut self, spec: Value) -> VResult<Param> {
+        match spec {
+            Value::Symbol(s) => Ok(Param {
+                name: s,
+                default: None,
+            }),
+            Value::Obj(r) => {
+                let Obj::Pair(Value::Symbol(name), rest) = *self.engine.obj(r) else {
+                    return Err(self.err("expected NAME or (NAME default)"));
+                };
+                let Value::Obj(r2) = rest else {
+                    return Err(self.err("expected (NAME default)"));
+                };
+                let Obj::Pair(default, Value::Null) = *self.engine.obj(r2) else {
+                    return Err(self.err("(NAME default) takes exactly one default"));
+                };
+                Ok(Param {
+                    name,
+                    default: Some(default),
+                })
+            }
+            _ => Err(self.err("expected NAME or (NAME default)")),
         }
     }
 
@@ -626,6 +771,34 @@ impl Vm {
                 self.bind(sym, v, define, env)?;
                 Ok(Step::Return(Value::Unspecified))
             }
+            Frame::Defaults {
+                todo,
+                idx,
+                body,
+                env,
+            } => {
+                // Write the computed default into its slot, so a later
+                // default can see it -- defaults are evaluated left to right
+                // and may mention earlier parameters.
+                let sym = todo[idx].0;
+                if let Obj::Env { slots, .. } = self.engine.obj_mut(env)
+                    && let Some(slot) = slots.iter_mut().rev().find(|(s, _)| *s == sym)
+                {
+                    slot.1 = v;
+                }
+                let next = idx + 1;
+                if next < todo.len() {
+                    let expr = todo[next].1;
+                    self.push(Frame::Defaults {
+                        todo,
+                        idx: next,
+                        body,
+                        env,
+                    });
+                    return Ok(Step::Eval(expr, Some(env)));
+                }
+                Ok(self.enter_body(body, Some(env)))
+            }
             Frame::VecElem {
                 mut done,
                 items,
@@ -660,6 +833,9 @@ impl Vm {
             Value::Obj(r) => {
                 let Obj::Closure {
                     params,
+                    opt,
+                    named,
+                    keys,
                     rest,
                     body,
                     env,
@@ -675,25 +851,146 @@ impl Vm {
                     Some(n) => self.engine.interner.sym_name(n).to_string(),
                     None => "#<procedure>".to_string(),
                 };
-                if args.len() < params.len() || (rest.is_none() && args.len() > params.len()) {
-                    return Err(self.err(format!(
-                        "{who} expects {}{} argument{}, got {}",
-                        params.len(),
-                        if rest.is_some() { " or more" } else { "" },
-                        if params.len() == 1 { "" } else { "s" },
-                        args.len()
-                    )));
-                }
-                let mut slots: Vec<(SymId, Value)> = Vec::with_capacity(params.len() + 1);
-                for (i, &p) in params.iter().enumerate() {
+
+                // Plan §4's rule, in the form the cases actually require. A
+                // keyword begins the named section if
+                //
+                //   (a) it names a declared `&named` parameter, or
+                //   (b) `&keys` is declared -- declaring it *is* saying "I
+                //       take keyword arguments", or
+                //   (c) the procedure declares some `&named` parameter and
+                //       every positional slot is already filled.
+                //
+                // (a) and (b) apply while positionals are still open; (c) only
+                // after. That is what separates the two cases that matter:
+                // `(set-tone-map :aces)` declares no `&named` at all, so
+                // `:aces` is the value it looks like, while
+                // `(sphere :radiuss 2)` against `&named radius` has no
+                // positional slots left and so gets told its keyword is
+                // unknown -- which is the typo Janet accepts in silence.
+                let starts_named_while_filling = |v: Value| match v {
+                    Value::Keyword(k) => named.iter().any(|p| p.kw == k) || keys.is_some(),
+                    _ => false,
+                };
+                let starts_named_after_filling = |v: Value| match v {
+                    Value::Keyword(_) => !named.is_empty() || keys.is_some(),
+                    _ => false,
+                };
+
+                let mut slots: Vec<(SymId, Value)> =
+                    Vec::with_capacity(params.len() + opt.len() + named.len() + 2);
+                let mut todo: Vec<(SymId, Value)> = Vec::new();
+                let mut i = 0usize;
+
+                // Required positionals.
+                for &p in params.iter() {
+                    if i >= args.len() || starts_named_while_filling(args[i]) {
+                        return Err(self.err(format!(
+                            "{who} expects {} required argument{}, got {i}",
+                            params.len(),
+                            if params.len() == 1 { "" } else { "s" }
+                        )));
+                    }
                     slots.push((p, args[i]));
+                    i += 1;
+                }
+
+                // Optional positionals, in order.
+                for p in opt.iter() {
+                    if i < args.len() && !starts_named_while_filling(args[i]) {
+                        slots.push((p.name, args[i]));
+                        i += 1;
+                    } else {
+                        // Absent. A declared default is an expression and runs
+                        // later; otherwise the binding is `#f`, which keeps
+                        // Janet's falsy-nil ergonomics so an `(if material …)`
+                        // supplied-check translates directly.
+                        slots.push((p.name, Value::Bool(false)));
+                        if let Some(d) = p.default {
+                            todo.push((p.name, d));
+                        }
+                    }
+                }
+
+                // Leftover positionals go to a dotted rest, if there is one.
+                let mut rest_items: Vec<Value> = Vec::new();
+                while i < args.len() && !starts_named_after_filling(args[i]) {
+                    if rest.is_none() {
+                        return Err(self.err(format!(
+                            "{who} got {} argument{}, which is more than it takes",
+                            args.len(),
+                            if args.len() == 1 { "" } else { "s" }
+                        )));
+                    }
+                    rest_items.push(args[i]);
+                    i += 1;
                 }
                 if let Some(rest_sym) = rest {
-                    let tail = self.engine.list(&args[params.len()..]);
+                    let tail = self.engine.list(&rest_items);
                     slots.push((rest_sym, tail));
                 }
+
+                // The named section: keyword/value pairs to the end.
+                let mut supplied: Vec<(KwId, Value)> = Vec::new();
+                while i < args.len() {
+                    let Value::Keyword(k) = args[i] else {
+                        return Err(self.err(format!(
+                            "{who}: expected a keyword, got {}",
+                            write_str(&self.engine, args[i])
+                        )));
+                    };
+                    let known = named.iter().any(|p| p.kw == k);
+                    if !known && keys.is_none() {
+                        // Janet silently ignores an unknown named argument, so
+                        // a misspelled `:radiuss` does nothing and says
+                        // nothing. This is the cheapest place to catch it.
+                        let kw = self.engine.interner.kw_name(k).to_string();
+                        return Err(self.err(format!("{who}: unknown named argument :{kw}")));
+                    }
+                    if i + 1 >= args.len() {
+                        let kw = self.engine.interner.kw_name(k).to_string();
+                        return Err(self.err(format!("{who}: named argument :{kw} has no value")));
+                    }
+                    supplied.push((k, args[i + 1]));
+                    i += 2;
+                }
+
+                for p in named.iter() {
+                    match supplied.iter().rev().find(|(k, _)| *k == p.kw) {
+                        Some((_, v)) => slots.push((p.name, *v)),
+                        None => {
+                            slots.push((p.name, Value::Bool(false)));
+                            if let Some(d) = p.default {
+                                todo.push((p.name, d));
+                            }
+                        }
+                    }
+                }
+
+                // `&keys` gets every keyword argument, as an alist.
+                if let Some(keys_sym) = keys {
+                    let pairs: Vec<Value> = supplied
+                        .iter()
+                        .map(|(k, v)| self.engine.cons(Value::Keyword(*k), *v))
+                        .collect();
+                    let bag = self.engine.list(&pairs);
+                    slots.push((keys_sym, bag));
+                }
+
                 let new_env = self.engine.env(env, slots);
-                Ok(self.enter_body(body, Some(new_env)))
+                if todo.is_empty() {
+                    // The common case allocates and evaluates nothing extra.
+                    return Ok(self.enter_body(body, Some(new_env)));
+                }
+                let todo = Rc::new(todo);
+                let first = todo[0].1;
+                self.push(Frame::Defaults {
+                    todo,
+                    idx: 0,
+                    body,
+                    env: new_env,
+                });
+                Ok(Step::Eval(first, Some(new_env)))
             }
             other => Err(self.err(format!(
                 "not applicable: {}",

@@ -187,14 +187,17 @@ fn source_forms_held_across_an_evaluation_stay_rooted() {
              (define a (f 1))
              (define b (f 2))
              (define c (f 3))
-             (list? 0)
+             (no-such-procedure 0)
              (cons a (cons b c))",
         )
         .map(|v| write_str(&vm.engine, v));
     // `list?` is not defined yet, so this fails -- but it must fail with the
     // right error rather than crashing on a swept form.
-    let err = format!("{}", v.expect_err("list? is not a primitive yet"));
-    assert!(err.contains("unbound variable: list?"), "got {err}");
+    let err = format!("{}", v.expect_err("the name is deliberately undefined"));
+    assert!(
+        err.contains("unbound variable: no-such-procedure"),
+        "got {err}"
+    );
 
     let mut vm = stressed();
     let out = vm

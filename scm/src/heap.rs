@@ -21,6 +21,26 @@ use std::rc::Rc;
 
 use crate::value::{KwId, ObjRef, SymId, Value};
 
+/// An optional positional parameter. `default` is an *unevaluated expression*,
+/// evaluated at call time only when the argument is absent -- which is the
+/// whole point (plan §4): a body-side default cannot tell `:smooth #f` from an
+/// omitted `:smooth`, and would rewrite the former into the latter's default.
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub name: SymId,
+    pub default: Option<Value>,
+}
+
+/// A keyword parameter. The parameter's name *is* the keyword, so `kw` is
+/// interned alongside `name` at closure-creation time and matching a call site
+/// is a `KwId` comparison rather than a string compare.
+#[derive(Clone, Debug)]
+pub struct NamedParam {
+    pub name: SymId,
+    pub kw: KwId,
+    pub default: Option<Value>,
+}
+
 #[derive(Clone, Debug)]
 pub enum Obj {
     Pair(Value, Value),
@@ -51,7 +71,15 @@ pub enum Obj {
     /// closure 10^8 times and must not allocate to do it.
     Closure {
         name: Option<SymId>,
+        /// Required positionals.
         params: Rc<Vec<SymId>>,
+        /// `&opt`: optional positionals, filled in order.
+        opt: Rc<Vec<Param>>,
+        /// `&named`: keyword arguments, matched by name.
+        named: Rc<Vec<NamedParam>>,
+        /// `&keys`: every keyword argument, as an alist.
+        keys: Option<SymId>,
+        /// A dotted tail, collecting leftover *positional* arguments.
         rest: Option<SymId>,
         body: Rc<Vec<Value>>,
         env: Option<ObjRef>,
@@ -289,9 +317,20 @@ impl Engine {
                         }
                         work.extend(slots.iter().map(|(_, v)| *v));
                     }
-                    Obj::Closure { body, env, .. } => {
-                        // The body is *source*, and source is heap data too.
+                    Obj::Closure {
+                        body,
+                        env,
+                        opt,
+                        named,
+                        ..
+                    } => {
+                        // The body is *source*, and source is heap data too --
+                        // and so is every default expression, which is easy to
+                        // forget because it only runs when an argument is
+                        // missing.
                         work.extend(body.iter().copied());
+                        work.extend(opt.iter().filter_map(|p| p.default));
+                        work.extend(named.iter().filter_map(|p| p.default));
                         if let Some(p) = env {
                             work.push(Value::Obj(*p));
                         }
