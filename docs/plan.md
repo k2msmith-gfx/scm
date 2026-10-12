@@ -178,11 +178,16 @@ can actually call.
 **Resolution: the LLVM work is two different projects and the old plan
 conflated them.**
 
-- **The leaf compiler** — compile a *restricted* Scheme subset (f64 and vector
-  math, no allocation, no continuation capture, calls only pure registered
-  primitives) to a thread-safe native function pointer. Small, self-contained,
-  needs no GC integration, no deopt, no invalidation. **This is requirement
-  (13), it is the capability, and it belongs early.**
+- **The leaf compiler** — compile a *restricted pure* Scheme subset to a
+  thread-safe native function pointer. Small, self-contained, needs no GC
+  integration, no deopt, no invalidation. **This is requirement (13) and it
+  belongs early.** [leaf-survey.md](leaf-survey.md) measured what it is
+  actually for, and reordered the justification: `make-texture` speed first
+  (**15.22 s measured** in one real scene build, ~40 call sites, 150-200x
+  available), field *quality* second (it kills the three documented bake
+  artifacts), field thread-safety third and least load-bearing. Target
+  textures first — bigger win, easier target, and no semantic change at all
+  since a texture is already a bake.
 - **The general JIT tier** — compile arbitrary Scheme with assumption
   tracking, invalidation on redefinition, and VM fallback. Big, and by ray's
   own measurement worth little to ray. **Stays last, and may never be worth
@@ -335,15 +340,33 @@ must deliver is a compiled function that is:
 - **VM-free** — no interpreter state, no thread-local reachable from it;
 - **re-entrant and `Send`/`Sync`** — N rayon workers call it concurrently;
 - **allocation-free**, or arena-per-call with no shared heap;
-- **restricted by construction** — it may call only *pure registered
-  primitives*, and the compiler rejects anything else at compile time with a
-  message naming what it cannot do.
+- **restricted by construction** — *pure*: no scene queries, no store access,
+  no I/O, no mutation outliving the call. The compiler rejects anything else at
+  the point of definition, with a message naming which call did it.
 
-That last point is what dissolves the collision rather than solving it: a leaf
-function that calls `(noise x y z)` is pure and compiles; one that queries the
-scene is rejected, loudly, at the point of definition. The thread-local store
-is then never reached from a render thread, because the subset cannot express
-reaching it.
+That last point dissolves the collision rather than solving it: a pure leaf
+function compiles; one that queries the scene is rejected loudly. The
+thread-local store is never reached from a render thread because the subset
+cannot express reaching it.
+
+**The restriction is "pure", NOT "primitives-only"** —
+[leaf-survey.md](leaf-survey.md) §4 found that a primitives-only compiler
+would reject *every texture in ray's corpus*, because `fbm`, `vnoise`,
+`hash2`, `fade` and `mix` are authored Janet, not Rust verbs. Five things the
+subset must therefore carry, all of them still pure:
+
+1. **Transitive compilation** over authored pure functions, reporting which
+   call made a function uncompilable.
+2. **Captured immutable data** as a read-only snapshot — the precomputed
+   lookup tables (`heights`, `draws`, `ofx/ofy/ofh`) are built during the scene
+   build and never written afterwards.
+3. Local mutation, bounded loops, conditionals — ordinary SSA work.
+4. **Monomorphised higher-order calls** — `map` over a literal 3-list with an
+   inline `fn` must inline, not allocate.
+5. **A no-heap return convention** for small float vectors; one allocation per
+   texel at 4.2M texels is exactly the cost being deleted.
+
+(1) and (2) need design; the rest is ordinary codegen.
 
 **What this does not cover,** and it should be settled in S0 rather than
 discovered: a field that genuinely wants scene data — a texture sampling a
@@ -500,11 +523,12 @@ unexplained remainder is a marketing number.
    being an asset and becomes 219 files of friction. *Mitigation: §4 option 1
    preserves the existing spelling exactly; decide in S0 and write a sample
    scene by hand before committing.*
-3. **The leaf compiler's subset may be too small to be interesting.** If
-   authors' real fields want scene data, texture lookups or state, the
-   "pure primitives only" restriction (§6) is a capability nobody can use.
-   *Mitigation: survey the fields people have actually written — including
-   the implicit-surface examples already in ray — in S0.*
+3. **The leaf compiler's subset may be too small to be interesting.**
+   *Resolved, conditionally, by [leaf-survey.md](leaf-survey.md): the subset is
+   big enough if it covers §6's five items. Shipped as primitives-only it
+   covers one six-line field and nothing else. Nothing in the corpus wants
+   scene data from a leaf function, so the purity restriction itself costs
+   nothing.*
 4. **LLVM as a dependency.** `llvm-sys` is at 231 while S0 validated 211, one
    feature flag per LLVM version, `llvm-config` discovery, a multi-GB
    toolchain. *Mitigation: flake pin; LLVM off by default; the two-sided CI
@@ -551,18 +575,23 @@ unexplained remainder is a marketing number.
 half has run and passed on aarch64-darwin. The four §3 conflicts are resolved
 above.
 
-Still open, all of them S0's business:
+**Answered by [leaf-survey.md](leaf-survey.md):** (13) is reachable — nothing
+in the corpus wants scene data from a leaf function — but the subset must be
+"pure", not "primitives-only" (§6). And the Rust-authored field DSL that was
+offered as an alternative **already exists**: `field-code` flattens a composed
+field to a postfix program the tracer evaluates, and it covers all 16
+`add-implicit` call sites. The leaf compiler's field story is a second backend
+for an IR that exists, plus the ability to take authored functions into it.
+Its *texture* story is the one with a measured number behind it.
 
-1. **Is requirement (13) reachable for the fields people actually write?**
-   §6 dissolves the thread-locality collision only for *pure* leaf functions.
-   If real authored fields want scene data, the answer changes and ray's §8
-   trigger fires — "the capability justification goes and only the strategic
-   ones remain". Survey the existing implicit-surface and `make-texture`
-   examples before deciding.
-2. **Could a Rust-authored field DSL deliver (13) instead?** ray's §1 raises
-   this against its own plan and it deserves an honest answer, because it is
-   the cheapest version of the only capability on the list.
-3. **Does scm aim at eventual full R7RS-small conformance,** or is ray's
+Still open:
+
+1. **Should ray's §1 be corrected?** "Not for making scripting faster" was
+   measured on scene loading and is right there. `make-texture` is an
+   interpreter-bound hot loop at **4,112 ns/texel**, and fruit-bowl's build is
+   **15.22 s** of it. That is now the strongest single number in favour of the
+   project, and ray's plan currently argues against it.
+2. **Does scm aim at eventual full R7RS-small conformance,** or is ray's
    dialect the destination? §3.1 is designed so this need not be answered now
    — multi-shot `call/cc` stays reachable rather than forfeited — but it
    decides whether requirement (5), running standalone, means "a Scheme" or
