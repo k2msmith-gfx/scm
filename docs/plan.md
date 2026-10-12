@@ -286,7 +286,8 @@ plans' orderings into something that serves neither.
 may genuinely be enough, since a scene build allocates and then ends. The
 language plan specified non-moving mark-sweep.
 
-**Resolution: both, and the collector is not optional.** The arena argument
+**Resolution: the collector is not optional, and the arena is not needed.**
+The arena argument
 holds for `--batch` and for a scene build. It fails for the two things
 requirements (7) and (14) commit us to: a modeler session that runs for hours,
 and a REPL where the user redefines things all afternoon. An arena that is
@@ -641,7 +642,8 @@ must deliver is a compiled function that is:
 
 - **VM-free** — no interpreter state, no thread-local reachable from it;
 - **re-entrant and `Send`/`Sync`** — N rayon workers call it concurrently;
-- **allocation-free**, or arena-per-call with no shared heap;
+- **allocation-free** — which is also what lets the collector stay
+  single-threaded (§3.3);
 - **restricted by construction** — *pure*: no scene queries, no store access,
   no I/O, no mutation outliving the call. The compiler rejects anything else at
   the point of definition, with a message naming which call did it.
@@ -750,7 +752,7 @@ language-side and unsized in ray's plan; their numbers are estimates.
 | **S0** | **The decisions.** §4's calling convention, §3.1's subset, §3.3's GC, §6's reachability. No code. The LLVM spike is banked evidence (§2.1). | 0.2 | this document, amended; x86-64 Linux half of the spike run |
 | **S1** | Reader, printer, round trip. Datum syntax, `#(…)`, `[x y z]`, the keyword datatype, comment-depth convention (`Line::Banner`), **incomplete-vs-invalid** reporting. | 0.4 | every saved corpus scene printed through `Form::to_scheme()` reads back to an equal datum; a truncated datum reports *incomplete* |
 | **S2** | T0 interpreter: explicit stack, closures, proper tail calls, safepoints. Deliberately before any compiler — it settles semantics cheaply and becomes the oracle. | 0.6 | a 10^8-iteration tail loop is flat in memory (measured); `C-c` interrupts it |
-| **S3** ◇ | GC: mark-sweep, roots = explicit stack + handle table, arena fast path. | 0.4 | cyclic structure collected; stress test under a shrunk heap; no leak under `set!` cycles |
+| **S3** ◇ | GC per §3.3: precise non-moving single-threaded mark-sweep, roots = explicit stack + handle table + global cells, safepoint-driven, heap cap, finalizers. | 0.4 | cyclic structure collected; stress test under a shrunk heap; no leak under `set!` cycles |
 | **S4** | **The verb bridge.** `#[verb]`'s shim generator emits Scheme as it emits Janet. Keywords, `&opt`, `&named`, error strings verbatim. | 0.5 | `pyray/tests/conformance.py`-shaped pass through a real host call; `api/scheme/api.md` generated and byte-compared |
 | **S5** | `syntax-rules`, the library system, `(scheme base)`, the §1(12) macro set, dynamic variables. | 0.6 ◇ | each surviving ray macro demonstrated; the conformance number reported for the first time |
 | **S6** | **The corpus migrates.** ray's §4 script: load with Janet, save through `Form::to_scheme()`. | 0.3 | 191 renderable scenes render identically — compare scene *files*, not image bytes (renders are nondeterministic) |
