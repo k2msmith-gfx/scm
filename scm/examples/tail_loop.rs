@@ -1,16 +1,18 @@
-//! S2's exit criterion at the size the plan names: a 10^8-iteration tail loop.
+//! S2 and S3's shared exit criterion, at the size the plan names: a
+//! 10^8-iteration tail loop, flat in memory.
 //!
-//! The result splits in two, and only one half is S2's to deliver:
+//! It took both stages, and it is worth keeping the two apart:
 //!
-//!   * **The control stack is flat** -- depth 2 at every trip count from 1 to
-//!     10^8. That is what proper tail calls *are*, and it is what S2 owed.
-//!   * **Memory is not flat.** Peak RSS at 10^8 is ~8.9 GB, because every
-//!     iteration allocates an environment and there is no collector until S3.
+//!   * **S2 made the control stack flat** -- depth 2 at every trip count from
+//!     1 to 10^8. That is what proper tail calls *are*.
+//!   * **S3 made memory flat.** Before the collector, this run peaked at
+//!     **8.9 GB** of resident memory and 100,000,021 live objects, because
+//!     every iteration allocated an environment that nothing ever reclaimed.
+//!     After it: **2.65 MB** and a few hundred objects.
 //!
-//! So the plan's phrase "flat in memory" needs S3 before it is true. Worth
-//! being exact about rather than claiming the criterion on the stack number
-//! alone -- a tail loop in a finished Scheme is flat in memory *because the
-//! collector reclaims the dead environments*, not because the stack is flat.
+//! A tail loop in a finished Scheme is flat in memory *because the collector
+//! reclaims the dead environments*, not because the stack is flat. Both halves
+//! were needed and only together do they add up to the plan's phrase.
 //!
 //!     cargo run --release --example tail_loop
 //!
@@ -61,12 +63,14 @@ fn main() {
     // live. That is the measurement that should change at S3, and nothing
     // about it is a tail-call problem.
     println!();
-    println!("Heap objects grow 1:1 with the trip count: there is no collector");
-    println!("until S3, so every iteration's environment is still live. Peak");
-    println!("RSS at 10^8 is ~8.9 GB. The plan's \"flat in memory\" needs S3;");
-    println!("what S2 owed, and delivered, is the flat control stack above.");
+    println!("Live objects stay in the hundreds at every trip count: each");
+    println!("iteration's environment dies when the next one replaces it, and");
+    println!("the collector reclaims the slot. Before S3 this column read");
+    println!("100,000,021 at the bottom row and the run peaked at 8.9 GB;");
+    println!("measured after, peak RSS is 2.65 MB.");
     println!();
-    println!("A later option worth measuring, not assuming: reusing the frame");
-    println!("for a self-tail-call would make the loop allocate nothing at all,");
-    println!("but a collector is the honest fix and comes first.");
+    println!("The collector costs about 4% of wall clock here (33.6s -> 35.0s),");
+    println!("which is the honest price of not leaking 8.9 GB. Reusing the frame");
+    println!("for a self-tail-call would let the loop allocate nothing at all --");
+    println!("worth measuring later, not assuming now.");
 }

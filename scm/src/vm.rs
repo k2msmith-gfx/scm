@@ -34,6 +34,9 @@ pub enum VmError {
     /// the feature (requirement 8).
     Interrupted,
     OutOfFuel,
+    /// The host's heap cap was exceeded. An ordinary error at a safepoint, so
+    /// a runaway scene is a failed evaluation and not a dead modeler.
+    OutOfMemory,
     Error(String),
 }
 
@@ -42,6 +45,7 @@ impl std::fmt::Display for VmError {
         match self {
             VmError::Interrupted => write!(f, "interrupted"),
             VmError::OutOfFuel => write!(f, "out of fuel"),
+            VmError::OutOfMemory => write!(f, "heap cap exceeded"),
             VmError::Error(m) => write!(f, "{m}"),
         }
     }
@@ -100,9 +104,61 @@ enum Frame {
     },
 }
 
+impl Frame {
+    /// Every `Value` and environment this frame keeps alive. Missing one here
+    /// is the classic collector bug: it does not fail at the next collection,
+    /// it fails later when the slot has been reused for something else. The
+    /// stress mode exists to turn "later" into "immediately".
+    fn trace(&self, out: &mut Vec<Value>) {
+        let env = match self {
+            Frame::If { then_e, else_e, env } => {
+                out.push(*then_e);
+                out.extend(else_e.iter().copied());
+                env
+            }
+            Frame::Seq { body, env, .. } => {
+                out.extend(body.iter().copied());
+                env
+            }
+            Frame::Operator { args, env } => {
+                out.extend(args.iter().copied());
+                env
+            }
+            Frame::Operand { done, args, env, .. } => {
+                out.extend(done.iter().copied());
+                out.extend(args.iter().copied());
+                env
+            }
+            Frame::Assign { env, .. } => env,
+            Frame::VecElem { done, items, env, .. } => {
+                out.extend(done.iter().copied());
+                out.extend(items.iter().copied());
+                env
+            }
+        };
+        if let Some(r) = env {
+            out.push(Value::Obj(*r));
+        }
+    }
+}
+
 enum Step {
     Eval(Value, Option<ObjRef>),
     Return(Value),
+}
+
+impl Step {
+    fn trace(&self, out: &mut Vec<Value>) {
+        match self {
+            Step::Eval(v, env) => {
+                out.push(*v);
+                if let Some(r) = env {
+                    out.push(Value::Obj(*r));
+                }
+            }
+            Step::Return(v) => out.push(*v),
+        }
+    }
 }
 
 pub struct Vm {
@@ -200,11 +256,26 @@ impl Vm {
     pub fn eval_str(&mut self, src: &str) -> VResult<Value> {
         let forms = crate::reader::Reader::read_all(src, &mut self.engine)
             .map_err(|e| VmError::Error(format!("read error: {e}")))?;
+        // The forms not yet evaluated live in a Rust local, which the
+        // collector cannot see -- so they are rooted for the duration. This is
+        // the first real customer for the handle table, and the exact bug the
+        // embedding API (S7) exists to make unavailable to the host.
+        let handles: Vec<_> = forms.iter().map(|&f| self.engine.root(f)).collect();
         let mut last = Value::Unspecified;
-        for form in forms {
-            last = self.eval(form)?;
+        let mut result = Ok(());
+        for &form in &forms {
+            match self.eval(form) {
+                Ok(v) => last = v,
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
         }
-        Ok(last)
+        for h in handles {
+            self.engine.unroot(h);
+        }
+        result.map(|()| last)
     }
 
     pub fn eval(&mut self, expr: Value) -> VResult<Value> {
@@ -217,7 +288,7 @@ impl Vm {
             ticks += 1;
             if ticks >= 1024 {
                 ticks = 0;
-                self.safepoint()?;
+                self.safepoint(&step)?;
             }
 
             step = match step {
@@ -233,7 +304,12 @@ impl Vm {
         }
     }
 
-    fn safepoint(&mut self) -> VResult<()> {
+    /// The one place the VM can be stopped, and therefore the one place it can
+    /// be collected. `step` is handed in because the computation in flight is
+    /// a root that lives in a Rust local and nothing else can see it -- the
+    /// subtlest rooting bug available here, so it is passed explicitly rather
+    /// than remembered.
+    fn safepoint(&mut self, step: &Step) -> VResult<()> {
         if self.interrupt.load(Ordering::Relaxed) {
             self.interrupt.store(false, Ordering::Relaxed);
             return Err(VmError::Interrupted);
@@ -244,7 +320,36 @@ impl Vm {
             }
             *fuel = fuel.saturating_sub(1);
         }
+        if self.engine.should_collect() {
+            self.collect(step);
+        }
+        if self.engine.over_heap_cap() {
+            return Err(VmError::OutOfMemory);
+        }
         Ok(())
+    }
+
+    /// Gather the roots and collect. The root set is exactly plan §3.3's: the
+    /// explicit control stack, the global cells, the handle table (inside
+    /// `Engine::collect`), and the step in flight.
+    fn collect(&mut self, step: &Step) {
+        let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() * 2 + 8);
+        step.trace(&mut roots);
+        for frame in &self.stack {
+            frame.trace(&mut roots);
+        }
+        roots.extend(self.globals.iter().flatten().copied());
+        self.engine.collect(&roots);
+    }
+
+    /// Collect now, for tests and for a host that wants to.
+    pub fn collect_now(&mut self) -> crate::heap::GcStats {
+        let mut roots: Vec<Value> = Vec::new();
+        for frame in &self.stack {
+            frame.trace(&mut roots);
+        }
+        roots.extend(self.globals.iter().flatten().copied());
+        self.engine.collect(&roots)
     }
 
     fn push(&mut self, frame: Frame) {

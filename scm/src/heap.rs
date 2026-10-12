@@ -1,8 +1,20 @@
-//! Heap objects, and the interner.
+//! Heap objects, the interner, and the collector.
 //!
-//! There is no collector yet -- that is S3. What matters now is that the shape
-//! is the one a collector can be dropped into: every object lives in one place
-//! the sweep can walk, and nothing outside holds a raw pointer to it.
+//! Per plan §3.3: **precise, non-moving, single-threaded mark-sweep**, and
+//! three of those four are consequences of earlier decisions rather than fresh
+//! choices.
+//!
+//!   * *Precise*, because the VM's explicit stack already is the root set
+//!     (§5). No conservative scanning of C frames, no LLVM statepoints.
+//!   * *Non-moving*, so an `ObjRef` stays valid forever. A freed slot is
+//!     reused but never relocated, which is what lets the embedder hold a
+//!     value without an indirection layer.
+//!   * *Single-threaded*, which is **free**: §6 restricts compiled leaf
+//!     functions to pure allocation-free code, so nothing on a rayon worker
+//!     ever touches this heap. No locks, no barriers, no cross-thread
+//!     stop-the-world.
+//!
+//! The roots live in the `Vm`, so it gathers them and calls [`Engine::collect`].
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -34,9 +46,9 @@ pub enum Obj {
         parent: Option<ObjRef>,
         slots: Vec<(SymId, Value)>,
     },
-    /// `params`, `body` and the rest are behind `Rc` so that applying a
-    /// closure clones two pointers instead of two vectors -- a tail loop
-    /// applies the same closure 10^8 times and must not allocate to do it.
+    /// `params` and `body` are behind `Rc` so that applying a closure clones
+    /// two pointers instead of two vectors -- a tail loop applies the same
+    /// closure 10^8 times and must not allocate to do it.
     Closure {
         name: Option<SymId>,
         params: Rc<Vec<SymId>>,
@@ -44,6 +56,14 @@ pub enum Obj {
         body: Rc<Vec<Value>>,
         env: Option<ObjRef>,
     },
+}
+
+/// A heap slot. Freed slots form a list through `next`, so allocation is a pop
+/// and nothing is ever relocated.
+#[derive(Debug)]
+enum Slot {
+    Free { next: Option<u32> },
+    Used(Obj),
 }
 
 /// Symbols and keywords, interned separately because they are different types.
@@ -91,40 +111,248 @@ impl Interner {
     }
 }
 
-/// Everything a running Scheme owns. It will grow a great deal; for S1 it is
-/// the heap and the interner.
-#[derive(Default, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GcStats {
+    pub live: usize,
+    pub freed: usize,
+    pub collections: u64,
+}
+
+/// A rooted value. While the handle is held, the value is a root.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Handle(usize);
+
+/// Everything a running Scheme owns below the control stack.
+#[derive(Debug)]
 pub struct Engine {
-    objs: Vec<Obj>,
+    slots: Vec<Slot>,
+    marks: Vec<bool>,
+    free_head: Option<u32>,
+    used: usize,
+    /// Collect when `used` reaches this; recomputed from the live set after
+    /// every collection.
+    threshold: usize,
+    /// A floor, so a small program never collects at all.
+    min_heap: usize,
+    /// The host's limit (plan §3.3). Exceeding it is an ordinary Scheme error
+    /// at a safepoint, never an abort.
+    heap_cap: Option<usize>,
+    /// Collect at every safepoint. This is how collector bugs stop being
+    /// nondeterministic, and it is an S3 exit criterion rather than a debug
+    /// nicety.
+    stress: bool,
+    collections: u64,
+    /// Values rooted from outside the VM -- the host's, and the VM's own
+    /// source forms while it holds them across an evaluation.
+    handles: Vec<Option<Value>>,
     pub interner: Interner,
-    /// Names only, parallel to the VM's table of function pointers. §4.5 wants
-    /// a primitive identified by index *so that an error message can name it*,
-    /// and the writer needs the same thing.
     prim_names: Vec<String>,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Engine {
     pub fn new() -> Self {
-        Self::default()
+        Engine {
+            slots: Vec::new(),
+            marks: Vec::new(),
+            free_head: None,
+            used: 0,
+            threshold: 4096,
+            min_heap: 4096,
+            heap_cap: None,
+            stress: false,
+            collections: 0,
+            handles: Vec::new(),
+            interner: Interner::default(),
+            prim_names: Vec::new(),
+        }
     }
 
+    // ---- allocation -----------------------------------------------------
+
     pub fn alloc(&mut self, obj: Obj) -> Value {
-        let r = ObjRef(self.objs.len() as u32);
-        self.objs.push(obj);
-        Value::Obj(r)
+        self.used += 1;
+        match self.free_head {
+            Some(i) => {
+                let next = match &self.slots[i as usize] {
+                    Slot::Free { next } => *next,
+                    Slot::Used(_) => unreachable!("the free list points at a used slot"),
+                };
+                self.free_head = next;
+                self.slots[i as usize] = Slot::Used(obj);
+                Value::Obj(ObjRef(i))
+            }
+            None => {
+                let i = self.slots.len() as u32;
+                self.slots.push(Slot::Used(obj));
+                self.marks.push(false);
+                Value::Obj(ObjRef(i))
+            }
+        }
     }
 
     pub fn obj(&self, r: ObjRef) -> &Obj {
-        &self.objs[r.0 as usize]
+        match &self.slots[r.0 as usize] {
+            Slot::Used(o) => o,
+            Slot::Free { .. } => panic!("dangling ObjRef {}: that slot is free", r.0),
+        }
     }
 
     pub fn obj_mut(&mut self, r: ObjRef) -> &mut Obj {
-        &mut self.objs[r.0 as usize]
+        match &mut self.slots[r.0 as usize] {
+            Slot::Used(o) => o,
+            Slot::Free { .. } => panic!("dangling ObjRef {}: that slot is free", r.0),
+        }
     }
 
+    /// Live objects.
     pub fn obj_count(&self) -> usize {
-        self.objs.len()
+        self.used
     }
+
+    /// Slots ever allocated, live or free: the heap's high-water mark.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    // ---- the collector --------------------------------------------------
+
+    pub fn set_heap_cap(&mut self, cap: Option<usize>) {
+        self.heap_cap = cap;
+    }
+
+    pub fn set_gc_stress(&mut self, on: bool) {
+        self.stress = on;
+    }
+
+    /// Set the floor, and take effect immediately. A caller asking for a
+    /// smaller heap means *now*, so this lowers the live threshold as well as
+    /// the floor -- raising it only would make `set_min_heap(1024)` on a fresh
+    /// engine do nothing at all, since the threshold already starts at 4096.
+    pub fn set_min_heap(&mut self, n: usize) {
+        self.min_heap = n;
+        self.threshold = n;
+    }
+
+    pub fn should_collect(&self) -> bool {
+        self.stress || self.used >= self.threshold
+    }
+
+    pub fn over_heap_cap(&self) -> bool {
+        self.heap_cap.is_some_and(|cap| self.used > cap)
+    }
+
+    pub fn collections(&self) -> u64 {
+        self.collections
+    }
+
+    /// Mark from `roots`, then sweep.
+    ///
+    /// The mark phase uses an explicit worklist. A recursive marker would
+    /// overflow the C stack on a long list -- the same trap the interpreter
+    /// avoids by not recursing (§5), with the same requirement-8 consequence:
+    /// the host must survive whatever the script allocated.
+    pub fn collect(&mut self, roots: &[Value]) -> GcStats {
+        self.marks.clear();
+        self.marks.resize(self.slots.len(), false);
+
+        let mut work: Vec<Value> = Vec::with_capacity(roots.len() + self.handles.len());
+        work.extend_from_slice(roots);
+        work.extend(self.handles.iter().flatten().copied());
+
+        while let Some(v) = work.pop() {
+            let Value::Obj(r) = v else { continue };
+            let i = r.0 as usize;
+            if self.marks[i] {
+                continue;
+            }
+            self.marks[i] = true;
+            match &self.slots[i] {
+                // A root pointing at a free slot is a rooting bug, and it is
+                // far better to hear about it here than to watch a reused slot
+                // be mistaken for the object that used to be there.
+                Slot::Free { .. } => panic!("gc: a root points at free slot {i}"),
+                Slot::Used(obj) => match obj {
+                    Obj::Pair(a, d) => {
+                        work.push(*a);
+                        work.push(*d);
+                    }
+                    Obj::Vector { items, .. } => work.extend(items.iter().copied()),
+                    Obj::Env { parent, slots } => {
+                        if let Some(p) = parent {
+                            work.push(Value::Obj(*p));
+                        }
+                        work.extend(slots.iter().map(|(_, v)| *v));
+                    }
+                    Obj::Closure { body, env, .. } => {
+                        // The body is *source*, and source is heap data too.
+                        work.extend(body.iter().copied());
+                        if let Some(p) = env {
+                            work.push(Value::Obj(*p));
+                        }
+                    }
+                    Obj::Str(_) | Obj::Bytevector(_) => {}
+                },
+            }
+        }
+
+        // Sweep. Overwriting a slot drops its `Obj`, which runs the `Drop` of
+        // anything Rust-owned inside -- so a foreign object's resources are
+        // released without a separate finalizer mechanism. A *Scheme-visible*
+        // finalizer is absent because nothing needs one yet.
+        let mut freed = 0;
+        for i in 0..self.slots.len() {
+            if self.marks[i] || matches!(self.slots[i], Slot::Free { .. }) {
+                continue;
+            }
+            self.slots[i] = Slot::Free {
+                next: self.free_head,
+            };
+            self.free_head = Some(i as u32);
+            freed += 1;
+        }
+        self.used -= freed;
+        self.collections += 1;
+        self.threshold = self.min_heap.max(self.used.saturating_mul(2));
+        GcStats {
+            live: self.used,
+            freed,
+            collections: self.collections,
+        }
+    }
+
+    // ---- handles --------------------------------------------------------
+
+    /// Root a value. It stays live until [`Engine::unroot`]. This is what the
+    /// embedding API (S7) gets built out of, and what the VM uses for source
+    /// forms it holds across an evaluation.
+    pub fn root(&mut self, v: Value) -> Handle {
+        if let Some(i) = self.handles.iter().position(|h| h.is_none()) {
+            self.handles[i] = Some(v);
+            return Handle(i);
+        }
+        self.handles.push(Some(v));
+        Handle(self.handles.len() - 1)
+    }
+
+    pub fn unroot(&mut self, h: Handle) {
+        self.handles[h.0] = None;
+    }
+
+    pub fn handle_value(&self, h: Handle) -> Option<Value> {
+        self.handles[h.0]
+    }
+
+    pub fn rooted_count(&self) -> usize {
+        self.handles.iter().flatten().count()
+    }
+
+    // ---- primitives -----------------------------------------------------
 
     pub fn register_prim_name(&mut self, name: &str) -> u32 {
         self.prim_names.push(name.to_string());
@@ -135,7 +363,7 @@ impl Engine {
         &self.prim_names[id.0 as usize]
     }
 
-    // ---- constructors used by the reader and by tests -------------------
+    // ---- constructors ---------------------------------------------------
 
     pub fn cons(&mut self, car: Value, cdr: Value) -> Value {
         self.alloc(Obj::Pair(car, cdr))
@@ -182,26 +410,53 @@ impl Engine {
     /// Deliberately ignores how a vector was written: `[1 2 3]` and `#(1 2 3)`
     /// contain the same elements and so are `equal?`, even though they do not
     /// evaluate the same way.
+    ///
+    /// Iterative, with its own worklist. A 200k-element list is ordinary, and
+    /// recursing down one would overflow the C stack.
     pub fn equal(&self, a: Value, b: Value) -> bool {
-        match (a, b) {
-            (Value::Obj(ra), Value::Obj(rb)) => match (self.obj(ra), self.obj(rb)) {
-                (Obj::Pair(a1, d1), Obj::Pair(a2, d2)) => {
-                    self.equal(*a1, *a2) && self.equal(*d1, *d2)
+        let mut work = vec![(a, b)];
+        while let Some((a, b)) = work.pop() {
+            match (a, b) {
+                (Value::Obj(ra), Value::Obj(rb)) => {
+                    if ra == rb {
+                        continue;
+                    }
+                    match (self.obj(ra), self.obj(rb)) {
+                        (Obj::Pair(a1, d1), Obj::Pair(a2, d2)) => {
+                            work.push((*d1, *d2));
+                            work.push((*a1, *a2));
+                        }
+                        (Obj::Str(s1), Obj::Str(s2)) => {
+                            if s1 != s2 {
+                                return false;
+                            }
+                        }
+                        (Obj::Vector { items: i1, .. }, Obj::Vector { items: i2, .. }) => {
+                            if i1.len() != i2.len() {
+                                return false;
+                            }
+                            work.extend(i1.iter().copied().zip(i2.iter().copied()));
+                        }
+                        (Obj::Bytevector(b1), Obj::Bytevector(b2)) => {
+                            if b1 != b2 {
+                                return false;
+                            }
+                        }
+                        // Environments and closures compare by identity, and
+                        // `ra == rb` above already settled that.
+                        _ => return false,
+                    }
                 }
-                (Obj::Str(s1), Obj::Str(s2)) => s1 == s2,
-                (Obj::Vector { items: i1, .. }, Obj::Vector { items: i2, .. }) => {
-                    i1.len() == i2.len()
-                        && i1.iter().zip(i2.iter()).all(|(&x, &y)| self.equal(x, y))
+                // Flonums compare by value, so NaN is not `equal?` to itself.
+                // Close enough to `eqv?` on inexact numbers for now; `equal?`
+                // gets its real specification at S9.
+                _ => {
+                    if a != b {
+                        return false;
+                    }
                 }
-                (Obj::Bytevector(b1), Obj::Bytevector(b2)) => b1 == b2,
-                // Environments and closures are compared by identity, which
-                // `a == b` below already did.
-                _ => false,
-            },
-            // Flonums compare by value, so NaN is not `equal?` to itself.
-            // That matches `eqv?` on inexact numbers closely enough for S1;
-            // revisit when `equal?` gets its real specification at S9.
-            _ => a == b,
+            }
         }
+        true
     }
 }
