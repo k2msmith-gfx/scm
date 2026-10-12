@@ -14,7 +14,7 @@ llvm-sys 211.1.1, LLVM **21.1.8** from
 |---|---|
 | inkwell builds and verifies IR | **pass** |
 | JIT'd `fn(i64)->i64` returns the right answer, aarch64-darwin | **pass** — ORCv2/LLJIT and legacy MCJIT both |
-| …on x86-64-linux | **not verified** — see below |
+| …on x86-64-linux | **not verified — and deliberately deferred**, see below |
 | default `cargo build` works with no LLVM present | **pass** |
 
 ```
@@ -78,16 +78,22 @@ out to be a sinkhole, which lowers risk #1 slightly.
 
 ## Still open from S0
 
-- **x86-64 Linux is unverified.** This machine has no container runtime, VM or
-  configured Linux host, so it could not be tested. One command on the NixOS
-  box closes it:
+- **x86-64 Linux is unverified, and as of 2026-10-12 that is a decision
+  rather than a gap** — development targets aarch64 macOS first and catches
+  Linux up later (plan §2.5). This machine has no container runtime, VM or
+  configured Linux host, so it could not be tested here anyway. One command on
+  the NixOS box closes it whenever that is wanted:
 
       LLVM=$(nix build --no-link --print-out-paths 'nixpkgs#llvmPackages_21.llvm.dev')
       cd spikes/s0-llvm && PATH="$LLVM/bin:$PATH" LLVM_SYS_211_PREFIX="$LLVM" cargo run --release
 
   Expected output is the block above, with `host: x86_64 / linux`. The risk is
-  low — x86-64 is LLVM's best-supported JIT target and has no W^X complication
-  — but "low risk" is not "verified", and S0 does not close until it is.
+  low — x86-64 is LLVM's best-supported JIT target and has no W^X
+  complication, so the *hard* platform is the one already verified. The one
+  thing that cannot be settled on a single platform is the leaf compiler's
+  small-vector return convention, which AAPCS64 and SysV x86-64 classify by
+  different rules; plan §2.5 says to keep that behind a target hook from the
+  first commit rather than discover it later.
 
 - **LLVM version churn is real and faster than assumed.** Cargo volunteered
   that `llvm-sys` is already published at **231.0.1** (LLVM 23) while this

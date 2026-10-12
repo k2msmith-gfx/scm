@@ -4,7 +4,9 @@ An R7RS-small Scheme in Rust: embeddable as a crate, runnable standalone, with
 an LLVM-backed JIT and native AOT compilation on x86-64 Linux and aarch64
 macOS — and ray's scripting language.
 
-**Status: planning**, S0 partly banked. The plan is in
+**Status: planning**, S0 closed on aarch64 macOS. Development targets
+**aarch64 macOS first**; x86-64 Linux is sequenced later, not dropped
+(plan §2.5). The plan is in
 [docs/plan.md](docs/plan.md); the LLVM feasibility results are in
 [docs/s0-findings.md](docs/s0-findings.md).
 

@@ -29,7 +29,9 @@ code wins.*
 
 1. Support R7RS-small — see §3.1, which qualifies this.
 2. Easy embedding in a Rust application, as a crate.
-3. Native compilation on x86-64 Linux and aarch64 macOS.
+3. Native compilation on x86-64 Linux and aarch64 macOS. **Decided
+   2026-10-12: aarch64 macOS first, x86-64 Linux caught up later** — see §2.5.
+   Linux stays a requirement, not a non-goal; it is sequenced, not dropped.
 4. Leverage LLVM — `inkwell` as the interface for IR.
 5. Run standalone.
 6. Support JIT compilation.
@@ -85,8 +87,8 @@ ORCv1 C API. The modern LLJIT bindings are in `llvm-sys`'s `orc2` module.
 MCJIT and ORCv2/LLJIT compiled and ran it, and a second module added
 afterwards resolved while the first stayed callable. Warm-up is sub-millisecond
 per function. Full results and six API gotchas in
-[s0-findings.md](s0-findings.md). **x86-64 Linux is still unverified** — one
-command on the NixOS box closes it, and S0 does not close until it does.
+[s0-findings.md](s0-findings.md). x86-64 Linux is unverified, and by the
+decision in §2.5 that no longer holds S0 open.
 
 ### 2.2 The toolchain is pinnable
 
@@ -124,6 +126,41 @@ ray's plan says "the calling convention changes for **146 of 218** verbs".
 That is 67 + 79, and 59 verbs have both, so the union is **87**. The
 conclusion is unchanged and the decision is the same — but it is 40% of the
 API, not 67%.
+
+### 2.5 One platform first: aarch64 macOS
+
+**Decided 2026-10-12.** Development targets aarch64 macOS only; x86-64 Linux
+is caught up later. It stays requirement (3), sequenced rather than dropped.
+
+This is the cheap direction to defer, for a specific reason: **the hard
+platform is the one we have.** S0 found the only platform-specific hazard on
+the macOS side — W^X on Apple Silicon, `MAP_JIT`, and the hardened-runtime
+`com.apple.security.cs.allow-jit` entitlement. x86-64 is LLVM's best-supported
+JIT target and has no equivalent complication, so deferring it defers the
+easier half.
+
+Three things it does genuinely risk, worth writing down now rather than
+meeting them in month five:
+
+1. **The small-vector return convention is ABI-specific.** §6's item (5) wants
+   a 3×`f64` returned in registers with no heap traffic. AAPCS64 does that as
+   a homogeneous float aggregate; SysV x86-64 classifies the same struct by a
+   different rule. The *design* is portable, the *lowering* is not, and it is
+   the one leaf-compiler decision that cannot be validated on one platform.
+   Keep the convention behind a target hook from the first commit of
+   `scm-llvm`, even while only one arm of it exists.
+2. **`llvm-config` discovery and the flake differ per platform**, and NixOS is
+   where ray already hit a startup crash over GUI libs. Expect the Linux arm
+   of the flake to be its own small job, not a free `#` away.
+3. **A deferred target rots.** Every binding that is not the primary one rots
+   — ray's own API plan says so about Python, and it is the same mechanism.
+   *Mitigation: the no-LLVM default build is pure Rust, so `cargo test` on
+   Linux stays meaningful from day one even with no LLVM arm; add x86-64 to CI
+   as soon as there is CI, and run the S0 spike there before S11 needs the
+   leaf compiler's ABI to be real.*
+
+Until then, "both targets" in §7's exit criteria reads "aarch64 macOS, with
+x86-64 Linux owed".
 
 ---
 
@@ -501,12 +538,12 @@ language-side and unsized in ray's plan; their numbers are estimates.
 | **S7** ◇ | **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. | 0.5 | a sample app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable |
 | **S8** ◇ | **REPL core** — protocol, interactive environment, redefinition, live-frame backtraces, introspection; terminal client. | 0.6 | a socket client and the terminal client share one API with no divergence |
 | **S9** ◇ | The rest of R7RS-small: chars/strings, ports, bytevectors, `eval`, escape continuations, `dynamic-wind`. | 0.6 | conformance ≥ 95% of the declared subset, every failure individually explained |
-| **S10** ◇ | Stdlib image; boot budget. | 0.3 | `scm -e '(values)'` < 10 ms in CI, both targets |
+| **S10** ◇ | Stdlib image; boot budget. | 0.3 | `scm -e '(values)'` < 10 ms in CI on aarch64 macOS (§2.5) |
 | **S11** | **TL — the leaf compiler.** §6. The capability that justifies the project. | 0.8 | a user-authored SDF and texture, compiled, called concurrently from rayon workers; the restricted subset rejects non-pure calls with a message naming why |
 | **S12** ◇ | T1 bytecode VM. | 0.7 | benchmark suite vs T0; T0/T1 agree on every conformance test and every corpus scene |
 | **S13** | **The prelude and the modeler move.** ~19,000 lines plus the prelude. Divisible by file. | 2.0 | this is where "99.6% mechanical" is true or isn't |
 | **S14** | **T2 — the general JIT**, with assumption tracking and invalidation. May never be worth starting. | 1.5+ | T1/T2 agree on everything; REPL redefinition invalidates compiled callers |
-| **S15** ◇ | T3 AOT + `scm build`. | 0.8 | a hello-world binary runs on both targets with no toolchain present |
+| **S15** ◇ | T3 AOT + `scm build`. | 0.8 | a hello-world binary runs on aarch64 macOS with no toolchain present; x86-64 Linux owed (§2.5) |
 
 Two ordering notes that are the whole point of the merge:
 
