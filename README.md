@@ -22,6 +22,14 @@ the convention), verbatim error strings, dynamic variables, a surviving macro
 set, **compiled field functions callable from rayon workers**, and the Janet
 API preserved until a Scheme replaces it verb-for-verb.
 
+Continuations are a three-rung ladder, and **one-shot is the cheap middle
+option** both source documents skipped: escape-only is nearly free, one-shot
+needs only that a frame chain outlive its extent (no copying, frames stay
+mutable), and only multi-shot forces an immutable-frame discipline that taxes
+ordinary code. One-shot is also the rung with a named use — ray already passes
+an explicit continuation `k` for minibuffer reads, and a resumable modeler
+tool is a paused computation written today as a state machine.
+
 ## Shape, in one paragraph
 
 An explicit heap-allocated frame stack is the system of record, which makes

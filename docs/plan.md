@@ -156,13 +156,56 @@ an explicit stack, capture is a data-structure operation you can add later.
 `dynamic-wind` is cheap and `parameterize` interacts with it anyway, so it
 goes **in**.
 
-**Therefore:** ship escape-only continuations first, keep `dynamic-wind`,
-treat the numeric tower and Unicode as absent optional features, and declare
-all of it in `(features)`. The claim is "R7RS-small with multi-shot
-continuations not yet implemented", which is checkable, and it becomes full
-conformance later without an architectural change. ray gets exactly what its
-§3 asked for; the standalone language (requirement 5) does not get painted
-into a corner.
+#### Continuations are a three-rung ladder, not a yes/no
+
+Both source documents wrote this as full `call/cc` versus escape-only, which
+hides the rung in the middle — and the middle rung is the one ray would
+actually use.
+
+| rung | what you may do with `k` | implements | cost |
+|---|---|---|---|
+| **escape-only** (`call/ec`) | invoke it only while the extent is live, only outward | exceptions, early return, `break` | an unwind; nearly free |
+| **one-shot** | invoke it **once**, possibly after the extent returned | coroutines, generators, resumable tools | the frame chain must outlive the extent, but it may be **moved** — no copy, and frames may still be mutated in place |
+| **multi-shot** | invoke it **any number of times**, re-entering fresh each time | backtracking (`amb`), re-running from a saved point | the captured chain must stay reusable: copy-on-capture, or immutable frames — which costs straight-line speed |
+
+**One-shot is the cheap middle option**, and the gap between it and multi-shot
+is larger than the gap between it and escape-only. One-shot needs the frame
+chain to survive the extent returning; it does *not* need the chain to survive
+being resumed, so nothing has to be copied and the interpreter may keep
+writing locals straight into frame slots. Multi-shot is what forces either an
+expensive capture or an immutable-frame discipline, and that discipline is the
+only part of this that taxes ordinary code.
+
+**And one-shot is the rung with a named future use.** ray is already
+hand-rolling it: `rust-api-plan.md` §3.5 and `modeler-tool-layer-review.md`
+both specify the minibuffer hook as `(read-tool-field prompt seed k)` — that
+`k` is a continuation, passed explicitly because a tool that wants input has
+to give the runtime something to resume. The same shape is the whole
+begin/preview/commit tool lifecycle: a tool waiting on the next drag event is
+a paused computation modelled as a state machine. With one-shot continuations
+a multi-step tool is straight-line code:
+
+```scheme
+(define a (read-point "from"))
+(define b (read-point "to"))
+(commit (make-line a b))
+```
+
+Nothing in ray wants multi-shot. The relaxation in `field-points`,
+`grow-branches`' collision avoidance and voronoi relaxation are iterative, not
+backtracking, and `:seed` + replay already covers re-running. Evidence that
+demand is low: Janet *has* fibers and the corpus uses **zero** — not one
+`(yield`, `(coro`, `(fiber/new` or `(resume` in `scripts/` or `examples/`.
+
+**Therefore:** ship escape-only first, keep `dynamic-wind`, treat the numeric
+tower and Unicode as absent optional features, and declare all of it in
+`(features)`. Design the frame chain so that **one-shot is reachable without a
+frame-representation change** — that is the rung to leave a door open for, and
+it is cheaper to leave open than multi-shot. The claim is "R7RS-small with
+multi-shot continuations not yet implemented", which is checkable, and becomes
+full conformance later without an architectural change. ray gets exactly what
+its §3 asked for; the standalone language (requirement 5) is not painted into
+a corner.
 
 ### 3.2 What the LLVM work is *for* — and the staging consequence
 
@@ -287,8 +330,11 @@ survives that easily, because it is load-bearing for five other things:
   given ray either.
 - **Backtraces are a walk over live data**, not a reconstruction — which is
   what makes the break REPL in §8 reachable.
-- **Escape-only continuations** are nearly free, and multi-shot stays
-  available later (§3.1).
+- **Escape-only continuations** are nearly free; **one-shot** — the cheap
+  middle rung, and the one a resumable modeler tool would use — needs only
+  that a frame chain outlive its extent, not that it survive being resumed;
+  multi-shot stays available later at the cost of an immutable-frame
+  discipline (§3.1).
 
 The accepted price, stated plainly: frames in memory cap straight-line speed.
 The general JIT tier will not turn a Scheme call into a native `call` with
@@ -584,19 +630,24 @@ field to a postfix program the tracer evaluates, and it covers all 16
 for an IR that exists, plus the ability to take authored functions into it.
 Its *texture* story is the one with a measured number behind it.
 
+**Done 2026-10-12:** ray's §1 was corrected at ray @f3fd4ee — it gains a goal
+(d) for texel speed, and §7's S6 and §8's first trigger were updated to match.
+Its §2 verb count was corrected from 146 to 87 at ray @f050791.
+
 Still open:
 
-1. **Should ray's §1 be corrected?** "Not for making scripting faster" was
-   measured on scene loading and is right there. `make-texture` is an
-   interpreter-bound hot loop at **4,112 ns/texel**, and fruit-bowl's build is
-   **15.22 s** of it. That is now the strongest single number in favour of the
-   project, and ray's plan currently argues against it.
-2. **Does scm aim at eventual full R7RS-small conformance,** or is ray's
+1. **Does scm aim at eventual full R7RS-small conformance,** or is ray's
    dialect the destination? §3.1 is designed so this need not be answered now
    — multi-shot `call/cc` stays reachable rather than forfeited — but it
    decides whether requirement (5), running standalone, means "a Scheme" or
    "ray's language with a CLI".
-4. **`homoiconic.janet`** walks a quoted tuple with `postwalk` and `eval`s the
+2. **Is the resumable-tool rewrite worth one-shot continuations?** §3.1 says
+   one-shot is cheap and that ray already passes an explicit `k` for
+   minibuffer reads. Whether to *use* it — rewriting the begin/preview/commit
+   lifecycle as straight-line code — is a modeler question, not a language
+   one, and it is the thing that decides whether the middle rung ever gets
+   built. Not an S0 decision; worth asking before S8.
+3. **`homoiconic.janet`** walks a quoted tuple with `postwalk` and `eval`s the
    result. It was the one ray example with no clear Steel translation. Does scm
    expose the AST as ordinary indexable data, or as opaque syntax objects?
    Sets-of-scopes hygiene pushes toward the latter, which is the choice that
