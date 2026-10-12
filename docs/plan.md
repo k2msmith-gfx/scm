@@ -377,7 +377,7 @@ reachable.
 
 ---
 
-## 4. The calling convention: 87 verbs, one function
+## 4. The data and calling convention
 
 R7RS-small has no keyword arguments, no optional positionals, and no keyword
 datatype. ray needs all three — `(add-sphere :at [0 1 0] :radius 0.8)` is the
@@ -559,6 +559,99 @@ through verbatim; `parameterize` must not reproduce Janet's trap where
 `with-dyns` around `eval-string` makes top-level definitions vanish; and each
 surviving macro must be shown expressible in `syntax-rules` *before*
 committing, because the keyword-shaped ones depend on this section.
+
+### DECIDED 2026-10-12: value representation
+
+**A 16-byte tagged enum, `Copy`, with no `Drop`** — the GC owns every heap
+object (§3.3), so a `Value` is just a tag and a payload.
+
+*Immediate* (never allocates): `Fixnum(i64)`, `Flonum(f64)`, `Boolean`,
+`Char`, `Symbol(SymId)`, `Keyword(KwId)`, `Primitive(PrimId)`, the empty list,
+the unspecified value, and end-of-file. Note there is **no absent sentinel**
+— §4's lambda-list decision binds an absent argument to `#f`, so the
+representation does not need one.
+
+*Heap* (behind a pointer, with a header carrying the type tag, the mark bit
+and an immutable flag): pairs, strings, vectors, bytevectors, closures,
+continuation chains, ports, records, parameters, promises, foreign host values,
+and compiled leaf functions.
+
+Four of these choices are load-bearing for ray.
+
+#### `[x y z]` is a constructor, not a literal — and it is free
+
+`[a b c]` reads as `(vector a b c)`: **its elements are evaluated.** `'[a b c]`
+is a literal vector, and `#(a b c)` keeps R7RS's self-evaluating-constant
+semantics.
+
+This is forced by the corpus. **1,282 bracket forms in `examples/` and
+`scripts/` contain a call** — `[(+ x (at 0)) (+ y (at 1)) (+ z (at 2))]`,
+`[(/ nx len) (/ ny len) (/ nz len)]`, `[(math/round (* TALL 0.75)) TALL]`. R7RS
+`#(…)` is a *constant*: under those semantics `#(0 (* 2 r) 0)` has the **list**
+`(* 2 r)` as its second element, not a number. Mapping brackets onto `#(…)`
+would have broken 1,282 sites silently — a vector of lists where numbers were
+expected, no error anywhere. The same failure shape as the black frame.
+
+And unlike the keyword spelling, **this costs no conformance at all.** R7RS
+§2.3 reserves `[ ] { }` "for possible future extensions to the language", so no
+conformant program can contain a bracket. We are filling a reserved slot, not
+redefining an occupied one. Worth keeping the gradation straight:
+
+| notation | status |
+|---|---|
+| `[x y z]` as a constructor | **free** — brackets are reserved, nothing to collide with |
+| `&opt` / `&named` in a lambda list | nearly free — legal symbols, and only `lambda` changes |
+| `:at` as a keyword | **a real deviation** — `:` is a ⟨special initial⟩, so `:at` is a legal R7RS symbol |
+
+#### Vectors hold `Value`s; they are not packed `f64`
+
+Tempting to specialize, since `:at [0 1 0]` is in nearly every verb call, and
+wrong for v1. The bridge converts a vector to a Rust `[f64; 3]` **once per verb
+call**, and the float-heavy path is the leaf compiler, which never sees a
+Scheme vector at all — unboxed `f64` in, a small float tuple out (§6). So
+packing would optimize a boundary we cross once per verb rather than the loop
+[leaf-survey.md](leaf-survey.md) actually measured. Revisit on a profile.
+
+#### Interning is per-Engine, never global
+
+`SymId` and `KwId` index a **per-`Engine`** interner that is part of the
+serialized stdlib image (§7). This is exactly where Steel's abandoned
+bootstrap bites: its image was invalidated by a **static** interner, and §7's
+"no global interner state the image cannot reconstruct" lands here and nowhere
+else. It also makes two `Engine`s in one process independent, which the
+modeler's scene-VM worker wants.
+
+#### Arithmetic: inexact division, and overflow is an error
+
+With `ratios` unclaimed (§2.3), `(/ 8 3)` returns the flonum `2.6666…`. That is
+deliberate, and it is the Steel trap removed by construction: there `(/ 8 3)`
+is `8/3`, and `lorenz` silently timed bignum arithmetic until an explicit
+`exact->inexact` was added, with nothing warning.
+
+**Fixnum overflow raises an error** rather than silently widening to a flonum.
+R7RS explicitly permits reporting an implementation restriction, and silently
+losing exactness is how you get a wrong render instead of a stack trace. There
+is precedent in the house: Janet errors the same way — *"value 2167310835 out
+of range for 32-bit signed integers"* — which this project's own measurement
+spike tripped over on its first run.
+
+#### Strings, literals, procedures
+
+**Strings are `Vec<char>`.** R7RS strings are mutable and indexed by character,
+`full-unicode` is unclaimed, and `Vec<char>` makes `string-ref` O(1) and
+`string-set!` trivial at 4 bytes per character. The trade is memory on large
+strings; strings are not hot in ray, where the main use is building a readout.
+Revisit on a profile.
+
+**Literals are immutable**, flagged in the heap header — R7RS makes mutating a
+literal an error, and the stdlib image's constants want the same protection.
+Cheap, and it catches a real class of bug.
+
+**Four kinds of procedure**: a closure (code plus captured frame), a primitive
+(an index into a per-engine table, so an error message can name it), a foreign
+host closure, and a **leaf** — a compiled native function pointer, `Send +
+Sync`, with a restricted signature. The leaf kind is requirement (13)'s handle
+and the only procedure a rayon worker may ever hold.
 
 ---
 
