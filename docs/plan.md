@@ -428,9 +428,10 @@ What the decision commits us to, concretely:
 ```
 
 **Markers are `&opt`, `&named`, `&keys`, in that fixed order**, after the
-required positionals. Janet's names, because ~25k lines of authored Janet use
-them and the translation should be mechanical: 105 `&opt`, 81 `&named`, 8
-`&keys` in `scripts/` alone. `&keys` binds the whole keyword collection as one
+required positionals. Janet's names — not because we must match Janet (§4.6
+says we need not), but because they are unambiguous, familiar, and make the
+port's translation obvious: 105 `&opt`, 81 `&named`, 8 `&keys` in `scripts/`
+alone. `&keys` binds the whole keyword collection as one
 value. True rest args stay R7RS: `(lambda (a . rest))`, no `&rest`.
 
 This is a **cheaper deviation than the keyword spelling**, and for a reason
@@ -584,13 +585,33 @@ Four of these choices are load-bearing for ray.
 is a literal vector, and `#(a b c)` keeps R7RS's self-evaluating-constant
 semantics.
 
-This is forced by the corpus. **1,282 bracket forms in `examples/` and
-`scripts/` contain a call** — `[(+ x (at 0)) (+ y (at 1)) (+ z (at 2))]`,
-`[(/ nx len) (/ ny len) (/ nz len)]`, `[(math/round (* TALL 0.75)) TALL]`. R7RS
-`#(…)` is a *constant*: under those semantics `#(0 (* 2 r) 0)` has the **list**
-`(* 2 r)` as its second element, not a number. Mapping brackets onto `#(…)`
-would have broken 1,282 sites silently — a vector of lists where numbers were
-expected, no error anywhere. The same failure shape as the black frame.
+It has to be a constructor rather than a constant because **1,282 bracket
+forms in ray's `examples/` and `scripts/` contain a call** —
+`[(+ x (at 0)) (+ y (at 1)) (+ z (at 2))]`, `[(/ nx len) (/ ny len) (/ nz len)]`.
+R7RS `#(…)` is a *constant*: under those semantics `#(0 (* 2 r) 0)` holds the
+**list** `(* 2 r)` as its second element, not a number. A conversion that
+mapped brackets onto `#(…)` would produce a vector of lists where numbers were
+expected, with no error anywhere — the black-frame failure shape, 1,282 times.
+
+Whether to have brackets *at all* is a readability question rather than a
+compatibility one (§4.6), and the ray-steel POC is the evidence. Steel has no
+brackets, so the POC introduced `(v3 x y z)` and listed it as change #1 under
+a header that said *"if THIS reads badly, nothing else in the POC matters"*.
+The result:
+
+```scheme
+;; the POC, without brackets
+(add-cuboid :size (v3 2.08 0.02 2.08) :rotate (v3 0 0 0) :at (v3 0 -0.01 0)
+            :material (matte white) :name 'floor)
+
+;; with brackets
+(add-cuboid :size [2.08 0.02 2.08] :rotate [0 0 0] :at [0 -0.01 0]
+            :material (matte white) :name 'floor)
+```
+
+Three `(v3 …)` wrappers per shape call, on every shape call in the corpus.
+Brackets cost nothing (reserved) and buy that back, so they stay — and `v3`
+stays available as an ordinary procedure for computed cases.
 
 And unlike the keyword spelling, **this costs no conformance at all.** R7RS
 §2.3 reserves `[ ] { }` "for possible future extensions to the language", so no
@@ -652,6 +673,68 @@ Cheap, and it catches a real class of bug.
 host closure, and a **leaf** — a compiled native function pointer, `Send +
 Sync`, with a restricted signature. The leaf kind is requirement (13)'s handle
 and the only procedure a rayon worker may ever hold.
+
+### 4.6 The corpus is converted, not preserved
+
+**Clarified 2026-10-12: syntax compatibility with Janet is not a constraint.**
+The corpus will be converted, by an LLM, and the ray-steel POC already
+demonstrated the shape of that — its `scenes/*.scm` are line-for-line
+translations with the changes listed in each file's header. Janet is closer to
+Clojure than to Scheme and scm should not contort to imitate it.
+
+That reframes every decision above into one of two kinds, and the distinction
+is the useful part:
+
+- **Syntax decisions are taste.** Brackets, `&opt`, `:at` — pick what reads
+  well, because a converter will emit whatever we choose. Earlier drafts of
+  this document justified some of these as "preserving the corpus"; that was
+  the wrong reason, even where it reached the right answer.
+- **Semantic decisions are the ones that bite**, precisely *because* the
+  conversion is mechanical. ray-steel's own verdict: mechanical translation
+  "is exactly how you get code that compiles, runs, looks right and is
+  wrong", at a measured two such bugs in ~1,300 lines. An LLM translating
+  Janet to Scheme will produce plausible, idiomatic, silently-wrong code at
+  every point where the two languages differ *in meaning* rather than in
+  spelling.
+
+So the semantic decisions get written down as a hazard list the conversion is
+checked against, not as prose.
+
+### 4.7 Numbers cross the boundary without `->f`
+
+The POC's prelude calls `->f` — `exact->inexact` — **34 times**:
+`(%set-film (->f w) (->f h))`, `(%mat-vec3 … (->f (vx val)) …)`. Every numeric
+argument was coerced in Scheme before crossing, because the engine wanted
+`f64` and an authored `768` is exact. That is friction in the most-touched
+layer there is, and the ray-steel work also measured it eating an `atan2`
+win from 1.8x down to 9%.
+
+**scm's bridge coerces at the boundary instead.** A numeric parameter accepts
+any number and the generated shim widens it in Rust. `(set-samples 768)` and
+`(set-samples 768.0)` are both fine, and `->f` never appears in authored code.
+This is an S4 requirement on `#[verb]`'s shim generator, not a prelude
+convention, because a prelude convention is exactly what rots.
+
+### 4.8 Conversion hazards
+
+Where a line-for-line Janet→scm translation is silently wrong. This is the
+checklist for the port (S6, S13) and for whatever does the converting.
+
+| Janet | naive translation | why it is wrong |
+|---|---|---|
+| `(default smooth true)` | `(if (not smooth) #t smooth)` | absent is `nil` in Janet and `nil ≠ false`; in scm absent is `#f`, so this rewrites an explicit `:smooth #f` to `#t`. **Move it into the lambda list** as `(smooth #t)`. ray documents `:smooth`, `:apply` and `:repro` as default-true with `#f` meaningful |
+| `[0 (* 2 r) 0]` | `#(0 (* 2 r) 0)` | `#(…)` is a constant; the second element becomes the *list* `(* 2 r)`. Use `[…]` or `(vector …)` |
+| `(verts a)` | `(verts a)` | Janet lets you call a data structure as an index. In scm that is "attempt to call a vector" — loud, which is the good case. `(vector-ref verts a)` |
+| `[1 2 3]` vs `@[1 2 3]` | both to `[…]` | Janet's `[…]` is an **immutable tuple**, `@[…]` a mutable array. scm's `[…]` makes a mutable vector; code that pushed into `@[…]` still works, code that relied on tuple immutability loses a guarantee |
+| a misspelled `:radiuss` | passes silently | **Janet ignores unknown named arguments.** scm errors by name (§4), so the port will *surface* latent typos in the corpus as new failures. Expect some, and treat each as a found bug rather than a regression |
+| `(string/format "%.3f" x)` | — | R7RS has no `format`. The POC had to rebuild it from `quotient`, `number->string` and padding; scm ships one |
+| exact/inexact | `(/ 8 3)` | Janet's `/` is float division. scm matches it (no `ratios`, §4) — so this one is safe, and is called out because Steel's `8/3` silently turned `lorenz` into bignum arithmetic |
+| `(with-dyns [:out buf] …)` around `eval` | `(parameterize …)` | ray's own prelude avoids `with-dyns` there because it makes top-level definitions vanish; the scm version must not reproduce the trap |
+
+The discipline that catches the rest is the one ray already owns and ray-steel
+confirmed: **differential testing against the Janet build on a number** —
+vertex counts, shape counts, render time — not reading the diff. Both POC bugs
+were invisible in review and obvious on a number.
 
 ---
 
