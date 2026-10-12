@@ -183,6 +183,9 @@ Unicode.
 | `dynamic-wind` | **a real deviation** — it is in `(scheme base)` |
 | multi-shot `call/cc` | **a real deviation** — also `(scheme base)` |
 
+And §4 adds a third, from the other direction: reading `:at` as a keyword
+rather than as the symbol R7RS says it is.
+
 So two of the four cost nothing but an honest `(features)` answer, and only
 two are genuine non-conformance.
 
@@ -315,24 +318,72 @@ The good news is in ray's plan and it is real: the convention lives in exactly
 one place, `#[verb]`'s shim generator in `api-macro/`, so changing it is one
 function rather than 87 edits.
 
-The options, and the recommendation:
+### DECIDED 2026-10-12: keywords are a first-class datatype
 
-1. **Keywords as a first-class datatype**, self-evaluating, with `&opt`-style
-   optionals in the lambda list. Non-standard but it is what Racket, Steel,
-   Guile and Chicken all did, and it preserves ray's corpus spelling exactly.
-   **Recommended.**
-2. Keywords as symbols, optionals by arity dispatch. Conformant, but
-   `(add-sphere ':at ...)` or a reader hack, and it makes a misspelled option
-   silently *mean* something.
-3. Property lists / an options hash as one trailing value. Clean in the
-   language, but it re-authors 219 example files and every saved scene.
+Not negotiable and not deferred — they are used constantly in authored scenes.
+The two alternatives are recorded as rejected rather than deleted: keywords as
+symbols with optionals by arity dispatch (conformant, but needs
+`(add-sphere ':at …)` or a reader hack, and makes a *misspelled* option
+silently mean something); and a trailing options hash or plist (clean in the
+language, re-authors 219 example files and every saved scene).
 
-Option 1 costs conformance nothing — extra datatypes are permitted — and the
-carried lesson from the Steel work is why it must be a real datatype rather
-than an alias: `(define :at ':at)` instead of `#:at` bound a different symbol,
-every `opt` lookup silently missed, and cornell-metals rendered a **pure black
-frame** with no error anywhere. A keyword has to be a keyword, and a
-misspelled one has to be an error at the call site.
+The carried lesson from the Steel work is why it must be a real type and not
+an alias: `(define :at ':at)` instead of `#:at` bound a different symbol, every
+`opt` lookup silently missed, and cornell-metals rendered a **pure black frame**
+with no error anywhere. A keyword has to *be* a keyword, and a misspelled one
+has to be an error at the call site.
+
+What the decision commits us to, concretely:
+
+1. **A distinct type.** `(keyword? :at)` → `#t`, `(symbol? :at)` → `#f`,
+   `(eq? :at 'at)` → `#f`. Interned, so `eq?` works and keywords are usable
+   as hash keys — ray passes `:aces` and friends around as enum *values*,
+   which is why `ParamType::Key` exists. `keyword->string` /
+   `string->keyword` both ways.
+2. **Self-evaluating**, so `(add-sphere :at [0 1 0])` needs no quoting
+   anywhere, in authored scenes or in saved ones.
+3. **Round-trips through `write`** as `:at`, which is what makes S1's gate —
+   every saved corpus scene printed through `Form::to_scheme()` reads back
+   equal — actually testable.
+4. **`ParamType::Key` maps straight onto it** across the bridge, with no
+   coercion step to get wrong.
+
+Note what this does *not* settle: how keyword **parameters** are declared in a
+lambda list, and how `&opt` and `&named` are spelled. That is the other half of
+§4 and is still open — the datatype is the part that is decided.
+
+### And it is a genuine deviation, which the first draft got wrong
+
+The first version of this section said option 1 "costs conformance nothing —
+extra datatypes are permitted". The datatype is indeed free. **The spelling is
+not.** R7RS §7.1.1 defines
+
+```
+⟨special initial⟩ → ! | $ | % | & | * | / | : | < | = | > | ? | ^ | _ | ~
+```
+
+so **`:` is a valid identifier initial and `:at` is a legal R7RS symbol.**
+Reading it as a keyword changes the meaning of conformant code. That is why
+Racket, Steel and Guile all spell it `#:at` — `#:` is not valid R7RS datum
+syntax, so it cannot collide. Janet spells it `:at`, which is where ray's
+house style comes from.
+
+So this is a **third real deviation**, alongside multi-shot `call/cc` (§3.1),
+and it needs handling rather than hiding:
+
+- **`:at` reads as a keyword by default.** That is ray's spelling across 219
+  files and it is not being re-authored.
+- **`#:at` is accepted as a synonym**, at no cost. Any imported
+  R7RS/Racket-flavoured code uses that spelling, and supporting both means a
+  library written elsewhere does not have to care.
+- **A reader parameter restores R7RS symbol reading**, for running the
+  conformance suite and for any library that genuinely wants `:at` as a
+  symbol. Guile does exactly this with `(read-set! keywords …)`.
+- **Declared in `(features)`**, like every other deviation.
+
+Check at S5 whether `r7rs-tests.scm` uses a `:`-initial symbol anywhere — if
+it does, the conformance runs need the reader parameter, and a failure there
+would otherwise look like a bug rather than a configured dialect.
 
 Three smaller contracts from requirements (10)–(12): error strings pass
 through verbatim; `parameterize` must not reproduce Janet's trap where
