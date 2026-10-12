@@ -40,6 +40,11 @@ fn print(e: &Engine, v: Value, quoted: bool, out: &mut String) {
             out.push(':');
             out.push_str(e.interner.kw_name(id));
         }
+        Value::Primitive(id) => {
+            out.push_str("#<primitive ");
+            out.push_str(e.prim_name(id));
+            out.push('>');
+        }
         Value::Null => out.push_str("()"),
         Value::Unspecified => out.push_str("#<unspecified>"),
         Value::Eof => out.push_str("#<eof>"),
@@ -86,6 +91,17 @@ fn print(e: &Engine, v: Value, quoted: bool, out: &mut String) {
                 out.push(')');
             }
             Obj::Pair(..) => pair(e, v, quoted, out),
+            // None of these have datum syntax, so none of them round-trips.
+            // Printing them at all is for the REPL and for error messages.
+            Obj::Closure { name, .. } => match name {
+                Some(n) => {
+                    out.push_str("#<procedure ");
+                    out.push_str(e.interner.sym_name(*n));
+                    out.push('>');
+                }
+                None => out.push_str("#<procedure>"),
+            },
+            Obj::Env { .. } => out.push_str("#<environment>"),
         },
     }
 }

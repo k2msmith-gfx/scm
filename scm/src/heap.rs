@@ -5,6 +5,7 @@
 //! the sweep can walk, and nothing outside holds a raw pointer to it.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::value::{KwId, ObjRef, SymId, Value};
 
@@ -26,6 +27,23 @@ pub enum Obj {
         bracket: bool,
     },
     Bytevector(Vec<u8>),
+    /// A lexical frame. The chain of these is the environment; the chain of
+    /// `Frame`s in the VM is the *control* stack. Keeping them separate is
+    /// what lets a closure outlive the call that made it.
+    Env {
+        parent: Option<ObjRef>,
+        slots: Vec<(SymId, Value)>,
+    },
+    /// `params`, `body` and the rest are behind `Rc` so that applying a
+    /// closure clones two pointers instead of two vectors -- a tail loop
+    /// applies the same closure 10^8 times and must not allocate to do it.
+    Closure {
+        name: Option<SymId>,
+        params: Rc<Vec<SymId>>,
+        rest: Option<SymId>,
+        body: Rc<Vec<Value>>,
+        env: Option<ObjRef>,
+    },
 }
 
 /// Symbols and keywords, interned separately because they are different types.
@@ -79,6 +97,10 @@ impl Interner {
 pub struct Engine {
     objs: Vec<Obj>,
     pub interner: Interner,
+    /// Names only, parallel to the VM's table of function pointers. §4.5 wants
+    /// a primitive identified by index *so that an error message can name it*,
+    /// and the writer needs the same thing.
+    prim_names: Vec<String>,
 }
 
 impl Engine {
@@ -104,6 +126,15 @@ impl Engine {
         self.objs.len()
     }
 
+    pub fn register_prim_name(&mut self, name: &str) -> u32 {
+        self.prim_names.push(name.to_string());
+        (self.prim_names.len() - 1) as u32
+    }
+
+    pub fn prim_name(&self, id: crate::value::PrimId) -> &str {
+        &self.prim_names[id.0 as usize]
+    }
+
     // ---- constructors used by the reader and by tests -------------------
 
     pub fn cons(&mut self, car: Value, cdr: Value) -> Value {
@@ -120,6 +151,13 @@ impl Engine {
 
     pub fn bytevector(&mut self, bytes: Vec<u8>) -> Value {
         self.alloc(Obj::Bytevector(bytes))
+    }
+
+    pub fn env(&mut self, parent: Option<ObjRef>, slots: Vec<(SymId, Value)>) -> ObjRef {
+        match self.alloc(Obj::Env { parent, slots }) {
+            Value::Obj(r) => r,
+            _ => unreachable!("alloc returns Value::Obj"),
+        }
     }
 
     pub fn sym(&mut self, name: &str) -> Value {
@@ -156,6 +194,8 @@ impl Engine {
                         && i1.iter().zip(i2.iter()).all(|(&x, &y)| self.equal(x, y))
                 }
                 (Obj::Bytevector(b1), Obj::Bytevector(b2)) => b1 == b2,
+                // Environments and closures are compared by identity, which
+                // `a == b` below already did.
                 _ => false,
             },
             // Flonums compare by value, so NaN is not `equal?` to itself.

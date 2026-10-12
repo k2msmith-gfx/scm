@@ -12,6 +12,12 @@ pub struct SymId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct KwId(pub u32);
 
+/// An index into the engine's primitive table. Primitives are identified by
+/// index rather than by function pointer so an error message can name the one
+/// that refused.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct PrimId(pub u32);
+
 /// A reference to a heap object.
 ///
 /// An index rather than a pointer. The plan says "behind a pointer"; an index
@@ -33,6 +39,7 @@ pub enum Value {
     Char(char),
     Symbol(SymId),
     Keyword(KwId),
+    Primitive(PrimId),
     /// The empty list. Not "nil": there is no nil in this language, and an
     /// absent argument binds `#f` (§4).
     Null,
