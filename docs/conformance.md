@@ -35,6 +35,7 @@ used to take all of its tests with it, and aborted forms went 150 → 37. So
 | after the cheap tail | 899 | 78.0% |
 | after range arguments | **934** | **81.0%** |
 | after the wrong-answer pass | **1022** | **87.8%** |
+| after S9's first batch | **1048** | **89.9%** |
 
 `quasiquote` gained exactly the 7 assertions the table below predicted, which
 is a useful calibration: the priority list can be trusted to be roughly
@@ -243,3 +244,51 @@ The 131 remaining failures are absences with names: `(scheme complex)` (27),
 (2), bignums in `exact-integer-sqrt` (3), and a tail of hygiene corners
 including a `cond` whose `=>` is shadowed by a local binding — the one entry
 on that list that is a genuine bug rather than a decline.
+
+## S9, batch 1: the failures that *raised* were mostly bugs
+
+Grouping the 142 remaining failures by cause, rather than reading them in
+order, showed something worth the five minutes it took: **fourteen of them
+raised an error instead of answering wrongly**, which means the feature
+existed and was broken. An absence is a work item; a raise is a bug wearing
+an absence's coat.
+
+**+24 assertions, 87.8% → 89.9%**, and only one of the six was really a
+missing feature.
+
+| | what it was |
+|---|---|
+| `string-copy` | **ignored its own range arguments.** R7RS is `(string-copy string [start [end]])`; it took one and refused the rest. Six assertions. `string->vector` and `vector->string` had the same hole, and the range helper they needed already existed — they just never called it |
+| `vector-map`, `vector-for-each` | took **one** vector. R7RS takes any number and stops at the shortest, like `map`. Also removed `vector-length*` and `vector-for-each*`, two dead aliases that existed only to clutter completion |
+| `numerator` / `denominator` of an inexact | refused, blaming the absent `ratios` feature — **the wrong excuse.** An `f64` is already exactly *p*/2ᵏ, so its rational form needs no rational *type*: double until integral and count. `(denominator 5.5)` is `2.0`. What `ratios` genuinely costs is still next door, where `(denominator (/ 6 4))` cannot be the exact `2` because §4.5 makes `(/ 6 4)` the flonum `1.5` |
+| string line continuations | R7RS §6.7 is `\ ⟨intraline whitespace⟩* ⟨line ending⟩ ⟨intraline whitespace⟩*`, and only the middle worked. A backslash *immediately* before a newline was fine; a trailing space after the backslash — which no editor shows and every editor leaves behind — was an "unknown string escape" |
+| `\|` in a string | simply missing. Two lines |
+| **datum labels on input** | the real find, below |
+
+### The printer could write what its own reader could not read
+
+`#0=` and `#0#` were added to the **writer** at S5, because `set-cdr!` made
+cycles constructible and `write` would otherwise spin forever. The reader was
+never taught them. So for several stages the printer emitted output its own
+reader rejected — a round-trip hole in the middle of a feature of mine, and
+exactly the kind of thing only a stranger's suite finds, because I had tested
+the one direction I wrote first.
+
+Reading them properly means reading a *cycle*: `#0=(1 . #0#)` refers to
+itself before it exists. A placeholder is registered under the label first,
+the datum is read, and then every occurrence of the placeholder is replaced
+by the datum — which is what makes the result an actual cycle rather than a
+structure with a stray marker in it. That substitution walk is **iterative
+with a visited set**, because by the time it runs the structure may already
+be circular; recursing there would have been the fourth latent abort of
+precisely the same kind as the writer, `list?` and `length`.
+
+A label is scoped to its datum, so `#0=(1) #0=(2)` read from one port gives
+`((1) (2))` and not a complaint.
+
+### And one genuine feature: `#!fold-case`
+
+A reader *directive*, not a datum — it changes how later symbols read and
+produces no value, so it belongs with the things that get skipped rather than
+in the `#` dispatch, which has to return something. `|MiXeD|` is deliberately
+not folded, which is the whole reason that syntax exists.

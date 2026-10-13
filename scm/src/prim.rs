@@ -1124,10 +1124,19 @@ fn string_downcase(e: &mut Engine, a: &[Value]) -> PResult {
     Ok(e.alloc(Obj::Str(cs)))
 }
 
+/// `(string-copy string [start [end]])`.
+///
+/// The optional range is **required** R7RS, not an extension, and taking
+/// only one argument was simply a bug -- six conformance assertions, found
+/// by looking at failures that *raised* rather than ones that answered
+/// wrongly.
 fn string_copy(e: &mut Engine, a: &[Value]) -> PResult {
-    let v = one("string-copy", a)?;
+    let Some(&v) = a.first() else {
+        return Err(err("string-copy: expects a string and an optional range"));
+    };
     let cs = chars_of("string-copy", e, v)?;
-    Ok(e.alloc(Obj::Str(cs)))
+    let (start, end) = range_of("string-copy", a, 1, cs.len())?;
+    Ok(e.alloc(Obj::Str(cs[start..end].to_vec())))
 }
 
 fn is_string(e: &mut Engine, a: &[Value]) -> PResult {
@@ -2188,13 +2197,46 @@ fn p_floor_remainder(_e: &mut Engine, a: &[Value]) -> PResult {
 
 /// Without `ratios`, every exact number is an integer: its numerator is
 /// itself and its denominator is 1.
+/// An inexact number's numerator and denominator in lowest terms, as
+/// flonums.
+///
+/// The old code refused these, blaming the absent `ratios` feature -- which
+/// was the wrong excuse. **An `f64` is already exactly p / 2^k**, so its
+/// rational form needs no rational *type*: double until the value is
+/// integral, and the count of doublings is the power of two. `(denominator
+/// 5.5)` is 2.0, and R7RS wants the result inexact because the argument was.
+///
+/// What `ratios` really costs is still visible next door: `(denominator
+/// (/ 6 4))` cannot be 2, because §4.5 makes `(/ 6 4)` the flonum 1.5 rather
+/// than the exact 3/2. That one is a genuine decline; this was a bug wearing
+/// its coat.
+fn exact_ratio(who: &str, x: f64) -> Result<(f64, f64), VmError> {
+    if !x.is_finite() {
+        return Err(err(format!("{who}: {x} is not rational")));
+    }
+    let mut num = x;
+    let mut den = 1.0f64;
+    // At most 1075 doublings for any finite f64 (52 mantissa bits plus the
+    // subnormal range), so this terminates well before it could run away.
+    let mut guard = 0;
+    while num.fract() != 0.0 {
+        num *= 2.0;
+        den *= 2.0;
+        guard += 1;
+        if guard > 1100 {
+            return Err(err(format!("{who}: {x} has no exact ratio")));
+        }
+    }
+    Ok((num, den))
+}
+
 fn p_numerator(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("numerator", a)?;
     match v {
         Value::Fixnum(_) => Ok(v),
-        Value::Flonum(x) if x.fract() == 0.0 => Ok(Value::Flonum(x)),
+        Value::Flonum(x) => exact_ratio("numerator", x).map(|(n, _)| Value::Flonum(n)),
         _ => Err(err(format!(
-            "numerator: {} would need an exact rational (the `ratios` feature is absent)",
+            "numerator: {} is not a rational number",
             write_str(e, v)
         ))),
     }
@@ -2204,9 +2246,9 @@ fn p_denominator(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("denominator", a)?;
     match v {
         Value::Fixnum(_) => Ok(Value::Fixnum(1)),
-        Value::Flonum(x) if x.fract() == 0.0 => Ok(Value::Flonum(1.0)),
+        Value::Flonum(x) => exact_ratio("denominator", x).map(|(_, d)| Value::Flonum(d)),
         _ => Err(err(format!(
-            "denominator: {} would need an exact rational (the `ratios` feature is absent)",
+            "denominator: {} is not a rational number",
             write_str(e, v)
         ))),
     }
@@ -2320,25 +2362,32 @@ fn string_copy_into(e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Unspecified)
 }
 
+/// `(string->vector string [start [end]])`.
 fn string_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
-    let v = one("string->vector", a)?;
-    let items: Vec<Value> = chars_of("string->vector", e, v)?
-        .into_iter()
-        .map(Value::Char)
-        .collect();
+    let Some(&v) = a.first() else {
+        return Err(err("string->vector: expects a string and an optional range"));
+    };
+    let cs = chars_of("string->vector", e, v)?;
+    let (start, end) = range_of("string->vector", a, 1, cs.len())?;
+    let items: Vec<Value> = cs[start..end].iter().copied().map(Value::Char).collect();
     Ok(e.vector(items, true))
 }
 
+/// `(vector->string vector [start [end]])`.
 fn vector_to_string(e: &mut Engine, a: &[Value]) -> PResult {
-    let v = one("vector->string", a)?;
+    let Some(&v) = a.first() else {
+        return Err(err("vector->string: expects a vector and an optional range"));
+    };
     let r = vec_ref("vector->string", e, v)?;
     let Obj::Vector { items, .. } = e.obj(r) else {
         unreachable!("checked")
     };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items.clone() {
+    let items = items.clone();
+    let (start, end) = range_of("vector->string", a, 1, items.len())?;
+    let mut out = Vec::with_capacity(end - start);
+    for item in &items[start..end] {
         match item {
-            Value::Char(c) => out.push(c),
+            Value::Char(c) => out.push(*c),
             _ => return Err(err("vector->string: not a vector of characters")),
         }
     }

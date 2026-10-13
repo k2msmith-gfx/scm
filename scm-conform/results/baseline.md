@@ -1,6 +1,6 @@
 # scm-conform/suites/r7rs-tests.scm
 
-passed 1024, failed 142
+passed 1048, failed 118
 
 ## unreadable forms
 
@@ -66,9 +66,9 @@ passed 1024, failed 142
 - 4.3 Macros | (sequence3 2 3 4 5) | raised: no matching syntax rule for sequence3
 - 4.3 Macros | (list (count-to-2 a b) (count-to-2) (count-to-2 a b c d)) | raised: no matching syntax rule for count-to-2
 - 4.3 Macros | (list (count-to-2_ _ _) (count-to-2_) (count-to-2_ a b) (count-to-2_ a b c d)) | raised: no matching syntax rule for count-to-2_
-- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1255
+- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1253
 - 4.3 Macros | (let ((=> #f)) (cond (#t => 'ok))) | raised: not applicable: ok
-- 4.3 Macros | (quux399) | raised: unbound variable: bar399.1291
+- 4.3 Macros | (quux399) | raised: unbound variable: bar399.1289
 - 4.3 Macros | (elli-lit-1 100) | raised: elli-lit-1: `...` with no pattern variable to repeat
 - 4.3 Macros | (let-syntax ((m (syntax-rules (b) ((_ b ...) #t) ((_ . r) #f)))) (list (m c) (m b (c)) (m b b) (m))) | raised: unbound variable: let-syntax
 - 5 Program structure | (let () (define-values x (values 1 2)) (apply + x)) | raised: no matching syntax rule for define-values
@@ -98,11 +98,6 @@ passed 1024, failed 142
 - 6.2 Numbers | (truncate/ -5.0 -2) | raised: truncate/: expects two exact integers
 - 6.2 Numbers | (remainder -13 -4.0) | raised: remainder: expects two exact integers
 - 6.2 Numbers | (lcm 32.0 -36) | raised: lcm: expects exact integers, got 32.0
-- 6.2 Numbers | (numerator (/ 6 4)) | raised: numerator: 1.5 would need an exact rational (the `ratios` feature is absent)
-- 6.2 Numbers | (denominator (/ 6 4)) | raised: denominator: 1.5 would need an exact rational (the `ratios` feature is absent)
-- 6.2 Numbers | (denominator (inexact (/ 6 4))) | raised: denominator: 1.5 would need an exact rational (the `ratios` feature is absent)
-- 6.2 Numbers | (numerator 5.5) | raised: numerator: 5.5 would need an exact rational (the `ratios` feature is absent)
-- 6.2 Numbers | (denominator 5.5) | raised: denominator: 5.5 would need an exact rational (the `ratios` feature is absent)
 - 6.2 Numbers | (inexact (sqrt -1)) | expected-expr raised: unbound variable: 0.0+1.0i
 - 6.2 Numbers | (sqrt -1.0-0.0i) | expected-expr raised: unbound variable: 0.0+1.0i
 - 6.2 Numbers | (make-rectangular 1 2) | expected-expr raised: unbound variable: 1+2i
@@ -118,18 +113,7 @@ passed 1024, failed 142
 - 6.6 Characters | (digit-value #\૦) | want 0, got #f
 - 6.7 Strings | (string-foldcase "Maß") | want "mass", got "maß"
 - 6.7 Strings | (string-foldcase "ſ") | want "s", got "ſ"
-- 6.7 Strings | (string-copy "" 0) | raised: string-copy: expects one argument, got 2
-- 6.7 Strings | (string-copy "" 0 0) | raised: string-copy: expects one argument, got 3
-- 6.7 Strings | (string-copy "abc" 0) | raised: string-copy: expects one argument, got 2
-- 6.7 Strings | (string-copy "abc" 1) | raised: string-copy: expects one argument, got 2
-- 6.7 Strings | (string-copy "abc" 1 2) | raised: string-copy: expects one argument, got 3
-- 6.7 Strings | (string-copy "abc" 1 3) | raised: string-copy: expects one argument, got 3
-- 6.8 Vectors | (string->vector "ABC" 1) | raised: string->vector: expects one argument, got 2
-- 6.8 Vectors | (string->vector "ABC" 1 2) | raised: string->vector: expects one argument, got 3
-- 6.8 Vectors | (vector->string #(#\1 #\2 #\3) 1) | raised: vector->string: expects one argument, got 2
-- 6.8 Vectors | (vector->string #(#\1 #\2 #\3) 1 2) | raised: vector->string: expects one argument, got 3
 - 6.10 Control Features | (call-with-current-continuation procedure?) | raised: unbound variable: call-with-current-continuation
-- 6.10 Control Features | (vector-map + '#(1 2 3) '#(4 5 6 7)) | raised: vector-map got 3 arguments, which is more than it takes
 - 6.10 Control Features | (let ((v (make-list 5))) (vector-for-each (lambda (i) (list-set! v i (* i i))) '#(0 1 2 3 4)) v) | raised: unbound variable: list-set!
 - 6.10 Control Features | (call-with-current-continuation (lambda (exit) (for-each (lambda (x) (if (negative? x) (exit x))) '(54 0 37 -3 245 19)) #t)) | raised: unbound variable: call-with-current-continuation
 - 6.10 Control Features | (list-length '(1 2 3 4)) | raised: unbound variable: call-with-current-continuation
@@ -161,14 +145,6 @@ passed 1024, failed 142
 - 6.13 Input and output | (let ((out (open-output-bytevector))) (write-bytevector #u8(1 2 3 4 5) out 2) (get-output-bytevector out)) | raised: unbound variable: open-output-bytevector
 - 6.13 Input and output | (let ((out (open-output-bytevector))) (write-bytevector #u8(1 2 3 4 5) out 2 4) (get-output-bytevector out)) | raised: unbound variable: open-output-bytevector
 - 6.13 Input and output | (let ((out (open-output-bytevector))) (flush-output-port out) (get-output-bytevector out)) | raised: unbound variable: open-output-bytevector
-- Read syntax | (cadr (read (open-input-string "#0=(1 . #0#)"))) | raised: read: 0..1: unsupported `#0`
-- Read syntax | (cadr (read (open-input-string "(#0=(1 2 3) #0#)"))) | raised: read: 1..2: unsupported `#0`
-- Read syntax | (read (open-input-string "#!fold-case ABC")) | raised: read: 0..1: unsupported `#!`
-- Read syntax | (read (open-input-string "#!fold-case #!no-fold-case ABC")) | raised: read: 0..1: unsupported `#!`
-- Read syntax | (char->integer (string-ref (read (open-input-string "\"\\|\"")) 0)) | raised: read: 0..3: unknown string escape `\|`
-- Read syntax | (read (open-input-string "\"line 1\\ \ncontinued\n\"")) | raised: read: 0..9: unknown string escape `\ `
-- Read syntax | (read (open-input-string "\"line 1\\ \t \n \t continued\n\"")) | raised: read: 0..9: unknown string escape `\ `
-- Read syntax | (read (open-input-string "\"line 1\\ \t \n \t \n\nline 3\n\"")) | raised: read: 0..9: unknown string escape `\ `
 - Numeric syntax | (values z) | expected-expr raised: unbound variable: make-rectangular
 - Numeric syntax | (values z) | expected-expr raised: unbound variable: make-rectangular
 - Numeric syntax | (values z) | expected-expr raised: unbound variable: make-rectangular

@@ -250,9 +250,18 @@
 
 ;; ── derived from the vector and string primitives ───────────────────────
 
-(define (vector-map f v) (list->vector (map f (vector->list v))))
-(define (vector-for-each f v) (for-each f (vector->list v)))
-(define (vector-length* v) (vector-length v))
+;; R7RS takes any number of vectors and stops at the shortest, like `map`.
+;; The single-vector case is kept separate because it is the common one and
+;; `apply` on it would cost a list per call.
+(define (vector-map f v . more)
+  (if (null? more)
+      (list->vector (map f (vector->list v)))
+      (list->vector (apply map f (vector->list v) (map vector->list more)))))
+
+(define (vector-for-each f v . more)
+  (if (null? more)
+      (for-each f (vector->list v))
+      (apply for-each f (vector->list v) (map vector->list more))))
 
 ;; Janet's `inc`/`dec`, kept because the corpus uses them 151 times and they
 ;; cost two lines.
@@ -575,8 +584,6 @@
   (if (null? more)
       (for-each f (string->list s))
       (apply for-each f (string->list s) (map string->list more))))
-
-(define (vector-for-each* f v) (for-each f (vector->list v)))
 
 (define (bytevector-copy! to at from . range)
   (let* ([start (if (null? range) 0 (car range))]

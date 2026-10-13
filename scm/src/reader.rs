@@ -18,9 +18,11 @@
 //! multi-line entry and the editor panes' paren handling both rest on being
 //! able to tell "keep typing" from "that is wrong".
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::heap::{Engine, Loc, Obj};
+use crate::value::ObjRef;
 use crate::value::Value;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,6 +78,13 @@ pub struct Reader {
     /// a location is a binary search rather than a rescan. Without it,
     /// recording a location per form would make reading quadratic.
     line_starts: Vec<usize>,
+    /// `#N=` labels seen so far, for `#N#` to refer back to.
+    ///
+    /// Per *datum*, not per reader: R7RS scopes a label to the datum it
+    /// appears in, so two successive top-level forms may both use `#0=`.
+    labels: HashMap<u32, Value>,
+    /// Set by `#!fold-case`, cleared by `#!no-fold-case`.
+    fold_case: bool,
 }
 
 type RResult<T> = Result<T, ReadError>;
@@ -106,6 +115,8 @@ impl Reader {
             opts,
             source: Rc::from("<input>"),
             line_starts,
+            labels: HashMap::new(),
+            fold_case: false,
         }
     }
 
@@ -149,6 +160,9 @@ impl Reader {
         if self.at_end() {
             return Ok(None);
         }
+        // A label is scoped to its datum, so two successive top-level forms
+        // may each use `#0=` and mean different things.
+        self.labels.clear();
         self.datum(e).map(Some)
     }
 
@@ -239,6 +253,25 @@ impl Reader {
     fn skip_datum_comments(&mut self, e: &mut Engine) -> RResult<()> {
         loop {
             self.skip_atmosphere()?;
+            // `#!fold-case` and `#!no-fold-case` are R7RS reader
+            // *directives*, not datums: they change how later symbols are
+            // read and produce no value. So they belong here with the other
+            // things that are skipped rather than in `hash`, which has to
+            // return something.
+            if self.peek() == Some('#') && self.peek_at(1) == Some('!') {
+                const FOLD: &str = "#!fold-case";
+                const NO_FOLD: &str = "#!no-fold-case";
+                if self.matches_word(NO_FOLD) {
+                    self.pos += NO_FOLD.chars().count();
+                    self.fold_case = false;
+                    continue;
+                }
+                if self.matches_word(FOLD) {
+                    self.pos += FOLD.chars().count();
+                    self.fold_case = true;
+                    continue;
+                }
+            }
             if self.peek() == Some('#') && self.peek_at(1) == Some(';') {
                 self.pos += 2;
                 self.skip_atmosphere()?;
@@ -317,6 +350,65 @@ impl Reader {
         }
     }
 
+    /// `#N= <datum>`, including when the datum refers to itself.
+    ///
+    /// A placeholder is registered under the label *before* the datum is
+    /// read, so a `#N#` inside it has something to return; afterwards every
+    /// occurrence of the placeholder is replaced by the real datum. That
+    /// substitution is what makes `#0=(1 . #0#)` an actual cycle rather than
+    /// a structure containing a stray marker.
+    ///
+    /// The walk is iterative with a visited set, because by the time it runs
+    /// the structure may already be circular -- recursing here would be the
+    /// fourth latent abort of exactly the same kind.
+    fn labelled(&mut self, n: u32, start: usize, e: &mut Engine) -> RResult<Value> {
+        let placeholder = e.cons(Value::Unspecified, Value::Unspecified);
+        self.labels.insert(n, placeholder);
+        self.skip_datum_comments(e)?;
+        if self.at_end() {
+            return Err(ReadError::Incomplete);
+        }
+        let datum = self.datum(e)?;
+        if datum == placeholder {
+            return self.invalid(start, format!("`#{n}=#{n}#` defines nothing"));
+        }
+        let Value::Obj(ph) = placeholder else {
+            unreachable!("cons returns an object")
+        };
+        let mut seen: Vec<ObjRef> = Vec::new();
+        let mut work = vec![datum];
+        while let Some(v) = work.pop() {
+            let Value::Obj(r) = v else { continue };
+            if r == ph || seen.contains(&r) {
+                continue;
+            }
+            seen.push(r);
+            match e.obj(r).clone() {
+                Obj::Pair(car, cdr) => {
+                    let car = if car == placeholder { datum } else { car };
+                    let cdr = if cdr == placeholder { datum } else { cdr };
+                    *e.obj_mut(r) = Obj::Pair(car, cdr);
+                    work.push(car);
+                    work.push(cdr);
+                }
+                Obj::Vector { items, bracket } => {
+                    let patched: Vec<Value> = items
+                        .iter()
+                        .map(|&i| if i == placeholder { datum } else { i })
+                        .collect();
+                    work.extend(patched.iter().copied());
+                    *e.obj_mut(r) = Obj::Vector {
+                        items: patched,
+                        bracket,
+                    };
+                }
+                _ => {}
+            }
+        }
+        self.labels.insert(n, datum);
+        Ok(datum)
+    }
+
     fn abbrev(&mut self, e: &mut Engine, name: &str) -> RResult<Value> {
         self.pos += 1;
         self.skip_atmosphere()?;
@@ -386,6 +478,24 @@ impl Reader {
         }
     }
 
+    /// Does the input at the cursor spell `word`, followed by a delimiter?
+    ///
+    /// The delimiter check matters: `#!fold-caseX` is not the directive, and
+    /// silently accepting its prefix would swallow the `X`.
+    fn matches_word(&self, word: &str) -> bool {
+        let chars: Vec<char> = word.chars().collect();
+        if self.src.len() < self.pos + chars.len() {
+            return false;
+        }
+        if self.src[self.pos..self.pos + chars.len()] != chars[..] {
+            return false;
+        }
+        match self.src.get(self.pos + chars.len()) {
+            None => true,
+            Some(&c) => Self::is_delimiter(c),
+        }
+    }
+
     /// A lone `.` is the dotted-tail marker; `...` and `.5` are not.
     fn dot_is_tail_marker(&self) -> bool {
         self.peek() == Some('.')
@@ -436,10 +546,43 @@ impl Reader {
                                 }
                             }
                         }
-                        // A backslash before a newline swallows the newline
-                        // and the indentation after it.
-                        '\n' => {
-                            while matches!(self.peek(), Some(c) if c == ' ' || c == '\t') {
+                        // R7RS adds `\|`, so a symbol's delimiter can be
+                        // written in a string the same way.
+                        '|' => out.push('|'),
+                        // A line continuation. R7RS §6.7 is
+                        //
+                        //     \ <intraline whitespace>* <line ending>
+                        //       <intraline whitespace>*
+                        //
+                        // and only the middle of that was handled: a
+                        // backslash immediately before a newline worked, but
+                        // trailing spaces after the backslash -- which no
+                        // editor shows and every editor leaves behind -- made
+                        // it an "unknown string escape". Four conformance
+                        // assertions, and the kind of thing that fails for a
+                        // user exactly once and is then never trusted again.
+                        ' ' | '\t' | '\n' | '\r' => {
+                            self.pos -= 1; // put the whitespace back
+                            while matches!(self.peek(), Some(' ' | '\t')) {
+                                self.pos += 1;
+                            }
+                            match self.peek() {
+                                Some('\n') => self.pos += 1,
+                                Some('\r') => {
+                                    self.pos += 1;
+                                    if self.peek() == Some('\n') {
+                                        self.pos += 1;
+                                    }
+                                }
+                                None => return Err(ReadError::Incomplete),
+                                Some(c) => {
+                                    return self.invalid(
+                                        start,
+                                        format!("a `\\` continuation must reach the end of the line, found `{c}`"),
+                                    );
+                                }
+                            }
+                            while matches!(self.peek(), Some(' ' | '\t')) {
                                 self.pos += 1;
                             }
                         }
@@ -536,6 +679,40 @@ impl Reader {
                     Err(msg) => self.invalid(start, msg),
                 }
             }
+            // `#N=` labels a datum and `#N#` refers back to it, which is how
+            // a CYCLE is written. The writer already emits these -- it had to,
+            // or `write` would spin on a cycle -- so until now the printer
+            // produced output its own reader could not read. A round-trip
+            // hole in a feature of mine, found by someone else's suite
+            // because I had tested only the direction I wrote first.
+            Some(d) if d.is_ascii_digit() => {
+                // `hash` dispatches on `peek_at(1)`, so nothing is consumed
+                // yet and `self.pos` still points at the `#`.
+                self.pos += 1;
+                let mut digits = String::new();
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        digits.push(c);
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let Ok(n) = digits.parse::<u32>() else {
+                    return self.invalid(start, format!("`#{digits}` is not a datum label"));
+                };
+                match self.bump() {
+                    Some('#') => match self.labels.get(&n) {
+                        Some(&v) => Ok(v),
+                        None => self.invalid(start, format!("`#{n}#` has no `#{n}=`")),
+                    },
+                    Some('=') => self.labelled(n, start, e),
+                    None => Err(ReadError::Incomplete),
+                    Some(c) => {
+                        self.invalid(start, format!("expected `=` or `#` after `#{n}`, found `{c}`"))
+                    }
+                }
+            }
             Some(other) => self.invalid(start, format!("unsupported `#{other}`")),
         }
     }
@@ -630,6 +807,9 @@ impl Reader {
         }
         if self.opts.colon_keywords && tok.len() > 1 && tok.starts_with(':') {
             return Ok(e.kw(&tok[1..]));
+        }
+        if self.fold_case {
+            return Ok(e.sym(&tok.to_lowercase()));
         }
         Ok(e.sym(&tok))
     }
