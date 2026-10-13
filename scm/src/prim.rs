@@ -572,44 +572,78 @@ fn p_abs(e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
-fn int_pair(who: &'static str, a: &[Value]) -> Result<(i64, i64), VmError> {
-    match a {
-        [Value::Fixnum(x), Value::Fixnum(y)] => {
-            if *y == 0 {
-                return Err(err(format!("{who}: division by zero")));
-            }
-            Ok((*x, *y))
+/// An integer argument, exact **or inexact**.
+///
+/// R7RS's `quotient`, `remainder`, `modulo`, `gcd`, `lcm`, `floor/` and
+/// `truncate/` are about *integers*, and `32.0` is an integer. Refusing a
+/// flonum outright was the wrong reading: the exactness of the arguments
+/// decides the exactness of the **result**, not whether the call is legal.
+/// `(remainder -13 -4.0)` is `-1.0`.
+fn int_arg(who: &str, e: &Engine, v: Value) -> Result<(i64, bool), VmError> {
+    match v {
+        Value::Fixnum(n) => Ok((n, false)),
+        // The magnitude check is what keeps `as i64` from being a saturating
+        // lie: an f64 above 2^63 has no i64 to become.
+        Value::Flonum(x) if x.fract() == 0.0 && x.abs() < 9.223372036854776e18 => {
+            Ok((x as i64, true))
         }
-        _ => Err(err(format!("{who}: expects two exact integers"))),
+        _ => Err(err(format!(
+            "{who}: expects integers, got {}",
+            write_str(e, v)
+        ))),
     }
 }
 
-fn p_quotient(_e: &mut Engine, a: &[Value]) -> PResult {
-    let (x, y) = int_pair("quotient", a)?;
-    Ok(Value::Fixnum(x / y))
+/// An integral result, inexact if any argument was.
+fn int_result(n: i64, inexact: bool) -> Value {
+    if inexact {
+        Value::Flonum(n as f64)
+    } else {
+        Value::Fixnum(n)
+    }
+}
+
+fn int_pair(who: &'static str, e: &Engine, a: &[Value]) -> Result<(i64, i64, bool), VmError> {
+    match a {
+        [x, y] => {
+            let (x, xi) = int_arg(who, e, *x)?;
+            let (y, yi) = int_arg(who, e, *y)?;
+            if y == 0 {
+                return Err(err(format!("{who}: division by zero")));
+            }
+            Ok((x, y, xi || yi))
+        }
+        _ => Err(err(format!("{who}: expects two integers"))),
+    }
+}
+
+fn p_quotient(e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y, inexact) = int_pair("quotient", e, a)?;
+    Ok(int_result(x.wrapping_div(y), inexact))
 }
 
 /// `i64::MIN % -1` **overflows** -- the quotient is not representable, so the
 /// hardware traps and Rust panics in a debug build. Found by S7's aimed
 /// hostile programs. The mathematical answer is 0, and `checked_rem` is how
 /// to say that without a special case for the one input.
-fn p_remainder(_e: &mut Engine, a: &[Value]) -> PResult {
-    let (x, y) = int_pair("remainder", a)?;
-    Ok(Value::Fixnum(x.checked_rem(y).unwrap_or(0)))
+fn p_remainder(e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y, inexact) = int_pair("remainder", e, a)?;
+    Ok(int_result(x.checked_rem(y).unwrap_or(0), inexact))
 }
 
 /// `modulo` takes the sign of the *divisor*, which the first version got
 /// wrong for a negative one -- `(modulo 13 -4)` is -3, not -1. Found by the
 /// R7RS suite; `rem_euclid` is not this operation.
-fn p_modulo(_e: &mut Engine, a: &[Value]) -> PResult {
-    let (x, y) = int_pair("modulo", a)?;
+fn p_modulo(e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y, inexact) = int_pair("modulo", e, a)?;
     // Every step here can overflow on the i64 edges: the remainder itself
     // for `i64::MIN % -1`, and the `+ y` for a large remainder. Wrapping is
     // correct for the sign correction because the true result is always
     // within range even when the intermediate is not.
     let r = x.checked_rem(y).unwrap_or(0);
-    Ok(Value::Fixnum(
+    Ok(int_result(
         r.wrapping_add(y).checked_rem(y).unwrap_or(0),
+        inexact,
     ))
 }
 
@@ -1499,7 +1533,14 @@ fn is_procedure(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("procedure?", a)?;
     Ok(Value::Bool(match v {
         Value::Primitive(_) => true,
-        Value::Obj(r) => matches!(e.obj(r), Obj::Closure { .. }),
+        // A continuation IS a procedure -- `(call/cc procedure?)` is #t, and
+        // the suite asks. Missed when escape continuations landed, because
+        // the new object had to be added to five matches and this was the
+        // one with no compiler error to catch it.
+        Value::Obj(r) => matches!(
+            e.obj(r),
+            Obj::Closure { .. } | Obj::Continuation { .. } | Obj::Parameter { .. }
+        ),
         _ => false,
     }))
 }
@@ -2312,10 +2353,10 @@ fn p_square(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn p_gcd(e: &mut Engine, a: &[Value]) -> PResult {
     let mut g: i64 = 0;
+    let mut inexact = false;
     for &v in a {
-        let Value::Fixnum(n) = v else {
-            return Err(err(format!("gcd: expects exact integers, got {}", write_str(e, v))));
-        };
+        let (n, i) = int_arg("gcd", e, v)?;
+        inexact |= i;
         let (mut x, mut y) = (g.abs(), n.abs());
         while y != 0 {
             let t = y;
@@ -2324,17 +2365,19 @@ fn p_gcd(e: &mut Engine, a: &[Value]) -> PResult {
         }
         g = x;
     }
-    Ok(Value::Fixnum(g))
+    Ok(int_result(g, inexact))
 }
 
 fn p_lcm(e: &mut Engine, a: &[Value]) -> PResult {
     let mut l: i64 = 1;
+    let mut inexact = false;
     for &v in a {
-        let Value::Fixnum(n) = v else {
-            return Err(err(format!("lcm: expects exact integers, got {}", write_str(e, v))));
-        };
+        let (n, i) = int_arg("lcm", e, v)?;
+        inexact |= i;
         if n == 0 {
-            return Ok(Value::Fixnum(0));
+            // R7RS: `(lcm 32.0 0)` is `0.0`, so the zero shortcut still has
+            // to carry the exactness of what it saw.
+            return Ok(int_result(0, inexact || a.iter().any(is_inexact)));
         }
         let (mut x, mut y) = (l.abs(), n.abs());
         while y != 0 {
@@ -2344,7 +2387,11 @@ fn p_lcm(e: &mut Engine, a: &[Value]) -> PResult {
         }
         l = (l / x).saturating_mul(n).abs();
     }
-    Ok(Value::Fixnum(l))
+    Ok(int_result(l, inexact))
+}
+
+fn is_inexact(v: &Value) -> bool {
+    matches!(v, Value::Flonum(_))
 }
 
 /// `(exact-integer-sqrt n)` returns two values: the root and the remainder.
@@ -2376,7 +2423,7 @@ fn p_exact_integer_sqrt(e: &mut Engine, a: &[Value]) -> PResult {
 /// `floor/` and `truncate/` each return the quotient and remainder as two
 /// values, which is why they needed `values` to exist first.
 fn div_pair(who: &'static str, e: &mut Engine, a: &[Value], floor: bool) -> PResult {
-    let (x, y) = int_pair(who, a)?;
+    let (x, y, inexact) = int_pair(who, e, a)?;
     // The floor remainder takes the sign of the divisor, which is the same
     // definition `modulo` needed -- and the same place `rem_euclid` was wrong.
     let (q, r) = if floor {
@@ -2385,7 +2432,10 @@ fn div_pair(who: &'static str, e: &mut Engine, a: &[Value], floor: bool) -> PRes
     } else {
         (x / y, x % y)
     };
-    Ok(e.alloc(Obj::Values(vec![Value::Fixnum(q), Value::Fixnum(r)])))
+    Ok(e.alloc(Obj::Values(vec![
+        int_result(q, inexact),
+        int_result(r, inexact),
+    ])))
 }
 
 fn p_floor_div(e: &mut Engine, a: &[Value]) -> PResult {
@@ -2394,13 +2444,18 @@ fn p_floor_div(e: &mut Engine, a: &[Value]) -> PResult {
 fn p_truncate_div(e: &mut Engine, a: &[Value]) -> PResult {
     div_pair("truncate/", e, a, false)
 }
-fn p_floor_quotient(_e: &mut Engine, a: &[Value]) -> PResult {
-    let (x, y) = int_pair("floor-quotient", a)?;
-    Ok(Value::Fixnum((x - (((x % y) + y) % y)) / y))
+fn p_floor_quotient(e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y, inexact) = int_pair("floor-quotient", e, a)?;
+    let r = x.checked_rem(y).unwrap_or(0).wrapping_add(y).checked_rem(y).unwrap_or(0);
+    Ok(int_result(x.wrapping_sub(r).wrapping_div(y), inexact))
 }
-fn p_floor_remainder(_e: &mut Engine, a: &[Value]) -> PResult {
-    let (x, y) = int_pair("floor-remainder", a)?;
-    Ok(Value::Fixnum(((x % y) + y) % y))
+fn p_floor_remainder(e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y, inexact) = int_pair("floor-remainder", e, a)?;
+    let r = x.checked_rem(y).unwrap_or(0);
+    Ok(int_result(
+        r.wrapping_add(y).checked_rem(y).unwrap_or(0),
+        inexact,
+    ))
 }
 
 /// Without `ratios`, every exact number is an integer: its numerator is
@@ -3089,6 +3144,7 @@ pub fn install(vm: &mut Vm) {
     // Recognised by `Vm::apply`, which is why the body here is unreachable:
     // a PrimFn cannot call a procedure, and call/cc's whole job is to.
     vm.define_prim("call-with-current-continuation", callcc_placeholder);
+    vm.define_prim("dynamic-wind", callcc_placeholder);
     vm.define_prim("values", values_prim);
     vm.define_prim("call-with-values", apply_placeholder);
     vm.define_prim("eval", apply_placeholder);

@@ -36,6 +36,9 @@ used to take all of its tests with it, and aborted forms went 150 → 37. So
 | after range arguments | **934** | **81.0%** |
 | after the wrong-answer pass | **1022** | **87.8%** |
 | after S9's first batch | **1048** | **89.9%** |
+| after records / values / binary ports | **1078** | **92.5%** |
+| after `call/cc` and `let-syntax` | **1093** | **93.0%** |
+| after the last S9 batch | **1103** | **93.9%** |
 
 `quasiquote` gained exactly the 7 assertions the table below predicted, which
 is a useful calibration: the priority list can be trusted to be roughly
@@ -292,3 +295,46 @@ A reader *directive*, not a datum — it changes how later symbols read and
 produces no value, so it belongs with the things that get skipped rather than
 in the `#` dispatch, which has to return something. `|MiXeD|` is deliberately
 not folded, which is the whole reason that syntax exists.
+
+## S9 complete: 99.0% of the declared subset, and the 11 that remain
+
+**The denominator matters, and I was quoting the wrong one.** S9's exit
+criterion is "conformance ≥ 95% **of the declared subset**, every failure
+individually explained". §2.3 declines `(scheme complex)`, bignums and
+`full-unicode`, and **61 of the 72 remaining failures are exactly those
+declines**:
+
+| | |
+|---|---|
+| of all assertions reached | 1103 / 1175 = **93.9%** |
+| **of the declared subset** | 1103 / 1114 = **99.0%** |
+
+So the criterion is met. Here is the other half of it: all 11.
+
+### Declined, by a decision recorded before they were measured
+
+| | why |
+|---|---|
+| **61** — `make-rectangular`, `complex?`, `real-part`, `3.0+inf.0i` and the rest; `exact-integer-sqrt` of 2¹¹⁹; `digit-value` of an Arabic-Indic digit; `string-foldcase "Maß"` | §2.3: no numeric tower, no bignums, no `full-unicode`. `(features)` claims none of `exact-closed`, `ratios`, `full-unicode` or `exact-complex`, and there is a test asserting each absence |
+| **1** — the R7RS `dynamic-wind` example that re-enters a saved continuation | §3.1 chose the **escape-only** rung of the continuation ladder. Re-entry needs the control stack copied; the explicit stack (§5) makes that possible later without making it necessary now |
+| **3** — `(environment '(scheme base))` and `eval` against it | `(scheme eval)`'s first-class environments. **Declined now, explicitly**, rather than left looking like an oversight: scm has one interactive environment, which is what §8 obligation 1 committed to, and a second kind of environment object is a library-system question (S5's remainder) rather than an `eval` question |
+
+### Real, and left for what they are: seven hygiene corners
+
+Each is a genuine R7RS requirement and each is small, but they are *deep*
+rather than *wide* — seven assertions between them, in the part of the
+expander that took the longest to get right.
+
+| | what |
+|---|---|
+| `(let ((=> #f)) (cond (#t => 'ok)))` | an **auxiliary keyword** shadowed by a local binding. `cond` must notice that `=>` is a variable here and treat the clause as an ordinary test-and-value |
+| `(m k)` wants `bound-identifier=?`, gets `free-identifier=?` | the two notions of identifier equality a macro can ask about. Only one is implemented |
+| `count-to-2_` with `_` arguments | `_` in a *pattern* matches without binding; as an *argument* it is an ordinary identifier. The two readings are not separated |
+| `sequence3`, `elli-lit-1` | ellipsis corners: a template whose ellipsis has no pattern variable under it, and a rule whose literals interact with one |
+| `mad-hatter` / `march-hare.NNNN` | a macro-defining-macro whose renamed identifier escapes its expansion. The sibling of the bug fixed in the wrong-answer pass, and not the same one |
+| `(dead-clause)` | an arity error from a `case-lambda`-shaped definition the suite builds in a macro |
+
+These are the only places where scm claims a feature and gets it wrong, and
+they are recorded here rather than fixed because the cost is in the expander's
+hardest region for seven assertions. If a *real* macro ever trips on one, that
+changes the arithmetic.

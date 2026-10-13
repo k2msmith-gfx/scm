@@ -326,3 +326,160 @@ fn flush_output_port_exists_even_though_it_does_nothing() {
         "ok"
     );
 }
+
+// ---- batch 4: continuations, dynamic-wind, and inexact integers --------
+
+#[test]
+fn an_integer_may_be_inexact() {
+    // R7RS's integer division is about INTEGERS, and `32.0` is one. Refusing
+    // a flonum outright was the wrong reading: the exactness of the
+    // arguments decides the exactness of the RESULT, not whether the call is
+    // legal.
+    assert_eq!(eval("(remainder -13 -4.0)"), "-1.0");
+    assert_eq!(eval("(quotient 7.0 2)"), "3.0");
+    assert_eq!(eval("(modulo -13 4.0)"), "3.0");
+    assert_eq!(eval("(list (gcd 32.0 -36) (lcm 32.0 -36))"), "(4.0 288.0)");
+    // The zero shortcut has to carry exactness too.
+    assert_eq!(eval("(lcm 32.0 0)"), "0.0");
+    // And all-exact stays exact, which is the half that was already right.
+    assert_eq!(eval("(list (quotient 7 2) (gcd 32 -36) (lcm 32 -36))"), "(3 4 288)");
+    // A non-integral flonum is still an error.
+    assert!(err_of("(quotient 7.5 2)").contains("integers"));
+    // As is one too large for an i64 -- `as i64` would saturate, which is a
+    // wrong answer rather than a refusal.
+    assert!(err_of("(quotient 1e30 2)").contains("integers"));
+}
+
+#[test]
+fn a_continuation_is_a_procedure() {
+    // Missed when escape continuations landed: the new heap object had to be
+    // added to five matches, and `procedure?` was the one with no compiler
+    // error to catch it.
+    assert_eq!(eval("(call-with-current-continuation procedure?)"), "#t");
+    assert_eq!(eval("(procedure? (make-parameter 1))"), "#t");
+    assert_eq!(eval("(list (procedure? car) (procedure? (lambda () 1)) (procedure? 4))"), "(#t #t #f)");
+}
+
+#[test]
+fn member_and_assoc_take_a_comparator() {
+    assert_eq!(eval(r##"(member "B" '("a" "b" "c") string-ci=?)"##), "(\"b\" \"c\")");
+    assert_eq!(eval("(assoc 2.0 '((1 1) (2 4) (3 9)) =)"), "(2 4)");
+    // The default is still `equal?`.
+    assert_eq!(eval("(member 2 '(1 2 3))"), "(2 3)");
+    assert_eq!(eval("(assoc 'b '((a . 1) (b . 2)))"), "(b . 2)");
+    assert_eq!(eval("(member 9 '(1 2))"), "#f");
+}
+
+#[test]
+fn dynamic_wind_runs_after_on_every_way_out() {
+    // Three exits, one mechanism. That is the point: a normal return is a
+    // chain of one `after`, and an unwind is a chain of however many winds
+    // it crossed. Three separate mechanisms is how this usually goes wrong.
+    let log = "(define log '())
+               (define (note s) (set! log (cons s log)))
+               (define (seen) (reverse log))";
+
+    // Normal: the BODY's value leaves, not `after`'s.
+    assert_eq!(
+        eval(&format!(
+            "{log}
+             (let ([r (dynamic-wind (lambda () (note 'before))
+                                    (lambda () (note 'body) 'result)
+                                    (lambda () (note 'after)))])
+               (list r (seen)))"
+        )),
+        "(result (before body after))"
+    );
+
+    // Escaping out through it.
+    assert_eq!(
+        eval(&format!(
+            "{log}
+             (let ([r (call-with-current-continuation
+                        (lambda (k)
+                          (dynamic-wind (lambda () (note 'before))
+                                        (lambda () (k 'escaped))
+                                        (lambda () (note 'after)))))])
+               (list r (seen)))"
+        )),
+        "(escaped (before after))"
+    );
+
+    // An error through it: `after` runs and the condition still arrives.
+    assert_eq!(
+        eval(&format!(
+            "{log}
+             (let ([r (guard (e (else 'caught))
+                        (dynamic-wind (lambda () (note 'before))
+                                      (lambda () (car '()))
+                                      (lambda () (note 'after))))])
+               (list r (seen)))"
+        )),
+        "(caught (before after))"
+    );
+
+    // Nested, escaping from the inside: both run, innermost first.
+    assert_eq!(
+        eval(&format!(
+            "{log}
+             (call-with-current-continuation
+               (lambda (k)
+                 (dynamic-wind (lambda () (note 'out-before))
+                   (lambda () (dynamic-wind (lambda () (note 'in-before))
+                                            (lambda () (k 'gone))
+                                            (lambda () (note 'in-after))))
+                   (lambda () (note 'out-after)))))
+             (seen)"
+        )),
+        "(out-before in-before in-after out-after)"
+    );
+}
+
+#[test]
+fn an_inner_guard_beats_an_outer_handler() {
+    // SRFI-34 example 5, and the bug it found: `raise` dispatches through
+    // the handler stack at the raise point, so a guard that only caught the
+    // UNWIND lost to any `with-exception-handler` installed outside it --
+    // the outer handler ran and the guard never saw the condition. R7RS
+    // orders handlers innermost-first, so `guard` installs one too.
+    let t4 = "(define (t4 v out)
+                (call-with-current-continuation
+                  (lambda (k)
+                    (with-exception-handler
+                      (lambda (x) (display \"reraised \" out) (write x out)
+                                  (display #\\! out) (k 'zero))
+                      (lambda ()
+                        (guard (c ((positive? c) 'positive) ((negative? c) 'negative))
+                          (raise v)))))))
+              (define (run v)
+                (let* ([o (open-output-string)] [val (t4 v o)])
+                  (list val (get-output-string o))))";
+    // The guard matches, so the outer handler never runs and nothing is
+    // written.
+    assert_eq!(eval(&format!("{t4} (run 1)")), "(positive \"\")");
+    assert_eq!(eval(&format!("{t4} (run -1)")), "(negative \"\")");
+    // No clause matches, so it re-raises OUTWARD -- not back into itself.
+    assert_eq!(eval(&format!("{t4} (run 0)")), "(zero \"reraised 0!\")");
+}
+
+#[test]
+fn guard_still_catches_what_never_went_through_raise() {
+    // A machine error does not pass through the handler stack at all, so
+    // `%try` is still needed -- which is why `guard` does both.
+    assert_eq!(eval("(guard (e (else 'caught)) (car '()))"), "caught");
+    assert_eq!(eval("(guard (e (else 'caught)) (vector-ref (vector) 0))"), "caught");
+    assert_eq!(eval("(guard (e (else 'caught)) (raise 'x))"), "caught");
+    // A non-matching inner guard falls through to the outer one.
+    assert_eq!(
+        eval("(guard (e (else 'outer)) (guard (e2 ((number? e2) 'num)) (raise 'not-a-number)))"),
+        "outer"
+    );
+    // And the host's own stop is still not catchable (requirement 8).
+    let mut vm = Vm::new();
+    vm.set_fuel(Some(20_000));
+    assert!(
+        vm.eval_str("(guard (e (else 'caught)) (let loop () (loop)))")
+            .is_err(),
+        "out-of-fuel must not be catchable, even now that guard installs a handler"
+    );
+}

@@ -1,6 +1,6 @@
 # scm-conform/suites/r7rs-tests.scm
 
-passed 1093, failed 82
+passed 1103, failed 72
 
 ## unreadable forms
 
@@ -55,7 +55,7 @@ passed 1093, failed 82
 - 4.2 Derived expression types | (dead-clause) | raised: #<procedure> expects 1 required argument, got 0
 - 4.3 Macros | (sequence3 2 3 4 5) | raised: no matching syntax rule for sequence3
 - 4.3 Macros | (list (count-to-2_ _ _) (count-to-2_) (count-to-2_ a b) (count-to-2_ a b c d)) | want (2 0 fail fail), got (2 0 2 fail)
-- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1280
+- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1285
 - 4.3 Macros | (let ((=> #f)) (cond (#t => 'ok))) | raised: not applicable: ok
 - 4.3 Macros | (m k) | want bound-identifier=?, got free-identifier=?
 - 4.3 Macros | (elli-lit-1 100) | raised: elli-lit-1: `...` with no pattern variable to repeat
@@ -76,9 +76,6 @@ passed 1093, failed 82
 - 6.2 Numbers | (= 1 1.0 1.0+0.0i) | raised: unbound variable: 1.0+0.0i
 - 6.2 Numbers | (= 1.0 1.0+1.0i) | raised: unbound variable: 1.0+1.0i
 - 6.2 Numbers | (zero? 0.0+0.0i) | raised: unbound variable: 0.0+0.0i
-- 6.2 Numbers | (truncate/ -5.0 -2) | raised: truncate/: expects two exact integers
-- 6.2 Numbers | (remainder -13 -4.0) | raised: remainder: expects two exact integers
-- 6.2 Numbers | (lcm 32.0 -36) | raised: lcm: expects exact integers, got 32.0
 - 6.2 Numbers | (inexact (sqrt -1)) | expected-expr raised: unbound variable: 0.0+1.0i
 - 6.2 Numbers | (sqrt -1.0-0.0i) | expected-expr raised: unbound variable: 0.0+1.0i
 - 6.2 Numbers | (make-rectangular 1 2) | expected-expr raised: unbound variable: 1+2i
@@ -87,18 +84,11 @@ passed 1093, failed 82
 - 6.2 Numbers | (imag-part 1+2i) | raised: unbound variable: imag-part
 - 6.2 Numbers | (magnitude 1+2i) | raised: unbound variable: magnitude
 - 6.2 Numbers | (angle 1+2i) | raised: unbound variable: angle
-- 6.4 Lists | (member "B" '("a" "b" "c") string-ci=?) | raised: member got 3 arguments, which is more than it takes
-- 6.4 Lists | (assoc 2.0 '((1 1) (2 4) (3 9)) =) | raised: assoc got 3 arguments, which is more than it takes
 - 6.6 Characters | (digit-value #\٤) | want 4, got #f
 - 6.6 Characters | (digit-value #\૦) | want 0, got #f
 - 6.7 Strings | (string-foldcase "Maß") | want "mass", got "maß"
 - 6.7 Strings | (string-foldcase "ſ") | want "s", got "ſ"
-- 6.10 Control Features | (call-with-current-continuation procedure?) | want #t, got #f
-- 6.10 Control Features | (let ((path '()) (c #f)) (let ((add (lambda (s) (set! path (cons s path))))) (dynamic-wind (lambda () (add 'connect)) (lambda () (add (call-with-current-continuation (lambda (c0) (set! c c0) 'talk1)))) (lambda () (add 'disconnect))) (if (< (length path) 4) (c 'talk2) (reverse path)))) | raised: unbound variable: dynamic-wind
-- 6.11 Exceptions | (get-output-string out) | want "", got "reraised 1!"
-- 6.11 Exceptions | value | want positive, got zero
-- 6.11 Exceptions | (get-output-string out) | want "", got "reraised -1!"
-- 6.11 Exceptions | value | want negative, got zero
+- 6.10 Control Features | (let ((path '()) (c #f)) (let ((add (lambda (s) (set! path (cons s path))))) (dynamic-wind (lambda () (add 'connect)) (lambda () (add (call-with-current-continuation (lambda (c0) (set! c c0) 'talk1)))) (lambda () (add 'disconnect))) (if (< (length path) 4) (c 'talk2) (reverse path)))) | raised: this continuation has escaped its extent (continuations are escape-only, plan §3.1)
 - 6.12 Environments and evaluation | (eval '(expt 2 10) (environment '(scheme base))) | raised: unbound variable: environment
 - 6.12 Environments and evaluation | (inexact (eval '(sin 0) (environment '(scheme inexact)))) | raised: unbound variable: environment
 - 6.12 Environments and evaluation | (eval '(+ (expt 2 10) (inexact (sin 0))) (environment '(scheme base) '(scheme inexact))) | raised: unbound variable: environment

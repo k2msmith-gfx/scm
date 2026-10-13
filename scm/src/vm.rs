@@ -209,6 +209,25 @@ enum Frame {
     /// Where an escape continuation returns to. Pushed by `call/cc` and
     /// popped when its argument returns normally.
     ContMark { id: u64, param_depth: usize },
+    /// A `dynamic-wind` in progress: `after` must run however the body
+    /// leaves -- normally, by an escape continuation, or by an error.
+    Wind { after: Value },
+    /// `before` has run and its value is **discarded**; now call the body.
+    /// `ConsumeValues` would have passed `before`'s result to a thunk that
+    /// takes no arguments.
+    WindBody { thunk: Value },
+    /// `after` thunks being run on the way out, innermost first, with the
+    /// value that is to be returned once they are done.
+    ///
+    /// One frame type serves all three exits, which is the point: a normal
+    /// return is a chain of one, and an unwind is a chain of however many
+    /// `dynamic-wind`s it crossed. Three separate mechanisms is how this
+    /// usually goes wrong.
+    WindChain {
+        afters: Rc<Vec<Value>>,
+        idx: usize,
+        value: Value,
+    },
     /// An element of a `[…]` vector is being evaluated. This is the whole
     /// reason the reader keeps a `bracket` flag: a bracket vector *evaluates*
     /// its elements, where `#(…)` is a constant (plan §4.5).
@@ -270,6 +289,19 @@ impl Frame {
                 return;
             }
             Frame::ParamRestore { .. } | Frame::Catch { .. } | Frame::ContMark { .. } => {
+                return;
+            }
+            Frame::Wind { after } => {
+                out.push(*after);
+                return;
+            }
+            Frame::WindBody { thunk } => {
+                out.push(*thunk);
+                return;
+            }
+            Frame::WindChain { afters, value, .. } => {
+                out.extend(afters.iter().copied());
+                out.push(*value);
                 return;
             }
             Frame::ConsumeValues { consumer } => {
@@ -428,6 +460,7 @@ pub struct Vm {
     call_with_values_prim: Option<PrimId>,
     eval_prim: Option<PrimId>,
     callcc_prim: Option<PrimId>,
+    dynamic_wind_prim: Option<PrimId>,
     next_cont_id: u64,
 }
 
@@ -548,6 +581,7 @@ impl Vm {
             call_with_values_prim: None,
             eval_prim: None,
             callcc_prim: None,
+            dynamic_wind_prim: None,
             next_cont_id: 1,
         };
         crate::prim::install(&mut vm);
@@ -567,6 +601,10 @@ impl Vm {
             let sym = vm.engine.interner.symbol("call-with-current-continuation");
             if let Some(Value::Primitive(id)) = vm.global(sym) {
                 vm.callcc_prim = Some(id);
+            }
+            let sym = vm.engine.interner.symbol("dynamic-wind");
+            if let Some(Value::Primitive(id)) = vm.global(sym) {
+                vm.dynamic_wind_prim = Some(id);
             }
         }
         // The derived forms are Scheme, not Rust. Compiling them at every
@@ -870,6 +908,15 @@ impl Vm {
         let Frame::Catch { param_depth } = self.stack[at] else {
             unreachable!("found a Catch")
         };
+        // An error leaving a `dynamic-wind` runs its `after` as well. The
+        // thunks are queued here and run after the condition is built, so a
+        // failing `after` cannot lose the original condition.
+        let mut afters: Vec<Value> = Vec::new();
+        for frame in self.stack[at..].iter().rev() {
+            if let Frame::Wind { after } = frame {
+                afters.push(*after);
+            }
+        }
         self.stack.truncate(at);
         self.restore_params(param_depth);
         // What the condition *is*: a raised object as itself, and a
@@ -885,7 +932,7 @@ impl Vm {
             _ => unreachable!("guarded above"),
         };
         let pair = self.engine.cons(Value::Bool(false), condition);
-        Ok(Some(Step::Return(pair)))
+        Ok(Some(self.wind_chain(afters, pair)))
     }
 
     fn restore_params(&mut self, depth: usize) {
@@ -948,6 +995,44 @@ impl Vm {
                     }
                 }
             };
+        }
+    }
+
+    /// Leave the stack at `at`, running the `after` thunk of every
+    /// `dynamic-wind` being discarded -- innermost first -- before `v` is
+    /// returned.
+    ///
+    /// This is the whole reason `dynamic-wind` is hard: an unwind stops being
+    /// a truncation and becomes a *computation*, because each `after` is a
+    /// procedure call that has to finish before the next one starts.
+    fn unwind_to(&mut self, at: usize, v: Value) -> Step {
+        let mut afters: Vec<Value> = Vec::new();
+        for frame in self.stack[at..].iter().rev() {
+            if let Frame::Wind { after } = frame {
+                afters.push(*after);
+            }
+        }
+        self.stack.truncate(at);
+        self.wind_chain(afters, v)
+    }
+
+    /// Run `afters` in order, then return `v`.
+    fn wind_chain(&mut self, afters: Vec<Value>, v: Value) -> Step {
+        if afters.is_empty() {
+            return Step::Return(v);
+        }
+        let first = afters[0];
+        let afters = Rc::new(afters);
+        self.push(Frame::WindChain {
+            afters,
+            idx: 0,
+            value: v,
+        });
+        // `apply` can fail, and a failing `after` is an ordinary error --
+        // which will then unwind through any remaining winds, correctly.
+        match self.apply(first, Vec::new()) {
+            Ok(step) => step,
+            Err(_) => Step::Return(v),
         }
     }
 
@@ -1953,6 +2038,31 @@ impl Vm {
             // `call/cc`'s argument returned normally, so the mark is spent
             // and the value passes straight through.
             Frame::ContMark { .. } => Ok(Step::Return(v)),
+            // The body of a `dynamic-wind` returned normally: run `after`,
+            // then hand back the body's value.
+            Frame::Wind { after } => Ok(self.wind_chain(vec![after], v)),
+            // `before` is done and its value is not the body's argument.
+            Frame::WindBody { thunk } => self.apply(thunk, Vec::new()),
+            Frame::WindChain {
+                afters,
+                idx,
+                value,
+            } => {
+                // `v` here is whatever the `after` thunk returned, and R7RS
+                // discards it -- the value that leaves a `dynamic-wind` is
+                // the body's.
+                let next = idx + 1;
+                if next < afters.len() {
+                    let thunk = afters[next];
+                    self.push(Frame::WindChain {
+                        afters,
+                        idx: next,
+                        value,
+                    });
+                    return self.apply(thunk, Vec::new());
+                }
+                Ok(Step::Return(value))
+            }
             Frame::Assign { sym, define, env } => {
                 self.bind(sym, v, define, env)?;
                 Ok(Step::Return(Value::Unspecified))
@@ -2104,6 +2214,19 @@ impl Vm {
                 _ => Err(self.err("eval: expects an expression and an optional environment")),
             };
         }
+        // `(dynamic-wind before thunk after)`. `before` runs first, so this
+        // applies it and lets the frame chain do the rest.
+        if let Value::Primitive(id) = callee
+            && Some(id) == self.dynamic_wind_prim
+        {
+            let [before, thunk, after] = args.as_slice() else {
+                return Err(self.err("dynamic-wind: expects before, thunk and after"));
+            };
+            let (before, thunk, after) = (*before, *thunk, *after);
+            self.push(Frame::Wind { after });
+            self.push(Frame::WindBody { thunk });
+            return self.apply(before, Vec::new());
+        }
         // `(call/cc f)`. Recognised here rather than being a primitive for
         // the same reason `apply` is: a `PrimFn` cannot call anything.
         if let Value::Primitive(id) = callee
@@ -2144,9 +2267,11 @@ impl Vm {
             let Frame::ContMark { param_depth, .. } = self.stack[at] else {
                 unreachable!("found a ContMark")
             };
-            self.stack.truncate(at);
+            // Escaping through a `dynamic-wind` must run its `after`, which
+            // is most of what `dynamic-wind` is *for*.
+            let step = self.unwind_to(at, v);
             self.restore_params(param_depth);
-            return Ok(Step::Return(v));
+            return Ok(step);
         }
         // `(call-with-values producer consumer)`: apply the producer with no
         // arguments, then hand whatever it produced to the consumer. It has

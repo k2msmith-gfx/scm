@@ -143,10 +143,15 @@
         [(eqv? x (car lst)) lst]
         [else (memv x (cdr lst))]))
 
-(define (member x lst)
-  (cond [(null? lst) #f]
-        [(equal? x (car lst)) lst]
-        [else (member x (cdr lst))]))
+;; R7RS gives `member` and `assoc` an optional comparator, which is the only
+;; way to ask "is this string in the list, case-insensitively" without
+;; rewriting the walk. `equal?` is the default, not the rule.
+(define (member x lst . compare)
+  (let ([same? (if (null? compare) equal? (car compare))])
+    (let loop ([lst lst])
+      (cond [(null? lst) #f]
+            [(same? x (car lst)) lst]
+            [else (loop (cdr lst))]))))
 
 (define (memq x lst) (memv x lst))
 
@@ -157,10 +162,12 @@
 
 (define (assq x alist) (assv x alist))
 
-(define (assoc x alist)
-  (cond [(null? alist) #f]
-        [(equal? x (car (car alist))) (car alist)]
-        [else (assoc x (cdr alist))]))
+(define (assoc x alist . compare)
+  (let ([same? (if (null? compare) equal? (car compare))])
+    (let loop ([alist alist])
+      (cond [(null? alist) #f]
+            [(same? x (car (car alist))) (car alist)]
+            [else (loop (cdr alist))]))))
 
 ;; `map` over one or more lists, and `for-each` for effect. Written with an
 ;; accumulate-and-reverse loop rather than recursion, because a scene maps over
@@ -387,14 +394,37 @@
             ((car hs) obj))
           (%raise obj)))))
 
+;; `guard` has to do TWO things, because conditions arrive two ways.
+;;
+;; A `raise` is dispatched through `%handlers` at the raise point, so a guard
+;; that only caught the unwind lost to any `with-exception-handler` installed
+;; OUTSIDE it -- the outer handler ran first and the guard never saw the
+;; condition. R7RS orders handlers innermost-first, so `guard` installs one
+;; too, and escapes to its own continuation with the clause result. Found by
+;; the suite's SRFI-34 example 5: a guard inside a handler, where the guard
+;; must win.
+;;
+;; A machine error -- `(car '())` -- never goes through `raise` at all, so
+;; `%try` is still needed for those. Hence both, in one form.
+;;
+;; When no clause matches, `%guard-clauses` re-raises. Inside the handler that
+;; is already running with `%handlers` popped (`raise` parameterizes the
+;; tail), so the re-raise travels OUTWARD rather than back into this guard.
 (define-syntax guard
   (syntax-rules ()
     [(_ (var clause ...) body ...)
-     (let ([r (%try (begin body ...))])
-       (if (car r)
-           (cdr r)
-           (let ([var (cdr r)])
-             (%guard-clauses var clause ...))))]))
+     (call-with-current-continuation
+       (lambda (%guard-k)
+         (let ([r (%try (with-exception-handler
+                          (lambda (%condition)
+                            (%guard-k
+                              (let ([var %condition])
+                                (%guard-clauses var clause ...))))
+                          (lambda () body ...)))])
+           (if (car r)
+               (cdr r)
+               (let ([var (cdr r)])
+                 (%guard-clauses var clause ...))))))]))
 
 ;; Like `cond`, except that falling off the end RE-RAISES rather than
 ;; returning #f -- a `guard` that matches nothing must not swallow the
