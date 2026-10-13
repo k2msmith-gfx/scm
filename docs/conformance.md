@@ -14,9 +14,9 @@ forms:          1191
 unreadable:       19
 forms aborted:    37
 
-tests passed:    675
-tests failed:    468
-conformance:    59.1% of 1143 assertions reached
+tests passed:    934
+tests failed:    219
+conformance:    81.0% of 1153 assertions reached
 ```
 
 Note the denominator moved. Ports did not only make assertions *pass*, they
@@ -31,7 +31,9 @@ used to take all of its tests with it, and aborted forms went 150 → 37. So
 | after `quasiquote` | 439 | 46.6% |
 | after `guard`/`raise` | 457 | 48.5% |
 | after ports | 624 | 54.6% |
-| after multiple values | **675** | **59.1%** |
+| after multiple values | 675 | 59.1% |
+| after the cheap tail | 899 | 78.0% |
+| after range arguments | **934** | **81.0%** |
 
 `quasiquote` gained exactly the 7 assertions the table below predicted, which
 is a useful calibration: the priority list can be trusted to be roughly
@@ -87,7 +89,28 @@ Counted by how many assertions each absence costs:
 | 4 | ~~~20~~ | ~~**Multiple values**~~ — **done**, and it gained 51 rather than the ~20 predicted: `call-with-values` is reached by far more of the suite than the obvious entries |
 | 5 | ~~7~~ | ~~**`quasiquote`**~~ — **done**, and it gained exactly the 7 predicted |
 | 6 | 6 | **`call/cc`** — escape continuations are the §3.1 rung we committed to |
-| 7 | ~45 | **A long tail of absent procedures**, each cheap: `vector-copy!`, `vector-append`, `string-copy!`, `string-foldcase`, `string>=?`, `digit-value`, `list-copy`, `boolean=?`, `real?`, `rational?`, `char-ready?`, … |
+| 7 | ~~~45~~ | ~~**A long tail of absent procedures**~~ — **done**, ~60 of them, and it gained **259** rather than the 45 predicted. The prediction counted only the assertions that named a missing procedure; it missed that most failures had *several* causes, so filling one often fixed a test counted against another |
+
+### What the tail cost, and what it found
+
+Two real bugs, both of which the suite caught by *hanging the entire run*
+rather than by failing a test:
+
+1. **`exact-integer-sqrt` looped forever near `i64::MAX`.** `(r + 1) * (r + 1)`
+   overflows and wraps negative, so `while … <= n` never ended. The suite
+   tests the boundary.
+2. **`write` looped forever on a cycle.** Adding `set-cdr!` made cycles
+   constructible for the first time — a consequence S1 predicted and parked —
+   and the writer had no cycle detection. R7RS wants datum labels, and *only*
+   where a cycle would make the output infinite: `(write (list x x))` on
+   shared-but-acyclic structure must still read `((1 2 3) (1 2 3))`, which is
+   what separates `write` from `write-shared`. All three now match the suite's
+   expected strings.
+
+Plus two smaller ones: the reader did not decode `\x…;` escapes inside
+`|…|` symbols, so `|H\x65;llo|` came through as `|Hx65;llo|`; and the harness
+compared infinities with `(abs (- a b))`, which is NaN for two infinities, so
+every `+inf.0` in the suite failed against itself.
 
 Plus 19 unreadable forms, most of them `1/3`-style exact rationals that §2.3
 deliberately does not support — those are *correctly* failing and belong in

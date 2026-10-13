@@ -45,9 +45,15 @@
 
 (define (%same? a b)
   (if (and (number? a) (number? b) (or (not (exact? a)) (not (exact? b))))
-      (let ([d (abs (- a b))])
-        (or (< d %epsilon)
-            (< (/ d (max (abs a) (abs b) %epsilon)) 1e-9)))
+      ;; An infinity must compare equal to itself before the subtraction is
+      ;; tried: (abs (- +inf.0 +inf.0)) is NaN, so the approximate test said
+      ;; #f for every infinity in the suite.
+      (cond [(and (nan? a) (nan? b)) #t]
+            [(or (nan? a) (nan? b)) #f]
+            [(or (infinite? a) (infinite? b)) (= a b)]
+            [else (let ([d (abs (- a b))])
+                    (or (< d %epsilon)
+                        (< (/ d (max (abs a) (abs b) %epsilon)) 1e-9)))])
       (equal? a b)))
 
 (define-syntax test-assert

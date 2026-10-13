@@ -498,3 +498,109 @@
   (syntax-rules ()
     [(_ formals expr body ...)
      (call-with-values (lambda () expr) (lambda formals body ...))]))
+
+;; ── promises, case-lambda, and the last of the list/string vocabulary ───
+;;
+;; All of this is Scheme because none of it needs the machine. A promise is a
+;; mutable cell plus a thunk, and `force` is an ordinary procedure -- no VM
+;; support at all, which is the test of whether `delay` really is a macro.
+
+(define (%make-promise-thunk thunk) (vector 'promise #f thunk))
+
+(define-syntax delay
+  (syntax-rules ()
+    [(_ expr) (%make-promise-thunk (lambda () expr))]))
+
+(define-syntax delay-force
+  (syntax-rules ()
+    [(_ expr) (%make-promise-thunk (lambda () (force expr)))]))
+
+(define (make-promise v)
+  (if (promise? v) v (vector 'promise #t v)))
+
+(define (promise? x)
+  (and (vector? x)
+       (= (vector-length x) 3)
+       (eq? (vector-ref x 0) 'promise)))
+
+;; Memoising: a promise is forced at most once, which is the whole point.
+(define (force p)
+  (if (promise? p)
+      (if (vector-ref p 1)
+          (vector-ref p 2)
+          (let ([v ((vector-ref p 2))])
+            ;; Re-check: forcing may have forced this same promise.
+            (if (vector-ref p 1)
+                (vector-ref p 2)
+                (begin
+                  (vector-set! p 1 #t)
+                  (vector-set! p 2 v)
+                  v))))
+      p))
+
+;; `case-lambda` dispatches on the number of arguments. The proper-list
+;; pattern has to come first, so a clause with a rest formal is the catch-all
+;; it looks like.
+(define-syntax case-lambda
+  (syntax-rules ()
+    [(_ clause ...) (lambda args (%cl args clause ...))]))
+
+(define-syntax %cl
+  (syntax-rules ()
+    [(_ args) (error "case-lambda: no clause accepts this many arguments")]
+    [(_ args ((p ...) body ...) rest ...)
+     (if (= (length args) (length '(p ...)))
+         (apply (lambda (p ...) body ...) args)
+         (%cl args rest ...))]
+    [(_ args (formals body ...) rest ...)
+     (apply (lambda formals body ...) args)]))
+
+(define (list-copy lst)
+  (if (pair? lst)
+      (cons (car lst) (list-copy (cdr lst)))
+      lst))
+
+(define (string-map f s . more)
+  (if (null? more)
+      (list->string (map f (string->list s)))
+      (list->string (apply map f (string->list s) (map string->list more)))))
+
+(define (string-for-each f s . more)
+  (if (null? more)
+      (for-each f (string->list s))
+      (apply for-each f (string->list s) (map string->list more))))
+
+(define (vector-for-each* f v) (for-each f (vector->list v)))
+
+(define (bytevector-copy! to at from . range)
+  (let* ([start (if (null? range) 0 (car range))]
+         [end (if (or (null? range) (null? (cdr range)))
+                  (bytevector-length from)
+                  (cadr range))])
+    (let loop ((i start))
+      (if (< i end)
+          (begin
+            (bytevector-u8-set! to (+ at (- i start)) (bytevector-u8-ref from i))
+            (loop (+ i 1)))
+          (if #f #f)))))
+
+(define (make-list n . fill)
+  (let ([v (if (null? fill) #f (car fill))])
+    (let loop ((i 0) (acc '()))
+      (if (= i n) acc (loop (+ i 1) (cons v acc))))))
+
+(define (read-string k port)
+  (let loop ((i 0) (acc '()))
+    (if (= i k)
+        (list->string (reverse acc))
+        (let ([c (read-char port)])
+          (if (eof-object? c)
+              (if (null? acc) c (list->string (reverse acc)))
+              (loop (+ i 1) (cons c acc)))))))
+
+;; `interaction-environment` is the only environment there is, so it is a
+;; token rather than a structure -- enough for `(eval expr (interaction-
+;; environment))`, which is what the suite and ray's 6 `eval` uses need.
+(define (interaction-environment) 'interaction-environment)
+(define (scheme-report-environment n) 'interaction-environment)
+(define (null-environment n) 'interaction-environment)

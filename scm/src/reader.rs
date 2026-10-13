@@ -381,6 +381,7 @@ impl Reader {
     }
 
     fn pipe_symbol(&mut self, e: &mut Engine) -> RResult<Value> {
+        let start = self.pos;
         self.pos += 1;
         let mut out = String::new();
         loop {
@@ -391,6 +392,24 @@ impl Reader {
                     None => return Err(ReadError::Incomplete),
                     Some('n') => out.push('\n'),
                     Some('t') => out.push('\t'),
+                    // `|H\x65;llo|` is the symbol `Hello`. Without this the
+                    // escape came through literally as `x65;`.
+                    Some('x') | Some('X') => {
+                        let mut hex = String::new();
+                        loop {
+                            match self.bump() {
+                                None => return Err(ReadError::Incomplete),
+                                Some(';') => break,
+                                Some(h) => hex.push(h),
+                            }
+                        }
+                        match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                            Some(ch) => out.push(ch),
+                            None => {
+                                return self.invalid(start, format!("bad hex escape in |…|: {hex}"));
+                            }
+                        }
+                    }
                     Some(c) => out.push(c),
                 },
                 Some(c) => out.push(c),

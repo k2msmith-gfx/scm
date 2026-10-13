@@ -268,6 +268,7 @@ pub struct Vm {
     /// has no way to call anything. It is recognised here instead.
     apply_prim: Option<PrimId>,
     call_with_values_prim: Option<PrimId>,
+    eval_prim: Option<PrimId>,
 }
 
 struct SpecialForms {
@@ -343,6 +344,7 @@ impl Vm {
             param_bindings: Vec::new(),
             apply_prim: None,
             call_with_values_prim: None,
+            eval_prim: None,
         };
         crate::prim::install(&mut vm);
         {
@@ -353,6 +355,10 @@ impl Vm {
             let sym = vm.engine.interner.symbol("call-with-values");
             if let Some(Value::Primitive(id)) = vm.global(sym) {
                 vm.call_with_values_prim = Some(id);
+            }
+            let sym = vm.engine.interner.symbol("eval");
+            if let Some(Value::Primitive(id)) = vm.global(sym) {
+                vm.eval_prim = Some(id);
             }
         }
         // The derived forms are Scheme, not Rust. Compiling them at every
@@ -1363,6 +1369,18 @@ impl Vm {
             };
             args.extend(spread);
             return self.apply(f, args);
+        }
+        // `(eval expr env)`. The form is a *value* at run time, so this needs
+        // the machine -- but only to evaluate it, so it is a step rather than
+        // a frame. There is one environment (the globals), which is why
+        // `interaction-environment` is a token rather than a structure.
+        if let Value::Primitive(id) = callee
+            && Some(id) == self.eval_prim
+        {
+            return match args.as_slice() {
+                [form] | [form, _] => Ok(Step::Eval(*form, None)),
+                _ => Err(self.err("eval: expects an expression and an optional environment")),
+            };
         }
         // `(call-with-values producer consumer)`: apply the producer with no
         // arguments, then hand whatever it produced to the consumer. It has

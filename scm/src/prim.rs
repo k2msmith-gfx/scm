@@ -12,7 +12,7 @@ use crate::heap::{Engine, ErrorKind, Obj, PortKind};
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
 use crate::value::ObjRef;
-use crate::writer::{display_str, write_str};
+use crate::writer::{Labels, display_str, write_str, write_with};
 
 type PResult = Result<Value, VmError>;
 
@@ -620,6 +620,31 @@ fn write_string(vm: &mut Vm, a: &[Value]) -> PResult {
     Ok(Value::Unspecified)
 }
 
+/// `write-simple` prints without labels, which R7RS says may not terminate
+/// on a cycle -- and now that `set-cdr!` exists, can be made to prove it.
+fn write_simple(vm: &mut Vm, a: &[Value]) -> PResult {
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("write-simple: expects a value")),
+    };
+    let port = out_port(vm, a, 1)?;
+    let text = write_with(&vm.engine, v, true, Labels::None);
+    emit(&mut vm.engine, port, &text)?;
+    Ok(Value::Unspecified)
+}
+
+/// `write-shared` labels every shared node, not only the cyclic ones.
+fn write_shared(vm: &mut Vm, a: &[Value]) -> PResult {
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("write-shared: expects a value")),
+    };
+    let port = out_port(vm, a, 1)?;
+    let text = write_with(&vm.engine, v, true, Labels::Shared);
+    emit(&mut vm.engine, port, &text)?;
+    Ok(Value::Unspecified)
+}
+
 fn read_char_prim(e: &mut Engine, a: &[Value]) -> PResult {
     read_char(e, a, false)
 }
@@ -707,13 +732,17 @@ fn vector_pop(e: &mut Engine, a: &[Value]) -> PResult {
 }
 
 fn vector_to_list(e: &mut Engine, a: &[Value]) -> PResult {
-    let v = one("vector->list", a)?;
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("vector->list: expects a vector")),
+    };
     let r = vec_ref("vector->list", e, v)?;
     let Obj::Vector { items, .. } = e.obj(r) else {
         unreachable!("checked")
     };
     let items = items.clone();
-    Ok(e.list(&items))
+    let (start, end) = range_of("vector->list", a, 1, items.len())?;
+    Ok(e.list(&items[start..end]))
 }
 
 fn list_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
@@ -736,28 +765,53 @@ fn list_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
 }
 
 fn vector_fill(e: &mut Engine, a: &[Value]) -> PResult {
-    match a {
-        [v, x] => {
-            let r = vec_ref("vector-fill!", e, *v)?;
-            let x = *x;
-            let Obj::Vector { items, .. } = e.obj_mut(r) else {
-                unreachable!("checked")
-            };
-            items.fill(x);
-            Ok(Value::Unspecified)
-        }
-        _ => Err(err("vector-fill!: expects a vector and a value")),
-    }
+    let (v, x) = match a {
+        [v, x, ..] => (*v, *x),
+        _ => return Err(err("vector-fill!: expects a vector and a value")),
+    };
+    let r = vec_ref("vector-fill!", e, v)?;
+    let len = match e.obj(r) {
+        Obj::Vector { items, .. } => items.len(),
+        _ => unreachable!("checked"),
+    };
+    let (start, end) = range_of("vector-fill!", a, 2, len)?;
+    let Obj::Vector { items, .. } = e.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    items[start..end].fill(x);
+    Ok(Value::Unspecified)
+}
+
+fn string_fill(e: &mut Engine, a: &[Value]) -> PResult {
+    let (v, c) = match a {
+        [v, Value::Char(c), ..] => (*v, *c),
+        _ => return Err(err("string-fill!: expects a string and a character")),
+    };
+    let r = str_ref("string-fill!", e, v)?;
+    let len = match e.obj(r) {
+        Obj::Str(cs) => cs.len(),
+        _ => unreachable!("checked"),
+    };
+    let (start, end) = range_of("string-fill!", a, 2, len)?;
+    let Obj::Str(cs) = e.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    cs[start..end].fill(c);
+    Ok(Value::Unspecified)
 }
 
 fn vector_copy(e: &mut Engine, a: &[Value]) -> PResult {
-    let v = one("vector-copy", a)?;
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("vector-copy: expects a vector")),
+    };
     let r = vec_ref("vector-copy", e, v)?;
     let Obj::Vector { items, bracket } = e.obj(r) else {
         unreachable!("checked")
     };
     let (items, bracket) = (items.clone(), *bracket);
-    Ok(e.vector(items, bracket))
+    let (start, end) = range_of("vector-copy", a, 1, items.len())?;
+    Ok(e.vector(items[start..end].to_vec(), bracket))
 }
 
 fn is_vector(e: &mut Engine, a: &[Value]) -> PResult {
@@ -882,12 +936,14 @@ fn substring(e: &mut Engine, a: &[Value]) -> PResult {
 }
 
 fn string_to_list(e: &mut Engine, a: &[Value]) -> PResult {
-    let v = one("string->list", a)?;
-    let cs: Vec<Value> = chars_of("string->list", e, v)?
-        .into_iter()
-        .map(Value::Char)
-        .collect();
-    Ok(e.list(&cs))
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("string->list: expects a string")),
+    };
+    let cs = chars_of("string->list", e, v)?;
+    let (start, end) = range_of("string->list", a, 1, cs.len())?;
+    let items: Vec<Value> = cs[start..end].iter().copied().map(Value::Char).collect();
+    Ok(e.list(&items))
 }
 
 fn list_to_string(e: &mut Engine, a: &[Value]) -> PResult {
@@ -1026,8 +1082,18 @@ fn keyword_to_string(e: &mut Engine, a: &[Value]) -> PResult {
 /// `string->number`, which is Janet's `scan-number` -- 45 corpus uses. Returns
 /// `#f` rather than raising, as R7RS requires.
 fn string_to_number(e: &mut Engine, a: &[Value]) -> PResult {
-    let v = one("string->number", a)?;
-    let s: String = chars_of("string->number", e, v)?.into_iter().collect();
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("string->number: expects a string")),
+    };
+    let text: String = chars_of("string->number", e, v)?.into_iter().collect();
+    let s = match a.get(1) {
+        Some(Value::Fixnum(2)) => format!("#b{text}"),
+        Some(Value::Fixnum(8)) => format!("#o{text}"),
+        Some(Value::Fixnum(16)) => format!("#x{text}"),
+        Some(Value::Fixnum(10)) | None => text,
+        _ => return Err(err("string->number: radix must be 2, 8, 10 or 16")),
+    };
     let mut scratch = Engine::new();
     match crate::reader::Reader::new(s.trim()).read(&mut scratch) {
         Ok(Some(n @ (Value::Fixnum(_) | Value::Flonum(_)))) => Ok(n),
@@ -1036,10 +1102,34 @@ fn string_to_number(e: &mut Engine, a: &[Value]) -> PResult {
 }
 
 fn number_to_string(e: &mut Engine, a: &[Value]) -> PResult {
-    let v = one("number->string", a)?;
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("number->string: expects a number")),
+    };
     want_number("number->string", v, e)?;
-    let text = write_str(e, v);
-    Ok(e.string(&text))
+    let radix = match a.get(1) {
+        Some(Value::Fixnum(r)) if [2, 8, 10, 16].contains(r) => *r as u32,
+        None => 10,
+        _ => return Err(err("number->string: radix must be 2, 8, 10 or 16")),
+    };
+    if radix == 10 {
+        let text = write_str(e, v);
+        return Ok(e.string(&text));
+    }
+    let Value::Fixnum(n) = v else {
+        return Err(err("number->string: a non-decimal radix needs an exact integer"));
+    };
+    let (sign, mag) = if n < 0 {
+        ("-", (n as i128).unsigned_abs())
+    } else {
+        ("", n as u128)
+    };
+    let digits = match radix {
+        2 => format!("{mag:b}"),
+        8 => format!("{mag:o}"),
+        _ => format!("{mag:x}"),
+    };
+    Ok(e.string(&format!("{sign}{digits}")))
 }
 
 // ── characters ──────────────────────────────────────────────────────────
@@ -1792,6 +1882,618 @@ fn is_char_ready(e: &mut Engine, a: &[Value]) -> PResult {
     })
 }
 
+
+// ── the cheap tail ───────────────────────────────────────────────────────
+//
+// Thirty-odd procedures the R7RS suite named, with no design in any of them.
+// Picked from the measured failure list rather than from the spec's table of
+// contents, which is why `sort` and `get-in` are still absent: nothing asked
+// for them.
+//
+// Two things deliberately NOT here. `make-rectangular` and friends are
+// `(scheme complex)`, a whole tower §2.3 does not claim -- 23 assertions, and
+// they belong in the explained remainder. `let-syntax` needs a macro alias to
+// carry its own environment, which syntax.rs explicitly deferred.
+
+
+/// Optional `start`/`end`, which R7RS allows on most sequence procedures --
+/// several suite failures were only this.
+fn range_of(who: &str, a: &[Value], at: usize, len: usize) -> Result<(usize, usize), VmError> {
+    let start = match a.get(at) {
+        Some(Value::Fixnum(n)) if *n >= 0 => *n as usize,
+        None => 0,
+        _ => return Err(err(format!("{who}: start must be a non-negative exact integer"))),
+    };
+    let end = match a.get(at + 1) {
+        Some(Value::Fixnum(n)) if *n >= 0 => *n as usize,
+        None => len,
+        _ => return Err(err(format!("{who}: end must be a non-negative exact integer"))),
+    };
+    if end > len || start > end {
+        return Err(err(format!("{who}: range {start}..{end} is out of bounds for {len}")));
+    }
+    Ok((start, end))
+}
+
+fn p_is_real(_e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(as_f64(one("real?", a)?).is_some()))
+}
+
+/// Without `ratios` every number is either an exact integer or a flonum, so
+/// `rational?` is true of anything finite -- and saying that plainly is
+/// better than pretending there is a rational type.
+fn p_is_rational(_e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("rational?", a)?;
+    Ok(Value::Bool(match as_f64(v) {
+        Some(x) => x.is_finite(),
+        None => false,
+    }))
+}
+
+fn p_is_integer(_e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("integer?", a)?;
+    Ok(Value::Bool(match v {
+        Value::Fixnum(_) => true,
+        Value::Flonum(x) => x.fract() == 0.0 && x.is_finite(),
+        _ => false,
+    }))
+}
+
+fn p_is_inexact(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("inexact?", a)?;
+    want_number("inexact?", v, e)?;
+    Ok(Value::Bool(matches!(v, Value::Flonum(_))))
+}
+
+fn p_is_finite(e: &mut Engine, a: &[Value]) -> PResult {
+    num_pred("finite?", e, a, |x| x.is_finite())
+}
+
+fn p_is_infinite(e: &mut Engine, a: &[Value]) -> PResult {
+    num_pred("infinite?", e, a, |x| x.is_infinite())
+}
+
+/// `exact` of an integral flonum is the integer; of anything else it would
+/// need a rational, which §2.3 does not claim, so it says so.
+fn p_exact(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("exact", a)?;
+    want_number("exact", v, e)?;
+    match v {
+        Value::Fixnum(_) => Ok(v),
+        Value::Flonum(x) if x.fract() == 0.0 && x.abs() < (i64::MAX as f64) => {
+            Ok(Value::Fixnum(x as i64))
+        }
+        _ => Err(err(format!(
+            "exact: {} would need an exact rational (the `ratios` feature is absent)",
+            write_str(e, v)
+        ))),
+    }
+}
+
+fn p_square(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("square", a)?;
+    want_number("square", v, e)?;
+    match v {
+        Value::Fixnum(n) => n
+            .checked_mul(n)
+            .map(Value::Fixnum)
+            .ok_or_else(|| err("square: exact integer overflow")),
+        _ => {
+            let x = as_f64(v).expect("checked");
+            Ok(Value::Flonum(x * x))
+        }
+    }
+}
+
+fn p_gcd(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut g: i64 = 0;
+    for &v in a {
+        let Value::Fixnum(n) = v else {
+            return Err(err(format!("gcd: expects exact integers, got {}", write_str(e, v))));
+        };
+        let (mut x, mut y) = (g.abs(), n.abs());
+        while y != 0 {
+            let t = y;
+            y = x % y;
+            x = t;
+        }
+        g = x;
+    }
+    Ok(Value::Fixnum(g))
+}
+
+fn p_lcm(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut l: i64 = 1;
+    for &v in a {
+        let Value::Fixnum(n) = v else {
+            return Err(err(format!("lcm: expects exact integers, got {}", write_str(e, v))));
+        };
+        if n == 0 {
+            return Ok(Value::Fixnum(0));
+        }
+        let (mut x, mut y) = (l.abs(), n.abs());
+        while y != 0 {
+            let t = y;
+            y = x % y;
+            x = t;
+        }
+        l = (l / x).saturating_mul(n).abs();
+    }
+    Ok(Value::Fixnum(l))
+}
+
+/// `(exact-integer-sqrt n)` returns two values: the root and the remainder.
+fn p_exact_integer_sqrt(e: &mut Engine, a: &[Value]) -> PResult {
+    match one("exact-integer-sqrt", a)? {
+        Value::Fixnum(n) if n >= 0 => {
+            // Checked, because `(r + 1) * (r + 1)` overflows near i64::MAX and
+            // wraps negative -- which made the loop below run forever. Found
+            // by the R7RS suite, which tests the boundary.
+            let mut r = (n as f64).sqrt() as i64;
+            while r > 0 && r.checked_mul(r).is_none_or(|sq| sq > n) {
+                r -= 1;
+            }
+            while (r + 1)
+                .checked_mul(r + 1)
+                .is_some_and(|sq| sq <= n)
+            {
+                r += 1;
+            }
+            Ok(e.alloc(Obj::Values(vec![
+                Value::Fixnum(r),
+                Value::Fixnum(n - r * r),
+            ])))
+        }
+        _ => Err(err("exact-integer-sqrt: expects a non-negative exact integer")),
+    }
+}
+
+/// `floor/` and `truncate/` each return the quotient and remainder as two
+/// values, which is why they needed `values` to exist first.
+fn div_pair(who: &'static str, e: &mut Engine, a: &[Value], floor: bool) -> PResult {
+    let (x, y) = int_pair(who, a)?;
+    // The floor remainder takes the sign of the divisor, which is the same
+    // definition `modulo` needed -- and the same place `rem_euclid` was wrong.
+    let (q, r) = if floor {
+        let r = ((x % y) + y) % y;
+        ((x - r) / y, r)
+    } else {
+        (x / y, x % y)
+    };
+    Ok(e.alloc(Obj::Values(vec![Value::Fixnum(q), Value::Fixnum(r)])))
+}
+
+fn p_floor_div(e: &mut Engine, a: &[Value]) -> PResult {
+    div_pair("floor/", e, a, true)
+}
+fn p_truncate_div(e: &mut Engine, a: &[Value]) -> PResult {
+    div_pair("truncate/", e, a, false)
+}
+fn p_floor_quotient(_e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y) = int_pair("floor-quotient", a)?;
+    Ok(Value::Fixnum((x - (((x % y) + y) % y)) / y))
+}
+fn p_floor_remainder(_e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y) = int_pair("floor-remainder", a)?;
+    Ok(Value::Fixnum(((x % y) + y) % y))
+}
+
+/// Without `ratios`, every exact number is an integer: its numerator is
+/// itself and its denominator is 1.
+fn p_numerator(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("numerator", a)?;
+    match v {
+        Value::Fixnum(_) => Ok(v),
+        Value::Flonum(x) if x.fract() == 0.0 => Ok(Value::Flonum(x)),
+        _ => Err(err(format!(
+            "numerator: {} would need an exact rational (the `ratios` feature is absent)",
+            write_str(e, v)
+        ))),
+    }
+}
+
+fn p_denominator(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("denominator", a)?;
+    match v {
+        Value::Fixnum(_) => Ok(Value::Fixnum(1)),
+        Value::Flonum(x) if x.fract() == 0.0 => Ok(Value::Flonum(1.0)),
+        _ => Err(err(format!(
+            "denominator: {} would need an exact rational (the `ratios` feature is absent)",
+            write_str(e, v)
+        ))),
+    }
+}
+
+// ---- characters -------------------------------------------------------
+
+fn char_le(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char<=?", a, |x, y| x <= y)
+}
+fn char_ge(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char>=?", a, |x, y| x >= y)
+}
+fn fold(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+fn char_ci_eq(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char-ci=?", a, |x, y| fold(x) == fold(y))
+}
+fn char_ci_lt(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char-ci<?", a, |x, y| fold(x) < fold(y))
+}
+fn char_ci_gt(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char-ci>?", a, |x, y| fold(x) > fold(y))
+}
+fn char_ci_le(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char-ci<=?", a, |x, y| fold(x) <= fold(y))
+}
+fn char_ci_ge(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char-ci>=?", a, |x, y| fold(x) >= fold(y))
+}
+fn char_upper(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_pred("char-upper-case?", a, |c| c.is_uppercase())
+}
+fn char_lower(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_pred("char-lower-case?", a, |c| c.is_lowercase())
+}
+fn char_foldcase(_e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [Value::Char(c)] => Ok(Value::Char(fold(*c))),
+        _ => Err(err("char-foldcase: expects one character")),
+    }
+}
+
+/// `digit-value` is the numeric value of a digit character, or `#f`.
+fn digit_value(_e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [Value::Char(c)] => Ok(match c.to_digit(10) {
+            Some(d) => Value::Fixnum(d as i64),
+            None => Value::Bool(false),
+        }),
+        _ => Err(err("digit-value: expects one character")),
+    }
+}
+
+// ---- strings ----------------------------------------------------------
+
+fn string_le(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string<=?", e, a, |o| o != std::cmp::Ordering::Greater, false)
+}
+fn string_ge(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string>=?", e, a, |o| o != std::cmp::Ordering::Less, false)
+}
+fn string_ci_lt(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string-ci<?", e, a, |o| o == std::cmp::Ordering::Less, true)
+}
+fn string_ci_gt(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string-ci>?", e, a, |o| o == std::cmp::Ordering::Greater, true)
+}
+fn string_ci_le(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string-ci<=?", e, a, |o| o != std::cmp::Ordering::Greater, true)
+}
+fn string_ci_ge(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string-ci>=?", e, a, |o| o != std::cmp::Ordering::Less, true)
+}
+
+fn string_foldcase(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string-foldcase", a)?;
+    let cs: Vec<char> = chars_of("string-foldcase", e, v)?
+        .iter()
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    Ok(e.alloc(Obj::Str(cs)))
+}
+
+/// `(string-copy! to at from [start [end]])`.
+fn string_copy_into(e: &mut Engine, a: &[Value]) -> PResult {
+    let (to, at, from) = match a {
+        [to, Value::Fixnum(at), from, ..] => (*to, *at as usize, *from),
+        _ => return Err(err("string-copy!: expects (to at from [start [end]])")),
+    };
+    let src = chars_of("string-copy!", e, from)?;
+    let start = match a.get(3) {
+        Some(Value::Fixnum(n)) => *n as usize,
+        None => 0,
+        _ => return Err(err("string-copy!: start must be an exact integer")),
+    };
+    let end = match a.get(4) {
+        Some(Value::Fixnum(n)) => *n as usize,
+        None => src.len(),
+        _ => return Err(err("string-copy!: end must be an exact integer")),
+    };
+    let r = str_ref("string-copy!", e, to)?;
+    let Obj::Str(dst) = e.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    if end > src.len() || start > end || at + (end - start) > dst.len() {
+        return Err(err("string-copy!: range out of bounds"));
+    }
+    dst[at..at + (end - start)].copy_from_slice(&src[start..end]);
+    Ok(Value::Unspecified)
+}
+
+fn string_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string->vector", a)?;
+    let items: Vec<Value> = chars_of("string->vector", e, v)?
+        .into_iter()
+        .map(Value::Char)
+        .collect();
+    Ok(e.vector(items, true))
+}
+
+fn vector_to_string(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("vector->string", a)?;
+    let r = vec_ref("vector->string", e, v)?;
+    let Obj::Vector { items, .. } = e.obj(r) else {
+        unreachable!("checked")
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items.clone() {
+        match item {
+            Value::Char(c) => out.push(c),
+            _ => return Err(err("vector->string: not a vector of characters")),
+        }
+    }
+    Ok(e.alloc(Obj::Str(out)))
+}
+
+// ---- vectors and lists ------------------------------------------------
+
+/// `(vector-copy! to at from [start [end]])`.
+fn vector_copy_into(e: &mut Engine, a: &[Value]) -> PResult {
+    let (to, at, from) = match a {
+        [to, Value::Fixnum(at), from, ..] => (*to, *at as usize, *from),
+        _ => return Err(err("vector-copy!: expects (to at from [start [end]])")),
+    };
+    let rf = vec_ref("vector-copy!", e, from)?;
+    let Obj::Vector { items: src, .. } = e.obj(rf) else {
+        unreachable!("checked")
+    };
+    let src = src.clone();
+    let start = match a.get(3) {
+        Some(Value::Fixnum(n)) => *n as usize,
+        None => 0,
+        _ => return Err(err("vector-copy!: start must be an exact integer")),
+    };
+    let end = match a.get(4) {
+        Some(Value::Fixnum(n)) => *n as usize,
+        None => src.len(),
+        _ => return Err(err("vector-copy!: end must be an exact integer")),
+    };
+    let rt = vec_ref("vector-copy!", e, to)?;
+    let Obj::Vector { items: dst, .. } = e.obj_mut(rt) else {
+        unreachable!("checked")
+    };
+    if end > src.len() || start > end || at + (end - start) > dst.len() {
+        return Err(err("vector-copy!: range out of bounds"));
+    }
+    dst[at..at + (end - start)].copy_from_slice(&src[start..end]);
+    Ok(Value::Unspecified)
+}
+
+fn vector_append(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut out = Vec::new();
+    for &v in a {
+        let r = vec_ref("vector-append", e, v)?;
+        let Obj::Vector { items, .. } = e.obj(r) else {
+            unreachable!("checked")
+        };
+        out.extend(items.iter().copied());
+    }
+    Ok(e.vector(out, true))
+}
+
+fn set_car(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [Value::Obj(r), v] => {
+            let (r, v) = (*r, *v);
+            match e.obj_mut(r) {
+                Obj::Pair(car, _) => {
+                    *car = v;
+                    Ok(Value::Unspecified)
+                }
+                _ => Err(err("set-car!: not a pair")),
+            }
+        }
+        _ => Err(err("set-car!: expects a pair and a value")),
+    }
+}
+
+fn set_cdr(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [Value::Obj(r), v] => {
+            let (r, v) = (*r, *v);
+            match e.obj_mut(r) {
+                Obj::Pair(_, cdr) => {
+                    *cdr = v;
+                    Ok(Value::Unspecified)
+                }
+                _ => Err(err("set-cdr!: not a pair")),
+            }
+        }
+        _ => Err(err("set-cdr!: expects a pair and a value")),
+    }
+}
+
+// ---- equality ---------------------------------------------------------
+
+fn boolean_eq(_e: &mut Engine, a: &[Value]) -> PResult {
+    if a.len() < 2 {
+        return Err(err("boolean=?: needs at least two booleans"));
+    }
+    let mut prev = None;
+    for &v in a {
+        let Value::Bool(b) = v else {
+            return Err(err("boolean=?: expects booleans"));
+        };
+        if let Some(p) = prev
+            && p != b
+        {
+            return Ok(Value::Bool(false));
+        }
+        prev = Some(b);
+    }
+    Ok(Value::Bool(true))
+}
+
+fn symbol_eq(e: &mut Engine, a: &[Value]) -> PResult {
+    if a.len() < 2 {
+        return Err(err("symbol=?: needs at least two symbols"));
+    }
+    let mut prev = None;
+    for &v in a {
+        let Value::Symbol(sid) = v else {
+            return Err(err("symbol=?: expects symbols"));
+        };
+        let r = e.resolve(sid);
+        if let Some(p) = prev
+            && p != r
+        {
+            return Ok(Value::Bool(false));
+        }
+        prev = Some(r);
+    }
+    Ok(Value::Bool(true))
+}
+
+// ---- bytevectors ------------------------------------------------------
+//
+// The heap object has existed since S1 for the reader's `#u8(…)`; these are
+// the procedures over it.
+
+fn bv_ref(who: &str, e: &Engine, v: Value) -> Result<crate::value::ObjRef, VmError> {
+    match v {
+        Value::Obj(r) if matches!(e.obj(r), Obj::Bytevector(_)) => Ok(r),
+        _ => Err(err(format!("{who}: not a bytevector: {}", write_str(e, v)))),
+    }
+}
+
+fn bytes_of(who: &str, e: &Engine, v: Value) -> Result<Vec<u8>, VmError> {
+    let r = bv_ref(who, e, v)?;
+    let Obj::Bytevector(b) = e.obj(r) else {
+        unreachable!("checked")
+    };
+    Ok(b.clone())
+}
+
+fn bv_new(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut out = Vec::with_capacity(a.len());
+    for &v in a {
+        match v {
+            Value::Fixnum(n) if (0..=255).contains(&n) => out.push(n as u8),
+            _ => return Err(err("bytevector: elements must be exact 0..255")),
+        }
+    }
+    Ok(e.bytevector(out))
+}
+
+fn bv_make(e: &mut Engine, a: &[Value]) -> PResult {
+    let (n, fill) = match a {
+        [Value::Fixnum(n)] => (*n, 0u8),
+        [Value::Fixnum(n), Value::Fixnum(f)] if (0..=255).contains(f) => (*n, *f as u8),
+        _ => return Err(err("make-bytevector: expects a length and an optional byte")),
+    };
+    if n < 0 {
+        return Err(err("make-bytevector: negative length"));
+    }
+    Ok(e.bytevector(vec![fill; n as usize]))
+}
+
+fn bv_is(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("bytevector?", a)?;
+    Ok(Value::Bool(
+        matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::Bytevector(_))),
+    ))
+}
+
+fn bv_length(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("bytevector-length", a)?;
+    Ok(Value::Fixnum(bytes_of("bytevector-length", e, v)?.len() as i64))
+}
+
+fn bv_u8_ref(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [v, Value::Fixnum(i)] => {
+            let b = bytes_of("bytevector-u8-ref", e, *v)?;
+            b.get(*i as usize)
+                .map(|x| Value::Fixnum(*x as i64))
+                .ok_or_else(|| err(format!("bytevector-u8-ref: index {i} out of range")))
+        }
+        _ => Err(err("bytevector-u8-ref: expects a bytevector and an index")),
+    }
+}
+
+fn bv_u8_set(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [v, Value::Fixnum(i), Value::Fixnum(x)] if (0..=255).contains(x) => {
+            let r = bv_ref("bytevector-u8-set!", e, *v)?;
+            let (i, x) = (*i as usize, *x as u8);
+            let Obj::Bytevector(b) = e.obj_mut(r) else {
+                unreachable!("checked")
+            };
+            match b.get_mut(i) {
+                Some(slot) => {
+                    *slot = x;
+                    Ok(Value::Unspecified)
+                }
+                None => Err(err(format!("bytevector-u8-set!: index {i} out of range"))),
+            }
+        }
+        _ => Err(err("bytevector-u8-set!: expects a bytevector, an index and a byte")),
+    }
+}
+
+fn bv_copy(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("bytevector-copy: expects a bytevector")),
+    };
+    let b = bytes_of("bytevector-copy", e, v)?;
+    let start = match a.get(1) {
+        Some(Value::Fixnum(n)) => *n as usize,
+        None => 0,
+        _ => return Err(err("bytevector-copy: start must be an exact integer")),
+    };
+    let end = match a.get(2) {
+        Some(Value::Fixnum(n)) => *n as usize,
+        None => b.len(),
+        _ => return Err(err("bytevector-copy: end must be an exact integer")),
+    };
+    if end > b.len() || start > end {
+        return Err(err("bytevector-copy: range out of bounds"));
+    }
+    Ok(e.bytevector(b[start..end].to_vec()))
+}
+
+fn bv_append(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut out = Vec::new();
+    for &v in a {
+        out.extend(bytes_of("bytevector-append", e, v)?);
+    }
+    Ok(e.bytevector(out))
+}
+
+fn utf8_to_string(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("utf8->string: expects a bytevector")),
+    };
+    let b = bytes_of("utf8->string", e, v)?;
+    match String::from_utf8(b) {
+        Ok(text) => Ok(e.string(&text)),
+        Err(_) => Err(err("utf8->string: not valid UTF-8")),
+    }
+}
+
+fn string_to_utf8(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("string->utf8: expects a string")),
+    };
+    let text: String = chars_of("string->utf8", e, v)?.into_iter().collect();
+    Ok(e.bytevector(text.into_bytes()))
+}
+
 pub fn install(vm: &mut Vm) {
     vm.define_prim("+", add);
     vm.define_prim("-", sub);
@@ -1822,6 +2524,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("apply", apply_placeholder);
     vm.define_prim("values", values_prim);
     vm.define_prim("call-with-values", apply_placeholder);
+    vm.define_prim("eval", apply_placeholder);
     vm.define_prim("sin", p_sin);
     vm.define_prim("cos", p_cos);
     vm.define_prim("tan", p_tan);
@@ -1849,6 +2552,8 @@ pub fn install(vm: &mut Vm) {
     vm.define_vm_prim("display", display);
     vm.define_vm_prim("write", write_prim);
     vm.define_vm_prim("newline", newline);
+    vm.define_vm_prim("write-simple", write_simple);
+    vm.define_vm_prim("write-shared", write_shared);
     vm.define_vm_prim("write-char", write_char);
     vm.define_vm_prim("write-string", write_string);
     // ports
@@ -1882,6 +2587,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("vector->list", vector_to_list);
     vm.define_prim("list->vector", list_to_vector);
     vm.define_prim("vector-fill!", vector_fill);
+    vm.define_prim("string-fill!", string_fill);
     vm.define_prim("vector-copy", vector_copy);
     vm.define_prim("vector?", is_vector);
     // strings
@@ -1952,4 +2658,67 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("%qq-cons", qq_cons);
     vm.define_prim("%qq-append", qq_append);
     vm.define_prim("%qq-list->vector", qq_list_to_vector);
+    // the cheap tail: numbers
+    vm.define_prim("real?", p_is_real);
+    vm.define_prim("rational?", p_is_rational);
+    vm.define_prim("integer?", p_is_integer);
+    vm.define_prim("inexact?", p_is_inexact);
+    vm.define_prim("finite?", p_is_finite);
+    vm.define_prim("infinite?", p_is_infinite);
+    vm.define_prim("exact", p_exact);
+    vm.define_prim("inexact->exact", p_exact);
+    vm.define_prim("square", p_square);
+    vm.define_prim("gcd", p_gcd);
+    vm.define_prim("lcm", p_lcm);
+    vm.define_prim("exact-integer-sqrt", p_exact_integer_sqrt);
+    vm.define_prim("floor/", p_floor_div);
+    vm.define_prim("truncate/", p_truncate_div);
+    vm.define_prim("floor-quotient", p_floor_quotient);
+    vm.define_prim("floor-remainder", p_floor_remainder);
+    vm.define_prim("truncate-quotient", p_quotient);
+    vm.define_prim("truncate-remainder", p_remainder);
+    vm.define_prim("numerator", p_numerator);
+    vm.define_prim("denominator", p_denominator);
+    // characters
+    vm.define_prim("char<=?", char_le);
+    vm.define_prim("char>=?", char_ge);
+    vm.define_prim("char-ci=?", char_ci_eq);
+    vm.define_prim("char-ci<?", char_ci_lt);
+    vm.define_prim("char-ci>?", char_ci_gt);
+    vm.define_prim("char-ci<=?", char_ci_le);
+    vm.define_prim("char-ci>=?", char_ci_ge);
+    vm.define_prim("char-upper-case?", char_upper);
+    vm.define_prim("char-lower-case?", char_lower);
+    vm.define_prim("char-foldcase", char_foldcase);
+    vm.define_prim("digit-value", digit_value);
+    // strings
+    vm.define_prim("string<=?", string_le);
+    vm.define_prim("string>=?", string_ge);
+    vm.define_prim("string-ci<?", string_ci_lt);
+    vm.define_prim("string-ci>?", string_ci_gt);
+    vm.define_prim("string-ci<=?", string_ci_le);
+    vm.define_prim("string-ci>=?", string_ci_ge);
+    vm.define_prim("string-foldcase", string_foldcase);
+    vm.define_prim("string-copy!", string_copy_into);
+    vm.define_prim("string->vector", string_to_vector);
+    vm.define_prim("vector->string", vector_to_string);
+    // vectors and lists
+    vm.define_prim("vector-copy!", vector_copy_into);
+    vm.define_prim("vector-append", vector_append);
+    vm.define_prim("set-car!", set_car);
+    vm.define_prim("set-cdr!", set_cdr);
+    // equality
+    vm.define_prim("boolean=?", boolean_eq);
+    vm.define_prim("symbol=?", symbol_eq);
+    // bytevectors
+    vm.define_prim("bytevector", bv_new);
+    vm.define_prim("make-bytevector", bv_make);
+    vm.define_prim("bytevector?", bv_is);
+    vm.define_prim("bytevector-length", bv_length);
+    vm.define_prim("bytevector-u8-ref", bv_u8_ref);
+    vm.define_prim("bytevector-u8-set!", bv_u8_set);
+    vm.define_prim("bytevector-copy", bv_copy);
+    vm.define_prim("bytevector-append", bv_append);
+    vm.define_prim("utf8->string", utf8_to_string);
+    vm.define_prim("string->utf8", string_to_utf8);
 }
