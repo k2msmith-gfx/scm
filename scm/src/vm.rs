@@ -73,6 +73,27 @@ pub type PrimFn = fn(&mut Engine, &[Value]) -> VResult<Value>;
 /// procedure, so neither needs a frame -- they just need more than the heap.
 pub type VmPrimFn = fn(&mut Vm, &[Value]) -> VResult<Value>;
 
+/// One line of a backtrace: a pending call, and where it was written.
+#[derive(Clone, PartialEq, Debug)]
+pub struct FrameInfo {
+    /// The call, printed and truncated -- `(vector-ref v 99)`.
+    pub what: String,
+    /// `"<repl:7>:3:12"`, when the form came from source that was read. A
+    /// form built at run time (by `quasiquote`, or by a macro template) has
+    /// none, and saying nothing is better than pointing at the macro's
+    /// definition as if the user had written it there.
+    pub loc: Option<String>,
+}
+
+impl std::fmt::Display for FrameInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.loc {
+            Some(l) => write!(f, "{}  at {}", self.what, l),
+            None => write!(f, "{}", self.what),
+        }
+    }
+}
+
 /// A host function the *embedder* registered, which unlike [`PrimFn`] may
 /// **capture state**.
 ///
@@ -109,12 +130,18 @@ enum Frame {
     },
     /// The operator of a call is being evaluated; `args` are still unevaluated.
     Operator {
+        /// The source form this call came from, carried **only** so a
+        /// backtrace can name it and say where it was written (plan §8
+        /// obligation 4). One `Value` per pending call, which is the cheapest
+        /// thing that makes an error say *where* and not only *what*.
+        form: Value,
         args: Vec<Value>,
         env: Option<ObjRef>,
     },
     /// An argument is being evaluated. `done` holds the callee followed by the
     /// arguments already evaluated.
     Operand {
+        form: Value,
         done: Vec<Value>,
         args: Vec<Value>,
         idx: usize,
@@ -206,11 +233,15 @@ impl Frame {
                 out.extend(body.iter().copied());
                 env
             }
-            Frame::Operator { args, env } => {
+            Frame::Operator { form, args, env } => {
+                out.push(*form);
                 out.extend(args.iter().copied());
                 env
             }
-            Frame::Operand { done, args, env, .. } => {
+            Frame::Operand {
+                form, done, args, env, ..
+            } => {
+                out.push(*form);
                 out.extend(done.iter().copied());
                 out.extend(args.iter().copied());
                 env
@@ -315,6 +346,28 @@ pub struct Vm {
     ///   stops `eval` of generated forms from leaking an entry per form. The
     ///   cost is a cold cache after each GC; the benefit holds between them.
     expansion_cache: HashMap<ObjRef, Value>,
+    /// Names successive `eval_str` inputs, so two REPL entries are
+    /// distinguishable in a backtrace.
+    eval_count: u64,
+
+    /// The innermost call that was *entered*, whether or not a frame
+    /// survives for it.
+    ///
+    /// Proper tail calls mean the frame for a call in tail position is gone
+    /// before the callee runs (§5) -- so a chain of tail calls fails with an
+    /// **empty stack** and a stack-only backtrace says nothing at all. That
+    /// is correct Scheme and a useless diagnostic. One `Value` updated per
+    /// call, no allocation, recovers the one line that matters: where it
+    /// actually failed.
+    current_call: Value,
+
+    /// The backtrace of the most recent failure.
+    ///
+    /// Captured where the error surfaces rather than built on demand,
+    /// because by the time a caller could ask, the frames are gone:
+    /// `unwind_to_catch` truncates the stack, which is the whole mechanism.
+    last_backtrace: Vec<FrameInfo>,
+
     /// Docstrings, by the name they were defined under.
     ///
     /// Plan §8 obligation 6: docstrings are **values**, not a comment
@@ -406,6 +459,36 @@ struct Formals {
     rest: Option<SymId>,
 }
 
+/// A form, short enough to read in a backtrace.
+///
+/// A frame whose form is a whole 400-line `define` is noise; the head and
+/// the shape of the arguments is the part that identifies it.
+fn abbreviate(text: &str) -> String {
+    const MAX: usize = 72;
+    let flat: String = text
+        .chars()
+        .map(|c| if c == '\n' || c == '\t' { ' ' } else { c })
+        .collect();
+    let mut squeezed = String::with_capacity(flat.len());
+    let mut was_space = false;
+    for c in flat.chars() {
+        if c == ' ' {
+            if !was_space {
+                squeezed.push(c);
+            }
+            was_space = true;
+        } else {
+            squeezed.push(c);
+            was_space = false;
+        }
+    }
+    if squeezed.chars().count() <= MAX {
+        return squeezed;
+    }
+    let head: String = squeezed.chars().take(MAX - 2).collect();
+    format!("{head}…)")
+}
+
 impl Vm {
     pub fn new() -> Self {
         let mut engine = Engine::new();
@@ -442,6 +525,9 @@ impl Vm {
             expansion_cache: HashMap::new(),
             host_fns: Vec::new(),
             docs: HashMap::new(),
+            current_call: Value::Unspecified,
+            last_backtrace: Vec::new(),
+            eval_count: 0,
             fuel: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             syms,
@@ -697,7 +783,15 @@ impl Vm {
 
     /// Evaluate every datum in `src`, returning the last value.
     pub fn eval_str(&mut self, src: &str) -> VResult<Value> {
-        let forms = crate::reader::Reader::read_all(src, &mut self.engine)
+        self.eval_count += 1;
+        let name = format!("<eval:{}>", self.eval_count);
+        self.eval_str_named(src, &name)
+    }
+
+    /// Evaluate, naming the input so a backtrace can say which one a form
+    /// came from -- a file path, or `<repl:7>`.
+    pub fn eval_str_named(&mut self, src: &str, source: &str) -> VResult<Value> {
+        let forms = crate::reader::Reader::read_all_named(src, source, &mut self.engine)
             .map_err(|e| VmError::Error(format!("read error: {e}")))?;
         // The forms not yet evaluated live in a Rust local, which the
         // collector cannot see -- so they are rooted for the duration. This is
@@ -812,12 +906,77 @@ impl Vm {
             };
             step = match outcome {
                 Ok(s) => s,
-                Err(e) => match self.unwind_to_catch(base, e)? {
-                    Some(s) => s,
-                    None => unreachable!("unwind_to_catch returns Err when it cannot catch"),
-                },
+                Err(e) => {
+                    // The one place every failure passes through with the
+                    // stack still intact. A line later `unwind_to_catch` has
+                    // truncated it, so there would be nothing left to walk.
+                    self.last_backtrace = self.capture_backtrace(base);
+                    match self.unwind_to_catch(base, e)? {
+                        Some(s) => s,
+                        None => {
+                            unreachable!("unwind_to_catch returns Err when it cannot catch")
+                        }
+                    }
+                }
             };
         }
+    }
+
+    /// The pending calls, innermost first.
+    ///
+    /// **A tail call leaves no frame**, by design: §5's whole point is that a
+    /// call in tail position leaves the stack as deep as it found it. So a
+    /// tail-recursive loop shows one frame however many times it has gone
+    /// round, which is correct and is what every Scheme does -- but it is
+    /// worth knowing before reading a backtrace and wondering where the
+    /// recursion went.
+    fn capture_backtrace(&self, base: usize) -> Vec<FrameInfo> {
+        let mut out = Vec::new();
+        // The innermost call first, which for an all-tail-call failure is the
+        // only thing there is to say. Reported even with no location: a form
+        // a macro or `quasiquote` built was never written anywhere, and
+        // naming it without a place still tells you what failed.
+        if let Value::Obj(r) = self.current_call
+            && matches!(self.engine.obj(r), Obj::Pair(..))
+        {
+            out.push(self.describe_frame(self.current_call));
+        }
+        for frame in self.stack[base..].iter().rev() {
+            let form = match frame {
+                Frame::Operator { form, .. } | Frame::Operand { form, .. } => *form,
+                _ => continue,
+            };
+            // The innermost call is often also the first frame's own form;
+            // saying it twice reads like a bug.
+            if out.first().map(|f: &FrameInfo| f.what.as_str())
+                != Some(abbreviate(&write_str(&self.engine, form)).as_str())
+                || out.len() > 1
+            {
+                out.push(self.describe_frame(form));
+            }
+            // A deep recursion would otherwise bury the useful frames under
+            // thousands of identical ones.
+            if out.len() >= 32 {
+                out.push(FrameInfo {
+                    what: "…".into(),
+                    loc: None,
+                });
+                break;
+            }
+        }
+        out
+    }
+
+    fn describe_frame(&self, form: Value) -> FrameInfo {
+        FrameInfo {
+            what: abbreviate(&write_str(&self.engine, form)),
+            loc: self.engine.loc_of(form).map(|l| l.to_string()),
+        }
+    }
+
+    /// The backtrace of the most recent failure, innermost first.
+    pub fn backtrace(&self) -> &[FrameInfo] {
+        &self.last_backtrace
     }
 
     /// The one place the VM can be stopped, and therefore the one place it can
@@ -856,6 +1015,9 @@ impl Vm {
         self.expansion_cache.clear();
         let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() * 2 + 8);
         step.trace(&mut roots);
+        // Held by the Vm, so it is a root like any other -- missing this is
+        // the `macro_roots` bug again, and gc stress would find it.
+        roots.push(self.current_call);
         for frame in &self.stack {
             frame.trace(&mut roots);
         }
@@ -982,7 +1144,7 @@ impl Vm {
                         // name: a local called `if` is a variable, not syntax.
                         return Ok(step);
                     }
-                    self.push(Frame::Operator { args, env });
+                    self.push(Frame::Operator { form: expr, args, env });
                     Ok(Step::Eval(car, env))
                 }
             },
@@ -1616,12 +1778,14 @@ impl Vm {
                 }
                 Ok(Step::Eval(expr, env))
             }
-            Frame::Operator { args, env } => {
+            Frame::Operator { form, args, env } => {
                 if args.is_empty() {
+                    self.current_call = form;
                     return self.apply(v, Vec::new());
                 }
                 let first = args[0];
                 self.push(Frame::Operand {
+                    form,
                     done: vec![v],
                     args,
                     idx: 0,
@@ -1630,6 +1794,7 @@ impl Vm {
                 Ok(Step::Eval(first, env))
             }
             Frame::Operand {
+                form,
                 mut done,
                 args,
                 idx,
@@ -1640,6 +1805,7 @@ impl Vm {
                 if next < args.len() {
                     let expr = args[next];
                     self.push(Frame::Operand {
+                        form,
                         done,
                         args,
                         idx: next,
@@ -1653,6 +1819,7 @@ impl Vm {
                 // calls.
                 let callee = done[0];
                 let argv = done.split_off(1);
+                self.current_call = form;
                 self.apply(callee, argv)
             }
             Frame::Let {

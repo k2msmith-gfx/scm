@@ -261,6 +261,40 @@ impl Interp {
         }
     }
 
+    /// Evaluate, naming the input. A backtrace from this evaluation will say
+    /// that name, so a host should pass a file path or something a user can
+    /// recognise.
+    pub fn eval_named(&mut self, src: &str, source: &str) -> Result<Rooted, Error> {
+        self.enter()?;
+        let vm = &mut self.vm;
+        let r = match guard(|| vm.eval_str_named(src, source)) {
+            Ok(r) => r,
+            Err(e) => {
+                self.poisoned = Some(format!("{e}"));
+                return Err(e);
+            }
+        };
+        match r {
+            Ok(v) => Ok(self.root(v)),
+            Err(e) => Err(self.convert(e)),
+        }
+    }
+
+    /// How many source locations the heap is holding. For leak tests: the
+    /// table is program-sized, and the collector prunes it.
+    pub fn loc_count(&self) -> usize {
+        self.vm.engine.loc_count()
+    }
+
+    /// The pending calls at the most recent failure, innermost first.
+    ///
+    /// Empty when the failure happened with nothing pending -- a read error,
+    /// or a top-level atom. A tail call leaves no frame, so a tail-recursive
+    /// loop contributes one entry however many times it went round.
+    pub fn backtrace(&self) -> Vec<String> {
+        self.vm.backtrace().iter().map(|f| f.to_string()).collect()
+    }
+
     /// Evaluate with a wall-clock limit.
     ///
     /// Implemented over [`Interp::interrupt_handle`] and a watchdog thread,
@@ -454,10 +488,22 @@ impl Interp {
     /// The output is returned even when the evaluation fails, because what a
     /// form printed before it broke is usually the most useful part.
     pub fn eval_capturing(&mut self, src: &str) -> (Result<Rooted, Error>, String) {
+        self.eval_capturing_named(src, None)
+    }
+
+    /// As [`Interp::eval_capturing`], with a name for the input.
+    pub fn eval_capturing_named(
+        &mut self,
+        src: &str,
+        source: Option<&str>,
+    ) -> (Result<Rooted, Error>, String) {
         let Some(slot) = self.output_slot() else {
             // No `current-output-port` means a prelude older than ports;
             // evaluate without capturing rather than refuse.
-            return (self.eval(src), String::new());
+            return match source {
+                Some(name) => (self.eval_named(src, name), String::new()),
+                None => (self.eval(src), String::new()),
+            };
         };
         let port = self.vm.engine.alloc(Obj::Port {
             kind: crate::heap::PortKind::StringOut(String::new()),
@@ -468,7 +514,10 @@ impl Interp {
         let keep = self.vm.engine.root(port);
         let saved = self.vm.param_value(slot);
         self.vm.set_param_value(slot, port);
-        let out = self.eval(src);
+        let out = match source {
+            Some(name) => self.eval_named(src, name),
+            None => self.eval(src),
+        };
         self.vm.set_param_value(slot, saved);
         let text = match port {
             Value::Obj(r) => match self.vm.engine.obj(r) {

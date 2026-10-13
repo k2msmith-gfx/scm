@@ -18,7 +18,7 @@ fn ask(s: &mut Session, op: Op) -> Outcome {
 }
 
 fn eval(s: &mut Session, code: &str) -> Outcome {
-    ask(s, Op::Eval { code: code.into() })
+    ask(s, Op::Eval { code: code.into(), source: None })
 }
 
 #[test]
@@ -93,6 +93,7 @@ fn output_survives_a_failure() {
             message,
             output,
             host_stopped,
+            ..
         } => {
             assert!(message.contains("car"), "{message}");
             assert_eq!(output, "got this far");
@@ -363,12 +364,12 @@ fn the_terminal_and_wire_paths_cannot_diverge() {
         ("(:op ping :id 1)", Op::Ping),
         (
             r#"(:op eval :id 1 :code "(define (f x) (* x 3))")"#,
-            Op::Eval { code: "(define (f x) (* x 3))".into() },
+            Op::Eval { code: "(define (f x) (* x 3))".into(), source: None },
         ),
-        (r#"(:op eval :id 1 :code "(f 5)")"#, Op::Eval { code: "(f 5)".into() }),
+        (r#"(:op eval :id 1 :code "(f 5)")"#, Op::Eval { code: "(f 5)".into(), source: None }),
         (
             r#"(:op eval :id 1 :code "(car 1)")"#,
-            Op::Eval { code: "(car 1)".into() },
+            Op::Eval { code: "(car 1)".into(), source: None },
         ),
         (
             r#"(:op complete :id 1 :prefix "str")"#,
@@ -387,4 +388,171 @@ fn the_terminal_and_wire_paths_cannot_diverge() {
         let b: Response = wired.handle(from_wire);
         assert_eq!(a.outcome, b.outcome, "divergence on {text:?}");
     }
+}
+
+// ---- the backtrace: §8 obligation 4, the last exit criterion ------------
+
+fn failed(s: &mut Session, code: &str) -> (String, Vec<String>) {
+    match s.handle(Request {
+        id: 1,
+        op: Op::Eval {
+            code: code.into(),
+            source: Some("<t>".into()),
+        },
+    }).outcome
+    {
+        Outcome::Failed { message, backtrace, .. } => (message, backtrace),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_backtrace_names_frames_and_spans() {
+    // The exit criterion's third clause. Every line is a pending call, named
+    // and placed, innermost first.
+    let mut s = Session::new().unwrap();
+    let (msg, bt) = failed(
+        &mut s,
+        "(define (inner v) (+ 0 (vector-ref v 99)))\n\
+         (define (middle v) (* 1 (inner v)))\n\
+         (define (outer) (- 0 (middle (vector 1 2 3))))\n\
+         (outer)",
+    );
+    assert!(msg.contains("out of range"), "{msg}");
+    assert!(bt.len() >= 4, "too few frames: {bt:#?}");
+    assert!(bt[0].starts_with("(vector-ref v 99)"), "{:?}", bt[0]);
+    assert!(bt[1].starts_with("(+ 0 (vector-ref v 99))"), "{:?}", bt[1]);
+    assert!(bt[2].starts_with("(* 1 (inner v))"), "{:?}", bt[2]);
+    // And every one of them carries a location: the source name, a line and
+    // a column.
+    for f in &bt {
+        assert!(f.contains("at <t>:"), "no location on {f:?}");
+    }
+    // Lines are the ones a person would point at.
+    assert!(bt[1].contains("<t>:1:19"), "{:?}", bt[1]);
+    assert!(bt[2].contains("<t>:2:20"), "{:?}", bt[2]);
+}
+
+#[test]
+fn a_tail_call_leaves_no_frame_and_the_backtrace_says_where_anyway() {
+    // §5's whole point is that a call in tail position leaves the stack as
+    // deep as it found it -- so a chain of tail calls fails with an EMPTY
+    // stack, and a stack-only backtrace would say nothing at all. Correct
+    // Scheme, useless diagnostic. The innermost call is tracked separately
+    // for exactly this case.
+    let mut s = Session::new().unwrap();
+    let (_, bt) = failed(
+        &mut s,
+        "(define (inner v) (vector-ref v 99))\n\
+         (define (middle v) (inner v))\n\
+         (define (outer) (middle (vector 1 2 3)))\n\
+         (outer)",
+    );
+    assert_eq!(bt.len(), 1, "a tail chain should leave exactly one line: {bt:#?}");
+    assert!(bt[0].starts_with("(vector-ref v 99)"), "{:?}", bt[0]);
+    assert!(bt[0].contains("at <t>:1:19"), "{:?}", bt[0]);
+}
+
+#[test]
+fn a_deep_recursion_does_not_bury_the_useful_frames() {
+    // A non-tail recursion 5,000 deep would otherwise print 5,000 identical
+    // lines and hide the message.
+    let mut s = Session::new().unwrap();
+    let (_, bt) = failed(
+        &mut s,
+        "(define (down n) (if (= n 0) (car '()) (+ 0 (down (- n 1)))))\n(down 5000)",
+    );
+    assert!(bt.len() <= 34, "backtrace not bounded: {} lines", bt.len());
+    assert_eq!(bt.last().map(String::as_str), Some("…"));
+}
+
+#[test]
+fn a_form_built_at_run_time_has_no_location_rather_than_a_wrong_one() {
+    // A form a macro or `quasiquote` produced was never written anywhere.
+    // Pointing at the macro's definition as if the user had typed it there
+    // would be worse than saying nothing.
+    let mut s = Session::new().unwrap();
+    let (_, bt) = failed(&mut s, "(eval (list 'car (list 'quote '())))");
+    // The form is still named -- knowing WHAT failed is most of the value --
+    // but it carries no location, because it has none.
+    assert_eq!(bt.len(), 1, "{bt:#?}");
+    assert_eq!(bt[0], "(car '())", "the writer abbreviates quote: {bt:#?}");
+    assert!(!bt[0].contains(" at "), "a form built at run time claimed a place");
+
+    // And a located caller still places itself, so a run-time form nested
+    // inside real source does not erase the trail.
+    let (_, bt) = failed(
+        &mut s,
+        "(define (viaeval f) (+ 0 (eval f)))\n(viaeval (list 'car (list 'quote '())))",
+    );
+    assert!(bt.iter().any(|f| f.contains("at <t>:1:21")), "{bt:#?}");
+}
+
+#[test]
+fn the_backtrace_is_fresh_for_each_failure() {
+    let mut s = Session::new().unwrap();
+    let (_, first) = failed(&mut s, "(define (a) (+ 0 (car '())))\n(a)");
+    let (_, second) = failed(&mut s, "(define (b) (* 1 (vector-ref (vector) 0)))\n(b)");
+    assert!(first[0].contains("car"), "{first:#?}");
+    assert!(second[0].contains("vector-ref"), "{second:#?}");
+    assert!(!second.iter().any(|f| f.contains("car")), "stale frames: {second:#?}");
+}
+
+#[test]
+fn a_caught_error_does_not_leave_a_backtrace_behind_for_the_next_one() {
+    // `guard` catches, the frames unwind, and a later unrelated failure must
+    // not inherit them.
+    let mut s = Session::new().unwrap();
+    let swallowed = s.handle(Request {
+        id: 1,
+        op: Op::Eval {
+            code: "(guard (e (else 'fine)) (car '()))".into(),
+            source: Some("<t>".into()),
+        },
+    });
+    assert!(matches!(swallowed.outcome, Outcome::Value { .. }));
+    let (_, bt) = failed(&mut s, "(+ 0 (vector-ref (vector) 0))");
+    assert!(bt[0].contains("vector-ref"), "{bt:#?}");
+}
+
+#[test]
+fn the_wire_carries_the_backtrace() {
+    let mut s = Session::new().unwrap();
+    let req = Request::parse(
+        r#"(:op eval :id 9 :name "mybuffer.scm" :code "(+ 0 (car '()))")"#,
+    )
+    .unwrap();
+    let w = s.handle(req).to_wire();
+    assert!(w.contains(":backtrace ("), "{w}");
+    assert!(w.contains("mybuffer.scm"), "the client's name must be used: {w}");
+    assert!(
+        matches!(scm::parse_status(&w), scm::ParseStatus::Complete),
+        "a response with a backtrace must still be one datum: {w}"
+    );
+}
+
+#[test]
+fn locations_do_not_accumulate_forever() {
+    // There is one location per form, so the table is the size of the
+    // *program*, not of the execution -- but a REPL session evaluates new
+    // programs forever, so the collector has to prune the entries for forms
+    // it freed. Without that, this grows without bound.
+    let mut s = Session::new().unwrap();
+    let mut peak = 0usize;
+    for i in 0..400 {
+        let code = format!("(let ([x {i}]) (+ x (* x 2) (- x 1)))");
+        s.handle(Request {
+            id: i,
+            op: Op::Eval {
+                code,
+                source: Some(format!("<t:{i}>")),
+            },
+        });
+        peak = peak.max(s.interp_mut().loc_count());
+    }
+    let settled = s.interp_mut().loc_count();
+    assert!(
+        settled < peak || peak < 4_000,
+        "locations are not pruned: peak {peak}, settled {settled}"
+    );
 }

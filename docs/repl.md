@@ -114,13 +114,60 @@ Completion filters out hygiene's renamed identifiers (`tmp.1274`): those are
 names no source text can write, and offering one would be leaking the
 implementation into the user's face.
 
+## Backtraces, and what a tail call costs you
+
+`:eval` takes an optional `:name` — a file path, or whatever a client calls
+the buffer — and a failure comes back with `:backtrace`, innermost first:
+
+```scheme
+(:id 2 :status error :message "vector-ref: index 7 out of range"
+      :output "" :host-stopped #f
+      :backtrace ("(vector-ref (vector 1 2) n)  at scene.scm:1:24"
+                  "(+ 0 (vector-ref (vector 1 2) n))  at scene.scm:1:19"
+                  "(* 2 (place 7))  at scene.scm:1:1"))
+```
+
+Three things about how that is built are worth knowing before reading one.
+
+**A tail call leaves no frame.** §5's whole point is that a call in tail
+position leaves the stack exactly as deep as it found it — so a chain of tail
+calls fails with an **empty stack**, and a stack-only backtrace would say
+nothing at all. Correct Scheme, useless diagnostic. The innermost call that
+was *entered* is therefore tracked separately, one `Value` updated per call
+with no allocation, so an all-tail-call failure still says where it broke:
+
+```
+vector-ref: index 99 out of range
+  in (vector-ref v 99)  at bt.scm:2:3
+```
+
+That is one line where a stack-based trace would give none, and it is the
+line that matters. It is also why a tail-recursive loop shows one frame
+however many times it went round.
+
+**A form built at run time has no location, and says nothing rather than
+something wrong.** A `quasiquote` result or a macro expansion was never
+written anywhere; pointing at the macro's definition as if the user had typed
+it there would be worse than silence. Such a frame is still *named* — knowing
+what failed is most of the value — just not placed.
+
+**Locations cost program size, not execution size.** There is one entry per
+compound form, recorded by the reader, and line and column are computed
+**at read time** so no source text is retained — otherwise a long REPL
+session would slowly leak every expression ever typed. The collector prunes
+the entry for a form it frees, because a reused slot would otherwise report
+where its *previous* occupant was written. There is a test that drives 400
+evaluations and watches the table settle.
+
+Deep recursion is truncated at 32 frames with a trailing `"…"`, so a
+5,000-deep failure does not bury its own message.
+
 ## What is not here yet
 
-- **Backtraces.** The exit criterion wants frames *and spans*; the explicit
-  control stack (§5) makes the frames reachable, but nothing yet carries a
-  source span into evaluation, so an error says what went wrong and not
-  where. Next slice.
 - **A break REPL** — stop on error with the frames live, inspect, resume or
-  restart. §8's stretch goal, and the explicit stack is what makes it
-  reachable at all.
+  restart. §8's stretch goal, and now a good deal closer: the frames are
+  already walkable and already named. What is missing is suspending at the
+  error instead of unwinding past it.
 - **Several interpreters over one socket.** One session per server today.
+- **Completion inside a form** — candidates come from the global environment,
+  so a local binding is not offered.

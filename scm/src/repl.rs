@@ -30,8 +30,9 @@ use crate::embed::{Description, Error, Interp};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     /// Evaluate source against the persistent interactive environment
-    /// (§8 obligation 1).
-    Eval { code: String },
+    /// (§8 obligation 1). `source` names the input in a backtrace -- a file
+    /// path, or whatever a client calls the buffer the form came from.
+    Eval { code: String, source: Option<String> },
     /// Global names beginning with a prefix.
     Complete { prefix: String },
     /// What a name is: signature, docstring, kind, current value.
@@ -74,6 +75,10 @@ pub enum Outcome {
         /// than the script failing. A client should not offer "retry" for
         /// these.
         host_stopped: bool,
+        /// The pending calls, innermost first, each `"(form)  at src:line:col"`.
+        /// Empty when nothing was pending -- a read error, or a top-level
+        /// atom.
+        backtrace: Vec<String>,
     },
     Candidates(Vec<String>),
     /// `None` when the name is unbound.
@@ -141,8 +146,10 @@ impl Session {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                 }
             }
-            Op::Eval { code } => {
-                let (result, output) = self.interp.eval_capturing(&code);
+            Op::Eval { code, source } => {
+                let (result, output) = self
+                    .interp
+                    .eval_capturing_named(&code, source.as_deref());
                 match result {
                     Ok(v) => {
                         let value = self
@@ -158,6 +165,7 @@ impl Session {
                             e,
                             Error::Interrupted | Error::OutOfFuel | Error::OutOfMemory
                         ),
+                        backtrace: self.interp.backtrace(),
                     },
                 }
             }
@@ -217,6 +225,7 @@ impl Request {
         let op = match op.as_deref() {
             Some("eval") => Op::Eval {
                 code: code.ok_or("eval needs :code")?,
+                source: name,
             },
             Some("complete") => Op::Complete {
                 prefix: prefix.unwrap_or_default(),
@@ -251,6 +260,7 @@ impl Response {
                 message,
                 output,
                 host_stopped,
+                backtrace,
             } => {
                 out.push_str(" :status error :message ");
                 push_string(&mut out, message);
@@ -261,6 +271,14 @@ impl Response {
                 } else {
                     " :host-stopped #f"
                 });
+                out.push_str(" :backtrace (");
+                for (i, f) in backtrace.iter().enumerate() {
+                    if i > 0 {
+                        out.push(' ');
+                    }
+                    push_string(&mut out, f);
+                }
+                out.push(')');
             }
             Outcome::Candidates(names) => {
                 out.push_str(" :status ok :candidates (");

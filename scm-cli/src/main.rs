@@ -101,14 +101,14 @@ fn main() -> ExitCode {
     }
     match rest.first().map(String::as_str) {
         Some("-e") => match rest.get(1) {
-            Some(src) => run_once(&mut session, src),
+            Some(src) => run_once(&mut session, src, "<-e>"),
             None => {
                 eprintln!("scm: -e wants an expression");
                 ExitCode::from(2)
             }
         },
         Some(path) => match std::fs::read_to_string(path) {
-            Ok(src) => run_once(&mut session, &src),
+            Ok(src) => run_once(&mut session, &src, path),
             Err(e) => {
                 eprintln!("scm: {path}: {e}");
                 ExitCode::from(2)
@@ -136,8 +136,8 @@ fn ask(session: &mut Session, id: u64, op: Op) -> Response {
     session.handle(Request { id, op })
 }
 
-fn run_once(session: &mut Session, src: &str) -> ExitCode {
-    let r = ask(session, 1, Op::Eval { code: src.into() });
+fn run_once(session: &mut Session, src: &str, source: &str) -> ExitCode {
+    let r = ask(session, 1, Op::Eval { code: src.into(), source: Some(source.into()) });
     match r.outcome {
         Outcome::Value { value, output } => {
             print!("{output}");
@@ -148,10 +148,16 @@ fn run_once(session: &mut Session, src: &str) -> ExitCode {
             ExitCode::SUCCESS
         }
         Outcome::Failed {
-            message, output, ..
+            message,
+            output,
+            backtrace,
+            ..
         } => {
             print!("{output}");
             eprintln!("{message}");
+            for f in &backtrace {
+                eprintln!("  in {f}");
+            }
             ExitCode::FAILURE
         }
         other => {
@@ -176,6 +182,7 @@ fn repl(session: &mut Session) -> ExitCode {
     let mut lines = stdin.lock().lines();
     let mut pending = String::new();
     let mut id = 0u64;
+    let mut entry = 0u64;
 
     loop {
         let prompt = if pending.is_empty() { "scm> " } else { "...  " };
@@ -226,7 +233,17 @@ fn repl(session: &mut Session) -> ExitCode {
             f.store(false, Ordering::Relaxed);
         }
         id += 1;
-        match ask(session, id, Op::Eval { code: src }).outcome {
+        entry += 1;
+        let name = format!("<repl:{entry}>");
+        match ask(
+            session,
+            id,
+            Op::Eval {
+                code: src,
+                source: Some(name),
+            },
+        )
+        .outcome {
             Outcome::Value { value, output } => {
                 print!("{output}");
                 if value != "#<unspecified>" {
@@ -234,10 +251,17 @@ fn repl(session: &mut Session) -> ExitCode {
                 }
             }
             Outcome::Failed {
-                message, output, ..
+                message,
+                output,
+                backtrace,
+                ..
             } => {
                 print!("{output}");
                 eprintln!("{message}");
+                // Innermost first, which is the order you read it in.
+                for f in &backtrace {
+                    eprintln!("  in {f}");
+                }
             }
             other => eprintln!("scm: unexpected outcome {other:?}"),
         }

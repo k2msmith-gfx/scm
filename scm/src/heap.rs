@@ -216,6 +216,27 @@ pub struct GcStats {
     pub collections: u64,
 }
 
+/// Where a form was written.
+///
+/// Line and column are computed **at read time** and the source *text* is not
+/// kept -- only its name, behind an `Rc` so every form in one file shares it.
+/// Retaining the text would turn a long REPL session into a slow leak of
+/// every expression ever typed, for information nothing reads back.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Loc {
+    /// `"<repl:7>"`, or a file path.
+    pub source: Rc<str>,
+    /// 1-based, the way an editor counts.
+    pub line: u32,
+    pub col: u32,
+}
+
+impl std::fmt::Display for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.source, self.line, self.col)
+    }
+}
+
 /// A rooted value. While the handle is held, the value is a root.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Handle(usize);
@@ -243,6 +264,18 @@ pub struct Engine {
     /// Values rooted from outside the VM -- the host's, and the VM's own
     /// source forms while it holds them across an evaluation.
     handles: Vec<Option<Value>>,
+    /// Where each *compound* form was written, for backtraces (plan §8
+    /// obligation 4).
+    ///
+    /// A side table because a `Value` is 16 bytes with no room, and only
+    /// source structure needs an entry -- the size is the program's, not the
+    /// execution's. Atoms are skipped: nothing in a backtrace points at a
+    /// number.
+    ///
+    /// Pruned during the sweep. A slot that has been freed and reused would
+    /// otherwise report the location of whatever *used* to live there, which
+    /// is worse than reporting nothing.
+    locs: HashMap<ObjRef, Loc>,
     /// Renamed macro identifiers, pointing back at what they meant where the
     /// macro was defined. Consulted only when a name is not lexically bound,
     /// which is what gives a template both hygiene and referential
@@ -271,6 +304,7 @@ impl Engine {
             stress: false,
             collections: 0,
             handles: Vec::new(),
+            locs: HashMap::new(),
             aliases: HashMap::new(),
             interner: Interner::default(),
             prim_names: Vec::new(),
@@ -440,6 +474,14 @@ impl Engine {
             self.free_head = Some(i as u32);
             freed += 1;
         }
+        // A freed slot's location must go with it: the slot will be reused,
+        // and reporting where its previous occupant was written is worse than
+        // reporting nothing. Cheap because the table is program-sized.
+        if freed > 0 {
+            let marks = &self.marks;
+            self.locs
+                .retain(|r, _| marks.get(r.0 as usize).copied().unwrap_or(false));
+        }
         self.used -= freed;
         self.collections += 1;
         self.threshold = self.min_heap.max(self.used.saturating_mul(2));
@@ -448,6 +490,26 @@ impl Engine {
             freed,
             collections: self.collections,
         }
+    }
+
+    // ---- source locations -----------------------------------------------
+
+    /// Remember where a form was written. Only compound values get an entry.
+    pub fn record_loc(&mut self, v: Value, loc: Loc) {
+        if let Value::Obj(r) = v {
+            self.locs.insert(r, loc);
+        }
+    }
+
+    pub fn loc_of(&self, v: Value) -> Option<&Loc> {
+        match v {
+            Value::Obj(r) => self.locs.get(&r),
+            _ => None,
+        }
+    }
+
+    pub fn loc_count(&self) -> usize {
+        self.locs.len()
     }
 
     // ---- handles --------------------------------------------------------

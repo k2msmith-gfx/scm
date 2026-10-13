@@ -18,7 +18,9 @@
 //! multi-line entry and the editor panes' paren handling both rest on being
 //! able to tell "keep typing" from "that is wrong".
 
-use crate::heap::Engine;
+use std::rc::Rc;
+
+use crate::heap::{Engine, Loc, Obj};
 use crate::value::Value;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,6 +66,16 @@ pub struct Reader {
     src: Vec<char>,
     pos: usize,
     opts: ReaderOptions,
+    /// What to call this input in a location: `"<repl:7>"`, or a file path.
+    ///
+    /// An `Rc` so every form read from one input shares the one string --
+    /// there is an entry per form, and a `String` each would be the same text
+    /// hundreds of times.
+    source: Rc<str>,
+    /// Character offsets where each line begins, built once on first use so
+    /// a location is a binary search rather than a rescan. Without it,
+    /// recording a location per form would make reading quadratic.
+    line_starts: Vec<usize>,
 }
 
 type RResult<T> = Result<T, ReadError>;
@@ -73,17 +85,51 @@ impl Reader {
         Self::with_options(src, ReaderOptions::default())
     }
 
+    /// Named, so a backtrace can say *which* input a form came from.
+    pub fn named(src: &str, source: &str) -> Self {
+        let mut r = Self::with_options(src, ReaderOptions::default());
+        r.source = Rc::from(source);
+        r
+    }
+
     pub fn with_options(src: &str, opts: ReaderOptions) -> Self {
+        let chars: Vec<char> = src.chars().collect();
+        let mut line_starts = vec![0usize];
+        for (i, c) in chars.iter().enumerate() {
+            if *c == '\n' {
+                line_starts.push(i + 1);
+            }
+        }
         Self {
-            src: src.chars().collect(),
+            src: chars,
             pos: 0,
             opts,
+            source: Rc::from("<input>"),
+            line_starts,
+        }
+    }
+
+    /// The 1-based line and column of a character offset.
+    fn loc_at(&self, offset: usize) -> Loc {
+        // The last line start at or before `offset`.
+        let line = match self.line_starts.binary_search(&offset) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        Loc {
+            source: Rc::clone(&self.source),
+            line: line as u32 + 1,
+            col: (offset - self.line_starts[line]) as u32 + 1,
         }
     }
 
     /// Read every datum in the input.
     pub fn read_all(src: &str, e: &mut Engine) -> RResult<Vec<Value>> {
-        let mut r = Reader::new(src);
+        Self::read_all_named(src, "<input>", e)
+    }
+
+    pub fn read_all_named(src: &str, source: &str, e: &mut Engine) -> RResult<Vec<Value>> {
+        let mut r = Reader::named(src, source);
         let mut out = Vec::new();
         while let Some(v) = r.read(e)? {
             out.push(v);
@@ -208,8 +254,27 @@ impl Reader {
 
     // ---- datums ---------------------------------------------------------
 
+    /// Read one datum, and **remember where it was written** if it is a form.
+    ///
+    /// Only pairs and vectors get a location: a backtrace never points at a
+    /// number, and an entry per atom would multiply the table for nothing.
+    /// Note that this records the *outermost* cell of each form -- the inner
+    /// cons cells of a list come from the spine loop, not from here -- so
+    /// there is one entry per form, which is what a backtrace wants.
     fn datum(&mut self, e: &mut Engine) -> RResult<Value> {
         self.skip_datum_comments(e)?;
+        let at = self.pos;
+        let v = self.datum_inner(e)?;
+        if let Value::Obj(r) = v
+            && matches!(e.obj(r), Obj::Pair(..) | Obj::Vector { .. })
+        {
+            let loc = self.loc_at(at);
+            e.record_loc(v, loc);
+        }
+        Ok(v)
+    }
+
+    fn datum_inner(&mut self, e: &mut Engine) -> RResult<Value> {
         let start = self.pos;
         let c = match self.peek() {
             None => return Err(ReadError::Incomplete),
