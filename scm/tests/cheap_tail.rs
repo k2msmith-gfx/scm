@@ -397,3 +397,28 @@ fn list_p_returns_on_a_circular_list() {
     // The ordinary answers are unchanged, including the improper tail.
     assert_eq!(eval("(list (list? '()) (list? '(1 2 3)) (list? '(a . b)) (list? 4))"), "(#t #t #f #f)");
 }
+
+#[test]
+fn a_body_macro_called_many_times_is_not_a_runaway() {
+    // Expansion is lazy and uncached, so a function whose body uses `let` is
+    // re-expanded on EVERY call. With a cumulative per-form counter that made
+    // ordinary code fail with "macro expansion of let did not terminate"
+    // after ~10,000 calls -- which every scene build in the corpus would have
+    // hit. The guard counts CONSECUTIVE expansions now.
+    let src = "(define (f x) (let ([y (* x 2)]) (+ y 1)))
+               (let loop ([i 0] [acc 0])
+                 (if (= i 20000) acc (loop (+ i 1) (+ acc (f i)))))";
+    assert_eq!(eval(src), "400000000");
+}
+
+#[test]
+fn a_genuine_runaway_macro_is_still_caught() {
+    // The other half: the looser guard must still refuse a macro that
+    // expands into itself. Requirement 8's real backstops are fuel and the
+    // interrupt, so this is a diagnostic -- but it has to still work.
+    let mut vm = Vm::new();
+    let err = vm
+        .eval_str("(define-syntax spin (syntax-rules () ((_) (spin)))) (spin)")
+        .expect_err("a macro that expands into itself must be refused");
+    assert!(format!("{err}").contains("did not terminate"), "{err}");
+}

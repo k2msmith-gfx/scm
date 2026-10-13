@@ -116,3 +116,14 @@ Which is exactly the contract: the embeddable crate builds anywhere, and
 asking for the JIT without a toolchain fails loudly rather than silently
 degrading. The plan's "`--no-default-features` CI job from the first commit
 that has a `Cargo.toml`" should assert both halves, not just the first.
+
+## A seventh gotcha, from S5b
+
+7. **`CallSiteValue::try_as_basic_value()` returns `ValueKind`, not `Either`.**
+   In inkwell 0.10 the accessor is `.basic() -> Option<BasicValueEnum>`;
+   `.left()` does not exist. And a function whose body fails to compile must
+   be **deleted from the module** — otherwise one rejected input leaves a
+   terminator-less function behind and the whole module stops verifying, which
+   presents as a broken compiler rather than as a refusal.
+
+See [s5b-findings.md](s5b-findings.md).

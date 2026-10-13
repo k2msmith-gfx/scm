@@ -914,6 +914,52 @@ subset must therefore carry, all of them still pure:
 
 (1) and (2) need design; the rest is ordinary codegen.
 
+### DECIDED 2026-10-12: S5b — probe the representation before it hardens
+
+**The ordering in §9 was half wrong, and a measurement settled it.** The
+staging put the leaf compiler at S11 on two arguments. One survives and one
+does not.
+
+The one that does not is dependency. S11's position implied the leaf subset
+needed S6–S10 first. It does not: ray's **entire real texture stack** —
+`hash2` → `fade` → `vnoise` → `fbm` → a colour blend, with the accumulator
+loop, the closure over a precomputed immutable table and the 3-vector return —
+**runs in scm today**, at S5, before `define-library`, records, `call/cc`,
+ports or the embedding API. Every one of the five items above is expressible
+now. Nothing between S5 and S11 is a prerequisite.
+
+The one that survives is slip insurance: if the schedule stops at S8, a
+conformant embeddable Scheme is worth having and half a leaf compiler is not.
+That is a real argument for not reordering wholesale, and it is why S11 keeps
+its place.
+
+**But "the IR has to stop moving before the compiler consumes it" had the
+dependency backwards.** The compiler is a *consumer* of the representation, so
+its requirements are an **input** to that representation's design, not
+something to retrofit. Two of the five items are representation decisions
+rather than codegen:
+
+- **(2) captured immutable data** — how a closure's captured table is reached.
+  Today `Obj::Env { parent, slots: Vec<(SymId, Value)> }` is a linked chain
+  with linear lookup by name: exactly right for an interpreter, and the wrong
+  shape for a compiler, which wants lexical addressing resolved statically.
+- **(5) the no-heap return convention** for a 3-float vector, which is the
+  allocation per texel being deleted — and the one thing a single platform
+  cannot settle, because AAPCS64 and SysV x86-64 classify small float
+  aggregates by different rules.
+
+§2.5 already says to keep (5) behind a target hook *"from the first commit
+rather than discover it later"*, which is an argument against the schedule
+this document sets. Designing both at S11 means fitting them into a value
+representation shaped by ten stages of interpreter convenience.
+
+**So: a probe, not a reordering.** S5b builds no compiler. It runs the purity
+and reachability analysis over the IR *as it exists now*, and emits and JITs
+code for the innermost functions, for one purpose: to find out which of the
+five items the current representation makes hard while changing it is still
+cheap. It is the S0 method — measure instead of arguing — applied to the one
+decision S0 deferred.
+
 **What this does not cover,** and it should be settled in S0 rather than
 discovered: a field that genuinely wants scene data — a texture sampling a
 loaded image, say. That needs either an immutable snapshot handed to the
@@ -1016,6 +1062,7 @@ ray's plan; those numbers are estimates.
 | **S3** ◇ | GC per §3.3: precise non-moving single-threaded mark-sweep; roots = explicit stack + handle table + global cells; safepoint-driven; heap cap. | 0.4 | **done** @bf638f5 — cycles collected; the same 10^8 loop went 8.9 GB → 2.65 MB |
 | **S4** ◇ | The lambda list: `&opt`, `&named`, `&keys`, defaults that preserve an explicit `#f`. | 0.2 | **done** @56bd978 |
 | **S5** | `syntax-rules`, the library system, `(scheme base)`, and the scene corpus's own vocabulary — `seq`/`for`/`each` by name, a **growable array**, **`format`** (SRFI-28 spelling), a **seedable RNG as a parameter** ([survey](scene-language-survey.md) §2–§5). `parameterize` for `dyn`/`setdyn`. Every binding and clause form accepts bracket bindings (§4.9). | 0.9 | the conformance number reported for the first time; the survey's §7 checklist closed to its one open question; `(let ([x 1]) x)` and `(cond [else 1])` both work |
+| **S5b** | **Leaf probe** (§6). No compiler: the purity/reachability analysis over the IR as it exists, plus codegen and a JIT call for the innermost pure functions, to learn what the current representation makes hard before it hardens. | 0.2 | the analysis names the blocking call for an impure function; a compiled function agrees with T0 on a grid; each of the five items is reported free, awkward or blocked, with the reason |
 | **S6** | **The scene corpus as a language test.** Convert the flat `save-scene` output of the 219 examples; run each in scm against **recording stub verbs**; compare the call sequence against the Janet original ([survey](scene-language-survey.md) §8). | 0.4 | every converted scene runs to completion and its recorded call sequence matches, verb for verb and argument for argument |
 | **S7** ◇ | **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. **The handoff to Track B.** | 0.5 | a sample app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable from the host |
 | **S8** ◇ | **REPL core**: the eval protocol, interactive environment, redefinition, backtraces over live frames, introspection. Terminal client in `scm-cli`. | 0.6 | a socket client and the terminal client share one API with no divergence; a runaway form is interruptible; a backtrace names frames and spans |
@@ -1136,6 +1183,12 @@ conformance percentage with an unexplained remainder is a marketing number.
    double-borrows and **hangs with no panic**, and compiled code calling a
    verb that calls back into script is a new path into it; and the store is
    thread-local on purpose.
+9. **The ordering itself put the least-understood component last.** Risk 3
+   covers "the subset may be too small"; nothing covered "we discover at S11
+   that the value representation cannot give us item (5)". Front-loading risk
+   is the standard move and this plan did the opposite. *Mitigation: S5b, which
+   buys the two representation answers at 0.2 rather than reworking them
+   at 0.8.*
 
 ---
 

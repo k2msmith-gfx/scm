@@ -1,0 +1,21 @@
+[package]
+name = "s5b-leaf"
+version = "0.0.0"
+edition = "2024"
+
+# The analysis half needs no LLVM, which is the point: it re-proves the
+# two-sided feature gate on a crate that also depends on `scm`.
+[features]
+default = []
+llvm = ["inkwell"]
+
+[dependencies]
+scm = { path = "../../scm" }
+inkwell = { version = "0.10", features = ["llvm21-1"], optional = true }
+
+[[bin]]
+name = "s5b"
+path = "src/main.rs"
+
+# Deliberately NOT a workspace member: spikes are not part of the crate.
+[workspace]

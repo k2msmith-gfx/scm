@@ -249,6 +249,24 @@ pub struct Vm {
     high_water: usize,
     /// Guards against a macro that expands into itself. Requirement 8: a
     /// runaway must be an error, not a hang.
+    /// **Consecutive** macro expansions, reset whenever a value is returned.
+    ///
+    /// It used to be cumulative per top-level form, which conflated "this
+    /// macro expands into itself" with "this program is big" -- and because
+    /// expansion is lazy and uncached, a function whose body uses `let` is
+    /// re-expanded on *every call*, so
+    ///
+    /// ```text
+    /// (define (f x) (let ([y (* x 2)]) (+ y 1)))
+    /// ;; called 20,000 times in one form
+    /// ```
+    ///
+    /// failed with `macro expansion of let did not terminate`. Ordinary,
+    /// correct code, refused. A runaway macro is an unbroken chain of
+    /// Eval -> Eval that never produces a value, which is what this now
+    /// counts. Requirement 8's real backstops are fuel and the interrupt,
+    /// both uncatchable; this is a diagnostic, so the looser guard is the
+    /// right trade.
     expansions: u64,
     fuel: Option<u64>,
     interrupt: Arc<AtomicBool>,
@@ -447,6 +465,46 @@ impl Vm {
         self.globals[i] = Some(v);
     }
 
+    /// Expand a macro use by exactly one step, or `None` if the form is not
+    /// one. `Some` means the head named a top-level macro and nothing was
+    /// shadowing it.
+    ///
+    /// The interpreter expands **lazily**, inside the eval loop, so a closure
+    /// on the heap holds *unexpanded* source and there is no
+    /// post-expansion IR for anything else to read. That is right for T0 and
+    /// it is the first thing a compiler trips over, since `let` and `seq` are
+    /// macros and the corpus is full of them. This is the smallest honest
+    /// answer: expose one step and let the caller own the recursion policy.
+    /// S8's `macroexpand-1` wants exactly the same primitive.
+    pub fn expand_once(&mut self, form: Value) -> VResult<Option<Value>> {
+        let Value::Obj(r) = form else {
+            return Ok(None);
+        };
+        let Obj::Pair(car, _) = *self.engine.obj(r) else {
+            return Ok(None);
+        };
+        let Value::Symbol(head) = car else {
+            return Ok(None);
+        };
+        if self.lookup_exact(head, None).is_some() {
+            return Ok(None);
+        }
+        let resolved = self.engine.resolve(head);
+        let Some(m) = self.macros.get(&resolved).cloned() else {
+            return Ok(None);
+        };
+        m.expand(&mut self.engine, form)
+            .map(Some)
+            .map_err(VmError::Error)
+    }
+
+    /// Whether a top-level name is bound to a macro -- the question a
+    /// compiler asks before deciding a head is a call.
+    pub fn is_macro(&mut self, sym: SymId) -> bool {
+        let resolved = self.engine.resolve(sym);
+        self.macros.contains_key(&resolved)
+    }
+
     // ---- evaluation -----------------------------------------------------
 
     /// Evaluate every datum in `src`, returning the last value.
@@ -553,6 +611,10 @@ impl Vm {
             let outcome = match step {
                 Step::Eval(expr, env) => self.eval_step(expr, env),
                 Step::Return(v) => {
+                    // A value was produced, so whatever expansions got us
+                    // here were progress and not a runaway. See the counter's
+                    // declaration: it measures *consecutive* expansions.
+                    self.expansions = 0;
                     if self.stack.len() <= base {
                         return Ok(v);
                     }
@@ -703,7 +765,7 @@ impl Vm {
                             self.expansions += 1;
                             if self.expansions > 10_000 {
                                 return Err(self.err(format!(
-                                    "macro expansion of {} did not terminate",
+                                    "macro expansion of {} did not terminate (10,000 expansions with no value produced)",
                                     self.engine.interner.sym_name(resolved)
                                 )));
                             }
