@@ -5,7 +5,10 @@
 //!   * `:at` reads as a **keyword**, not a symbol. That is the one deliberate
 //!     deviation from R7RS datum syntax -- `:` is a legal identifier initial,
 //!     so `:at` is a legal R7RS symbol -- and `ReaderOptions::colon_keywords`
-//!     turns it off, which is how the conformance suite will run.
+//!     turns it off, which is how the conformance suite will run. `#:at` is
+//!     *also* accepted, and never emitted (plan §4.9): a model writing keyword
+//!     arguments emits Racket's and Guile's spelling from habit, and
+//!     LLM-generated scripts are a stated consumer.
 //!   * `[a b c]` reads as a vector flagged `bracket`, because brackets
 //!     *evaluate* their elements while `#(a b c)` is a constant. R7RS reserves
 //!     `[ ] { }` for future extensions, so this costs no conformance at all.
@@ -415,6 +418,16 @@ impl Reader {
                     "#f" | "#false" => Ok(Value::Bool(false)),
                     other => self.invalid(start, format!("unknown literal `{other}`")),
                 }
+            }
+            // `#:at`, accepted because a model will write it; the printer
+            // only ever emits `:at` (plan §4.9).
+            Some(':') => {
+                self.pos += 2;
+                let name = self.raw_token();
+                if name.is_empty() {
+                    return self.invalid(start, "`#:` with no keyword name");
+                }
+                Ok(e.kw(&name))
             }
             Some(c) if "eibodxEIBODX".contains(c) => {
                 let tok = self.raw_token();

@@ -60,7 +60,12 @@ code wins.*
 13. **Compiled field and texture functions callable from rayon workers** with
     no VM dependency. This is the *capability* that justifies the project, and
     it collides with ray's deliberately thread-local store — §6.
-14. **Two constraints carried from `rust-api-plan.md`:** the Janet API is
+14. **LLM-generated scripts are a first-class consumer.** ray and the modeler
+    expect them, and there is a great deal of Scheme in the world for a model
+    to have learned from — which is an argument for staying close to the
+    standard that is independent of conformance as a badge. It has sharp
+    consequences; see §4.9.
+15. **Two constraints carried from `rust-api-plan.md`:** the Janet API is
     preserved until a Scheme replaces it verb-for-verb, and UI chrome stays
     scripted — toolboxes, marking menus, keymaps, `init.janet`, session
     persistence, the editor pane, SLIME sends, the AI pane. A second language
@@ -674,6 +679,66 @@ host closure, and a **leaf** — a compiled native function pointer, `Send +
 Sync`, with a restricted signature. The leaf kind is requirement (13)'s handle
 and the only procedure a rayon worker may ever hold.
 
+### 4.9 Accept the standard spelling, emit ours
+
+**Added 2026-10-12, from requirement 14.** If LLM-generated scripts are a
+first-class consumer, then what a model *habitually writes* is an input format
+whether we chose it or not. A model writing Scheme has read far more Racket,
+Guile and R6RS than it has read anything of ours, so the deviations in §4 are
+exactly the places it will be confidently wrong.
+
+The policy that follows is narrow and worth stating once: **several accepted
+input spellings, one canonical output.** The reader accepts what a model will
+write; the printer only ever emits ours, so a saved scene has one shape.
+
+Three concrete cases, in order of how often a model will trip on them.
+
+**Bracket bindings and clauses.** `(let ([x 1] [y 2]) …)` and
+`(cond [(> x 1) 'big] [else 'small])` are Racket/R6RS house style and dominate
+the Scheme a model has seen. Under §4.5 those brackets are *vector
+constructors*, so `let` would be handed two vectors where it wants two
+bindings. **Therefore every binding and clause form — `let`, `let*`,
+`letrec`, named `let`, `do`, `cond`, `case`, `guard` — accepts a 2-element
+list or a 2-element bracket vector, interchangeably.** There is no ambiguity:
+position decides. A bracket in a *binding* position is a binding; a bracket in
+an *expression* position is still a vector, so `(let ([v [1 2 3]]) …)` means
+exactly what it looks like. This is an S5 obligation on every one of those
+macros, not a reader change.
+
+**Racket-style optional parameters.** A model writes
+`(define (f a [b 10]) …)`, because that is Racket's spelling. A required
+parameter cannot carry a default, so `[b 10]` in a parameter list is
+unambiguously an optional-with-default: **accept it, normalise it to `&opt
+(b 10)`, and never print it.**
+
+**`#:at`.** An earlier draft of this document dropped `#:at` as an accepted
+synonym, on the grounds that keywords are not in R7RS so no portable library
+uses that spelling. That reasoning was right about *libraries* and wrong about
+the consumer that matters: a model writing keyword arguments will emit `#:at`
+from Racket and Guile habit, constantly. **So `#:at` is accepted on input
+again, and never emitted.** Nobody has to type it, which was the actual
+objection.
+
+Three smaller consequences of the same requirement:
+
+- **`format` takes the Scheme spelling.** SRFI-28 and Racket's `~a`/`~s`/`~%`,
+  not Janet's `%s`/`%.3f`, because the former is what a model will write. A
+  printf-shaped helper can exist for the corpus conversion; it is not the
+  canonical one.
+- **The growable array (survey §2) is a compatibility path, not the
+  recommended idiom.** A model will write accumulate-and-reverse with a named
+  `let`, which is standard, so that path must be first-class and fast. The
+  growable array exists for the 248 converted `array/push` sites.
+- **An unbound variable that is a standard name should say so.** "unbound
+  variable: `for-each`" is a dead end for a model; "`for-each` is in
+  `(scheme base)` and is not implemented yet" tells it what actually happened.
+  Keeping a list of R7RS and common-SRFI names to distinguish *you made this
+  up* from *we owe you this* is cheap and is worth more to this consumer than
+  any amount of conformance percentage.
+
+And it raises the stakes on §9's S9: conformance breadth stops being a badge
+and becomes how often a generated script works first time.
+
 ### 4.6 The corpus is converted, not preserved
 
 **Clarified 2026-10-12: syntax compatibility with Janet is not a constraint.**
@@ -949,7 +1014,7 @@ ray's plan; those numbers are estimates.
 | **S2** | T0 interpreter: explicit stack, closures, proper tail calls, safepoints. | 0.6 | **done** @5283cca — a 10^8 tail loop holds the control stack at depth 2 |
 | **S3** ◇ | GC per §3.3: precise non-moving single-threaded mark-sweep; roots = explicit stack + handle table + global cells; safepoint-driven; heap cap. | 0.4 | **done** @bf638f5 — cycles collected; the same 10^8 loop went 8.9 GB → 2.65 MB |
 | **S4** ◇ | The lambda list: `&opt`, `&named`, `&keys`, defaults that preserve an explicit `#f`. | 0.2 | **done** @56bd978 |
-| **S5** | `syntax-rules`, the library system, `(scheme base)`, and the scene corpus's own vocabulary — `seq`/`for`/`each` by name, a **growable array**, **`format`**, a **seedable RNG as a parameter** ([survey](scene-language-survey.md) §2–§5). `parameterize` for `dyn`/`setdyn`. | 0.8 | the conformance number reported for the first time; the survey's §7 checklist closed down to its one open question |
+| **S5** | `syntax-rules`, the library system, `(scheme base)`, and the scene corpus's own vocabulary — `seq`/`for`/`each` by name, a **growable array**, **`format`** (SRFI-28 spelling), a **seedable RNG as a parameter** ([survey](scene-language-survey.md) §2–§5). `parameterize` for `dyn`/`setdyn`. Every binding and clause form accepts bracket bindings (§4.9). | 0.9 | the conformance number reported for the first time; the survey's §7 checklist closed to its one open question; `(let ([x 1]) x)` and `(cond [else 1])` both work |
 | **S6** | **The scene corpus as a language test.** Convert the flat `save-scene` output of the 219 examples; run each in scm against **recording stub verbs**; compare the call sequence against the Janet original ([survey](scene-language-survey.md) §8). | 0.4 | every converted scene runs to completion and its recorded call sequence matches, verb for verb and argument for argument |
 | **S7** ◇ | **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. **The handoff to Track B.** | 0.5 | a sample app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable from the host |
 | **S8** ◇ | **REPL core**: the eval protocol, interactive environment, redefinition, backtraces over live frames, introspection. Terminal client in `scm-cli`. | 0.6 | a socket client and the terminal client share one API with no divergence; a runaway form is interruptible; a backtrace names frames and spans |

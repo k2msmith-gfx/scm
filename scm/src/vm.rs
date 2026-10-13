@@ -643,7 +643,15 @@ impl Vm {
                     match section {
                         Section::Req => match car {
                             Value::Symbol(s) => f.params.push(s),
-                            _ => return Err(self.err("parameter names must be symbols")),
+                            // `(define (f a [b 10]) …)` is Racket's spelling
+                            // for an optional with a default, and a required
+                            // parameter cannot carry one -- so this is
+                            // unambiguous. Accepted, normalised to `&opt`,
+                            // never printed (plan §4.9).
+                            _ => {
+                                f.opt.push(self.parse_param_spec(car)?);
+                                section = Section::Opt;
+                            }
                         },
                         Section::Opt => f.opt.push(self.parse_param_spec(car)?),
                         Section::Named => {
@@ -674,13 +682,31 @@ impl Vm {
         Ok(f)
     }
 
-    /// `name` or `(name default-expr)`.
+    /// `name`, `(name default-expr)`, or Racket's `[name default-expr]` --
+    /// which our reader makes a two-element vector, so it is handled here
+    /// rather than in the reader (plan §4.9).
     fn parse_param_spec(&mut self, spec: Value) -> VResult<Param> {
         match spec {
             Value::Symbol(s) => Ok(Param {
                 name: s,
                 default: None,
             }),
+            Value::Obj(r) if matches!(self.engine.obj(r), Obj::Vector { .. }) => {
+                let Obj::Vector { items, .. } = self.engine.obj(r) else {
+                    unreachable!("guarded")
+                };
+                match items.as_slice() {
+                    [Value::Symbol(name), default] => Ok(Param {
+                        name: *name,
+                        default: Some(*default),
+                    }),
+                    [Value::Symbol(name)] => Ok(Param {
+                        name: *name,
+                        default: None,
+                    }),
+                    _ => Err(self.err("expected [NAME default]")),
+                }
+            }
             Value::Obj(r) => {
                 let Obj::Pair(Value::Symbol(name), rest) = *self.engine.obj(r) else {
                     return Err(self.err("expected NAME or (NAME default)"));

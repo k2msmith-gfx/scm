@@ -274,3 +274,33 @@ fn tail_calls_are_still_tail_calls_with_the_new_binder() {
     // before the body runs, so the loop is still flat.
     assert_eq!(depth(10), depth(50_000));
 }
+
+// ---- §4.9: accept the standard spelling, emit ours ---------------------
+
+#[test]
+fn racket_style_optional_parameters_are_accepted() {
+    // `(define (f a [b 10]) …)` is what a model writes, because it is
+    // Racket's spelling. A required parameter cannot carry a default, so this
+    // is unambiguous -- accepted, normalised to &opt, never printed.
+    assert_eq!(eval("(define (f a [b 10]) (+ a b)) (f 1)"), "11");
+    assert_eq!(eval("(define (f a [b 10]) (+ a b)) (f 1 2)"), "3");
+    // Mixed with the declared spelling.
+    assert_eq!(
+        eval("(define (f a [b 2] &named (c 3)) (list a b c)) (f 1)"),
+        "(1 2 3)"
+    );
+    // And a bracket default sees earlier parameters, same as `&opt` does.
+    assert_eq!(eval("(define (f a [b (* 2 a)]) (list a b)) (f 5)"), "(5 10)");
+}
+
+#[test]
+fn hash_colon_keywords_are_accepted_but_never_emitted() {
+    // Reverses an earlier decision for a stated reason: a model emits Racket's
+    // and Guile's `#:at` from habit, and LLM-generated scripts are a consumer
+    // (plan §4.9). Nobody has to type it, which was the actual objection.
+    assert_eq!(eval("(define (f &named at) at) (f #:at 7)"), "7");
+    // One canonical output: the printer only ever writes `:at`.
+    assert_eq!(eval("#:at"), ":at");
+    assert_eq!(eval("(eq? :at #:at)"), "#t");
+    assert_eq!(eval("(keyword? #:at)"), "#t");
+}

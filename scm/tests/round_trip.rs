@@ -114,15 +114,24 @@ fn keywords_are_not_symbols() {
 }
 
 #[test]
-fn no_hash_colon_keywords() {
-    // Decided: `:at` is the only spelling. `#:at` is a reader error, loudly,
-    // rather than a second way to say the same thing.
+fn hash_colon_keywords_are_read_but_never_written() {
+    // Reversed 2026-10-12 (plan §4.9). An earlier decision made `#:at` a
+    // reader error, on the grounds that keywords are not in R7RS so no
+    // portable library uses that spelling. True of libraries, and wrong about
+    // the consumer that matters: a model writing keyword arguments emits
+    // Racket's and Guile's `#:at` from habit, and LLM-generated scripts are a
+    // stated requirement. So it is accepted on input -- and `write` still only
+    // ever emits `:at`, so there is one canonical output.
     let mut e = Engine::new();
-    let err = scm::read_one("#:at", &mut e).unwrap_err();
-    assert!(
-        matches!(err, ReadError::Invalid { .. }),
-        "#:at gave {err:?}"
-    );
+    let a = scm::read_one("#:at", &mut e).unwrap().unwrap();
+    let b = scm::read_one(":at", &mut e).unwrap().unwrap();
+    assert!(matches!(a, Value::Keyword(_)), "#:at read as {a:?}");
+    assert_eq!(a, b, "#:at and :at must be the same keyword");
+    assert_eq!(write_str(&e, a), ":at");
+
+    // `#:` with nothing after it is still wrong.
+    let err = scm::read_one("#: ", &mut e).unwrap_err();
+    assert!(matches!(err, ReadError::Invalid { .. }), "got {err:?}");
 }
 
 #[test]
@@ -206,7 +215,6 @@ fn wrongness_is_invalid_not_incomplete() {
         "(1 . 2 3)",
         "#\\nosuchname",
         "#q",
-        "#:at",
         "#u9(1)",
         "\"bad \\q escape\"",
         "#u8(256)",
