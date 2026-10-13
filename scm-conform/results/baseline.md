@@ -66,9 +66,9 @@ passed 1024, failed 142
 - 4.3 Macros | (sequence3 2 3 4 5) | raised: no matching syntax rule for sequence3
 - 4.3 Macros | (list (count-to-2 a b) (count-to-2) (count-to-2 a b c d)) | raised: no matching syntax rule for count-to-2
 - 4.3 Macros | (list (count-to-2_ _ _) (count-to-2_) (count-to-2_ a b) (count-to-2_ a b c d)) | raised: no matching syntax rule for count-to-2_
-- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.3464
+- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1252
 - 4.3 Macros | (let ((=> #f)) (cond (#t => 'ok))) | raised: not applicable: ok
-- 4.3 Macros | (quux399) | raised: unbound variable: bar399.3546
+- 4.3 Macros | (quux399) | raised: unbound variable: bar399.1288
 - 4.3 Macros | (elli-lit-1 100) | raised: elli-lit-1: `...` with no pattern variable to repeat
 - 4.3 Macros | (let-syntax ((m (syntax-rules (b) ((_ b ...) #t) ((_ . r) #f)))) (list (m c) (m b (c)) (m b b) (m))) | raised: unbound variable: let-syntax
 - 5 Program structure | (let () (define-values x (values 1 2)) (apply + x)) | raised: no matching syntax rule for define-values

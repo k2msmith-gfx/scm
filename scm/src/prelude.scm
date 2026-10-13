@@ -15,15 +15,12 @@
 ;;;     identifier is renamed to a symbol no source text can name, so a user's
 ;;;     own `t` cannot be captured.
 
-(define-syntax let
-  (syntax-rules ()
-    ;; Named let, which is also how every loop in a converted scene will be
-    ;; written. It must come first: `(let loop ((i 0)) …)` would otherwise
-    ;; match the ordinary pattern with `loop` as a binding list.
-    [(_ name ((var init) ...) body ...)
-     ((letrec ((name (lambda (var ...) body ...))) name) init ...)]
-    [(_ ((var init) ...) body ...)
-     ((lambda (var ...) body ...) init ...)]))
+;; `let` and named `let` are CORE FORMS, in vm.rs -- not macros. S5b measured
+;; both reasons (docs/s5b-findings.md): the expansion was redone on every
+;; call, so a `let` in a body cost 2.2us per call and made the procedure 3.1x
+;; slower; and what it expanded to had lost the structure. A named `let` became
+;; a `letrec` cell holding a self-reference, so a compiler had to pattern-match
+;; its way back to the loop that was written in the source.
 
 (define-syntax let*
   (syntax-rules ()

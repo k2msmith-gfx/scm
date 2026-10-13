@@ -159,13 +159,15 @@ impl<'ctx> Cg<'ctx> {
     ) -> R<[FloatValue<'ctx>; 3]> {
         let expr = expand(vm, expr)?;
         let parts = list(vm, expr)?;
-        // `((lambda (v) inner) init)` -- a `let`. Bind and recurse.
-        if let Some((formals, inner, inits)) = as_let(vm, &parts)? {
-            for (p, i) in formals.iter().zip(inits) {
+        // Peel the `let`s wrapping the colour expression.
+        if let Some(l) = as_let(vm, &parts)?
+            && l.name.is_none()
+        {
+            for (p, i) in l.formals.iter().zip(l.inits) {
                 let v = self.expr(vm, i, env, f)?;
                 env.insert(*p, v);
             }
-            return self.three(vm, inner, env, f);
+            return self.three(vm, l.body, env, f);
         }
         if let Some(&Value::Symbol(h)) = parts.first() {
             let hn = name_of(vm, h);
@@ -254,25 +256,40 @@ impl<'ctx> Cg<'ctx> {
         let expr = expand(vm, expr)?;
         let parts = list(vm, expr)?;
 
-        // Finding 1: `let` IS an applied literal lambda after expansion, so
-        // beta-reduce it. Without this every `let` is a frame allocation.
-        if let Some((formals, inner, inits)) = as_let(vm, &parts)? {
-            let saved: Vec<_> = formals.iter().map(|p| (*p, env.get(p).copied())).collect();
-            let vals: Vec<_> = inits
-                .iter()
-                .map(|i| self.expr(vm, *i, env, f))
-                .collect::<R<Vec<_>>>()?;
-            for (p, v) in formals.iter().zip(vals) {
-                env.insert(*p, v);
-            }
-            let out = self.expr(vm, inner, env, f);
-            for (p, old) in saved {
-                match old {
-                    Some(v) => env.insert(p, v),
-                    None => env.remove(&p),
-                };
-            }
-            return out;
+        // `let` and named `let` are CORE FORMS. Findings 1 and 2 are gone as
+        // a result: there is no applied literal lambda to beta-reduce and no
+        // `letrec` cell to undo, because the binding structure and the loop
+        // are in the form where they were written. This block replaced both,
+        // and it is shorter than either.
+        if let Some(l) = as_let(vm, &parts)? {
+            return match l.name {
+                None => {
+                    let saved: Vec<_> =
+                        l.formals.iter().map(|p| (*p, env.get(p).copied())).collect();
+                    let vals: Vec<_> = l
+                        .inits
+                        .iter()
+                        .map(|i| self.expr(vm, *i, env, f))
+                        .collect::<R<Vec<_>>>()?;
+                    for (p, v) in l.formals.iter().zip(vals) {
+                        env.insert(*p, v);
+                    }
+                    let out = self.expr(vm, l.body, env, f);
+                    for (p, old) in saved {
+                        match old {
+                            Some(v) => env.insert(p, v),
+                            None => env.remove(&p),
+                        };
+                    }
+                    out
+                }
+                // Item (3): a tail self-call becomes a branch back to a
+                // header block with phi nodes.
+                Some(_) => {
+                    let inits = l.inits.clone();
+                    self.loop_(vm, l, &inits, env, f)
+                }
+            };
         }
 
         let Some(&Value::Symbol(h)) = parts.first() else {
@@ -287,16 +304,6 @@ impl<'ctx> Cg<'ctx> {
             // formal, and THE LOOP IS GONE: what is left is a closure
             // allocation and an indirect self-call per iteration. Say so
             // precisely, because the generic message hid it.
-            if let Some(&op) = parts.first()
-                && let Some(loop_) = as_named_let(vm, op)?
-            {
-                // The shape is re-recognisable, so recognise it: a tail
-                // self-call becomes a branch back to a header block with phi
-                // nodes, which is what the named `let` meant before the
-                // expander turned it into a mutable cell. Tractable -- but
-                // only because the compiler undoes the macro.
-                return self.loop_(vm, loop_, &parts[1..], env, f);
-            }
             return Err("a computed operator cannot be compiled".into());
         };
         let hn = name_of(vm, vm.engine.resolve(h));
@@ -394,6 +401,9 @@ impl<'ctx> Cg<'ctx> {
         env: &mut HashMap<SymId, FloatValue<'ctx>>,
         f: FunctionValue<'ctx>,
     ) -> R<FloatValue<'ctx>> {
+        if l.name.is_none() {
+            return Err("loop_ called on an unnamed `let`".into());
+        }
         if inits.len() != l.formals.len() {
             return Err("a named `let` whose arity does not match its bindings".into());
         }
@@ -456,7 +466,7 @@ impl<'ctx> Cg<'ctx> {
             && let Some(&Value::Symbol(h)) = parts.first()
         {
             let resolved = vm.engine.resolve(h);
-            if resolved == l.name {
+            if Some(resolved) == l.name {
                 let mut args = Vec::new();
                 for a in &parts[1..] {
                     args.push(self.expr(vm, *a, env, f)?);
@@ -630,106 +640,68 @@ fn list(vm: &Vm, mut v: Value) -> R<Vec<Value>> {
     }
 }
 
-/// The loop a named `let` leaves behind, recovered from
-/// `(letrec ((L (lambda (v ..) body))) L)`.
+/// A `let`, core form: `(let [name] ((v init) ...) body)`.
+///
+/// One extractor where there used to be two. Before `let` and named `let`
+/// became core forms this file needed `as_let` to recognise an applied
+/// literal lambda *and* `as_named_let` to undo a `letrec` cell holding a
+/// self-reference -- and the second one only worked by refusing to expand the
+/// operator, because expanding it destroyed the shape being looked for. The
+/// structure is now in the source where the author put it.
 pub struct NamedLet {
-    pub name: SymId,
+    /// `Some` for a named `let`: the loop variable.
+    pub name: Option<SymId>,
     pub formals: Vec<SymId>,
+    pub inits: Vec<Value>,
     pub body: Value,
 }
 
-/// Recognise the operator of `((letrec ((L (lambda ..))) L) init ..)`.
-///
-/// Finding 3, found by an earlier version of this returning false: `expand`
-/// was applied only to the form being compiled, so the OPERATOR position was
-/// still a bare `(letrec ..)`. Expansion is lazy, so no pass has normalised
-/// the tree and every consumer carries its own traversal -- and will miss a
-/// position exactly once.
-fn as_named_let(vm: &mut Vm, op: Value) -> R<Option<NamedLet>> {
-    let Value::Obj(_) = op else {
-        return Ok(None);
-    };
-    // Do NOT expand first. `letrec` is itself a macro, so expanding the
-    // operator destroys the very shape being looked for -- it becomes
-    // `((lambda (loop) (set! loop ..) loop))`, a mutable cell, and the loop
-    // is unrecoverable without undoing two expansions instead of one. An
-    // earlier version of this function expanded and then always returned
-    // None. Finding 3 again, from the other side: with no normalising pass,
-    // "how expanded is this subtree?" has no answer a consumer can rely on.
-    let Ok(parts) = list(vm, op) else {
-        return Ok(None);
-    };
+fn as_let(vm: &mut Vm, parts: &[Value]) -> R<Option<NamedLet>> {
     let Some(&Value::Symbol(h)) = parts.first() else {
         return Ok(None);
     };
-    if !matches!(name_of(vm, vm.engine.resolve(h)).as_str(), "letrec" | "letrec*") {
+    if name_of(vm, vm.engine.resolve(h)) != "let" {
         return Ok(None);
     }
-    let Some(&bindings) = parts.get(1) else {
-        return Ok(None);
+    let args = &parts[1..];
+    let (name, rest) = match args.first() {
+        Some(&Value::Symbol(n)) => (Some(vm.engine.resolve(n)), &args[1..]),
+        _ => (None, args),
     };
-    let binds = list(vm, bindings)?;
-    if binds.len() != 1 {
-        return Ok(None);
+    let Some((spec, body)) = rest.split_first() else {
+        return Err("`let` with no binding list".into());
+    };
+    // One body form: the subset has no sequencing, and a `let` body with two
+    // forms in a pure function means the first one was useless anyway.
+    if body.len() != 1 {
+        return Err("a `let` body with more than one form".into());
     }
-    let b = list(vm, binds[0])?;
-    let Some(&Value::Symbol(name)) = b.first() else {
-        return Ok(None);
-    };
-    let Some(&lam) = b.get(1) else {
-        return Ok(None);
-    };
-    let lam = expand(vm, lam)?;
-    let lparts = list(vm, lam)?;
-    let Some(&Value::Symbol(lh)) = lparts.first() else {
-        return Ok(None);
-    };
-    if name_of(vm, vm.engine.resolve(lh)) != "lambda" || lparts.len() != 3 {
-        return Ok(None);
+    let mut formals = Vec::new();
+    let mut inits = Vec::new();
+    for pair in binding_items(vm, *spec)? {
+        let parts = binding_items(vm, pair)?;
+        match parts.as_slice() {
+            [Value::Symbol(v), init] => {
+                formals.push(*v);
+                inits.push(*init);
+            }
+            _ => return Err("a `let` binding that is not (variable init)".into()),
+        }
     }
-    let formals = match lparts[1] {
-        Value::Null => Vec::new(),
-        v => list(vm, v)?
-            .into_iter()
-            .filter_map(|x| match x {
-                Value::Symbol(s) => Some(s),
-                _ => None,
-            })
-            .collect(),
-    };
-    Ok(Some(NamedLet { name: vm.engine.resolve(name), formals, body: lparts[2] }))
+    Ok(Some(NamedLet { name, formals, inits, body: body[0] }))
 }
 
-/// `((lambda (v ...) body) init ...)` -- what `let` becomes.
-#[allow(clippy::type_complexity)]
-fn as_let(vm: &mut Vm, parts: &[Value]) -> R<Option<(Vec<SymId>, Value, Vec<Value>)>> {
-    let Some(&head) = parts.first() else {
-        return Ok(None);
-    };
-    let Value::Obj(_) = head else {
-        return Ok(None);
-    };
-    let hparts = list(vm, head)?;
-    let Some(&Value::Symbol(h)) = hparts.first() else {
-        return Ok(None);
-    };
-    if name_of(vm, vm.engine.resolve(h)) != "lambda" || hparts.len() != 3 {
-        return Ok(None);
+/// A binding list or a binding: a list, or a bracket vector (plan §4.9).
+fn binding_items(vm: &Vm, v: Value) -> R<Vec<Value>> {
+    if let Value::Obj(r) = v
+        && let Obj::Vector {
+            items,
+            bracket: true,
+        } = vm.engine.obj(r)
+    {
+        return Ok(items.clone());
     }
-    let formals = match hparts[1] {
-        Value::Null => Vec::new(),
-        v => list(vm, v)?
-            .into_iter()
-            .filter_map(|x| match x {
-                Value::Symbol(s) => Some(s),
-                _ => None,
-            })
-            .collect(),
-    };
-    if formals.len() != parts.len() - 1 {
-        return Ok(None);
-    }
-    Ok(Some((formals, hparts[2], parts[1..].to_vec())))
+    list(vm, v)
 }
 
 fn as_lambda(vm: &mut Vm, parts: &[Value]) -> R<(Vec<SymId>, Value)> {

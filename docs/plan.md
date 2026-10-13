@@ -960,6 +960,33 @@ five items the current representation makes hard while changing it is still
 cheap. It is the S0 method — measure instead of arguing — applied to the one
 decision S0 deferred.
 
+### DECIDED 2026-10-12: `let` is a core form, and expansions are cached
+
+Both of S5b's first two recommendations, acted on the same day because both
+were cheap exactly while the representation was still soft — which was the
+argument for running S5b at all.
+
+**`let` and named `let` live in `vm.rs`, not `prelude.scm`.** As macros they
+expanded to `((lambda (v …) body) init …)` and, for a named `let`, to a
+`letrec` cell holding a self-reference. Two costs, both measured: the
+expansion was redone on every call, and the shape had thrown away the
+structure, so a compiler had to pattern-match its way back to a loop that was
+written in the source. A `let` in a procedure body went from **2.2 µs to
+0.23 µs per call**, and the leaf probe's two extractors collapsed into one.
+
+**Macro expansions are cached, keyed on the call's own heap cell, and the
+cache is cleared by every collection.** `cond` got **4.1×** faster and `when`
+**1.8×**. The clearing is deliberate: an in-place rewrite would be cheaper but
+`(eval '(when #t 1))` would then mutate the caller's own quoted list, and
+clearing is also what keeps a key from dangling onto a reused slot and what
+stops `eval` of generated forms leaking an entry per form.
+
+What this does **not** fix is S5b's finding 3 — there is still no ahead-of-time
+expansion pass, so "how expanded is this subtree?" still has no answer a
+consumer can rely on, and every consumer still carries its own traversal. The
+cache fixes the cost, not the shape. A real pass is still the better answer
+for S11 and is now the only one of S5b's findings left open besides item (2).
+
 **What this does not cover,** and it should be settled in S0 rather than
 discovered: a field that genuinely wants scene data — a texture sampling a
 loaded image, say. That needs either an immutable snapshot handed to the
@@ -1062,7 +1089,7 @@ ray's plan; those numbers are estimates.
 | **S3** ◇ | GC per §3.3: precise non-moving single-threaded mark-sweep; roots = explicit stack + handle table + global cells; safepoint-driven; heap cap. | 0.4 | **done** @bf638f5 — cycles collected; the same 10^8 loop went 8.9 GB → 2.65 MB |
 | **S4** ◇ | The lambda list: `&opt`, `&named`, `&keys`, defaults that preserve an explicit `#f`. | 0.2 | **done** @56bd978 |
 | **S5** | `syntax-rules`, the library system, `(scheme base)`, and the scene corpus's own vocabulary — `seq`/`for`/`each` by name, a **growable array**, **`format`** (SRFI-28 spelling), a **seedable RNG as a parameter** ([survey](scene-language-survey.md) §2–§5). `parameterize` for `dyn`/`setdyn`. Every binding and clause form accepts bracket bindings (§4.9). | 0.9 | the conformance number reported for the first time; the survey's §7 checklist closed to its one open question; `(let ([x 1]) x)` and `(cond [else 1])` both work |
-| **S5b** | **Leaf probe** (§6). No compiler: the purity/reachability analysis over the IR as it exists, plus codegen and a JIT call for the innermost pure functions, to learn what the current representation makes hard before it hardens. | 0.2 | the analysis names the blocking call for an impure function; a compiled function agrees with T0 on a grid; each of the five items is reported free, awkward or blocked, with the reason |
+| **S5b** | **done** — [s5b-findings.md](s5b-findings.md). **Leaf probe** (§6). No compiler: the purity/reachability analysis over the IR as it exists, plus codegen and a JIT call for the innermost pure functions, to learn what the current representation makes hard before it hardens. | 0.2 | the analysis names the blocking call for an impure function; a compiled function agrees with T0 on a grid; each of the five items is reported free, awkward or blocked, with the reason |
 | **S6** | **The scene corpus as a language test.** Convert the flat `save-scene` output of the 219 examples; run each in scm against **recording stub verbs**; compare the call sequence against the Janet original ([survey](scene-language-survey.md) §8). | 0.4 | every converted scene runs to completion and its recorded call sequence matches, verb for verb and argument for argument |
 | **S7** ◇ | **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. **The handoff to Track B.** | 0.5 | a sample app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable from the host |
 | **S8** ◇ | **REPL core**: the eval protocol, interactive environment, redefinition, backtraces over live frames, introspection. Terminal client in `scm-cli`. | 0.6 | a socket client and the terminal client share one API with no divergence; a runaway form is interruptible; a backtrace names frames and spans |

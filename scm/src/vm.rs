@@ -20,6 +20,7 @@
 //! T0 stays forever as the semantic oracle every later tier is differentially
 //! tested against, so it is written for clarity over speed.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,6 +101,26 @@ enum Frame {
         idx: usize,
         env: Option<ObjRef>,
     },
+    /// The init expressions of a `let` are being evaluated, left to right in
+    /// the *enclosing* environment -- which is what makes `let` parallel and
+    /// `let*` sequential.
+    ///
+    /// `let` used to be a macro expanding to `((lambda (v ...) body) init
+    /// ...)`. S5b measured what that cost: the expansion was redone on every
+    /// call, so a `let` in a procedure body made it **3.1x slower**, and the
+    /// shape it expanded to had lost the binding structure a compiler needs
+    /// (docs/s5b-findings.md, findings 1 and 2).
+    Let {
+        /// `Some` for a named `let`, whose variable is bound to the loop
+        /// procedure itself.
+        name: Option<SymId>,
+        vars: Rc<Vec<SymId>>,
+        inits: Rc<Vec<Value>>,
+        idx: usize,
+        done: Vec<Value>,
+        body: Rc<Vec<Value>>,
+        env: Option<ObjRef>,
+    },
     /// The value of a `set!` or a `define` is being evaluated.
     Assign {
         sym: SymId,
@@ -175,6 +196,14 @@ impl Frame {
                 out.extend(args.iter().copied());
                 env
             }
+            Frame::Let {
+                inits, done, body, env, ..
+            } => {
+                out.extend(inits.iter().copied());
+                out.extend(done.iter().copied());
+                out.extend(body.iter().copied());
+                env
+            }
             Frame::Assign { env, .. } => env,
             Frame::ParamArgs {
                 exprs, done, body, env, ..
@@ -247,6 +276,26 @@ pub struct Vm {
     /// flat, which is S2's exit criterion, so it is measured rather than
     /// asserted by inspection.
     high_water: usize,
+    /// Expansions already computed, keyed on the macro call's own heap cell.
+    ///
+    /// S5b measured the absence of this: expansion was lazy *and* uncached, so
+    /// a macro in a procedure body was re-expanded on **every call**
+    /// (docs/s5b-findings.md). Caching is sound because a `syntax-rules`
+    /// expansion is a pure function of the form, and because whether the head
+    /// is shadowed is a *lexical* property of the source location and so
+    /// cannot differ between evaluations of the same cell.
+    ///
+    /// Two things this deliberately is **not**:
+    ///
+    /// * It is not an in-place rewrite of the call site. That would be
+    ///   cheaper -- no key, no rooting -- but `(eval '(when #t 1))` would
+    ///   then mutate the caller's own quoted list into `(if #t (begin 1))`,
+    ///   and data a program can still see must not change under it.
+    /// * It is not retained across a collection. [`Vm::collect`] clears it,
+    ///   which is what keeps a key from dangling onto a reused slot and what
+    ///   stops `eval` of generated forms from leaking an entry per form. The
+    ///   cost is a cold cache after each GC; the benefit holds between them.
+    expansion_cache: HashMap<ObjRef, Value>,
     /// Guards against a macro that expands into itself. Requirement 8: a
     /// runaway must be an error, not a hang.
     /// **Consecutive** macro expansions, reset whenever a value is returned.
@@ -295,6 +344,7 @@ struct SpecialForms {
     define: SymId,
     set: SymId,
     lambda: SymId,
+    let_: SymId,
     begin: SymId,
     define_syntax: SymId,
     parameterize: SymId,
@@ -332,6 +382,7 @@ impl Vm {
             define: engine.interner.symbol("define"),
             set: engine.interner.symbol("set!"),
             lambda: engine.interner.symbol("lambda"),
+            let_: engine.interner.symbol("let"),
             begin: engine.interner.symbol("begin"),
             define_syntax: engine.interner.symbol("define-syntax"),
             parameterize: engine.interner.symbol("%parameterize"),
@@ -355,6 +406,7 @@ impl Vm {
             stack: Vec::new(),
             high_water: 0,
             expansions: 0,
+            expansion_cache: HashMap::new(),
             fuel: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             syms,
@@ -661,6 +713,11 @@ impl Vm {
     /// explicit control stack, the global cells, the handle table (inside
     /// `Engine::collect`), and the step in flight.
     fn collect(&mut self, step: &Step) {
+        // Dropped rather than traced: see the field's own comment. Clearing
+        // first is what makes a cached expansion ordinary garbage unless the
+        // stack or the step in flight still refers to it -- and both of those
+        // are traced below, so an expansion being evaluated right now is safe.
+        self.expansion_cache.clear();
         let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() * 2 + 8);
         step.trace(&mut roots);
         for frame in &self.stack {
@@ -769,9 +826,13 @@ impl Vm {
                                     self.engine.interner.sym_name(resolved)
                                 )));
                             }
+                            if let Some(&cached) = self.expansion_cache.get(&r) {
+                                return Ok(Step::Eval(cached, env));
+                            }
                             let out = m
                                 .expand(&mut self.engine, expr)
                                 .map_err(VmError::Error)?;
+                            self.expansion_cache.insert(r, out);
                             return Ok(Step::Eval(out, env));
                         }
                     }
@@ -843,6 +904,9 @@ impl Vm {
                     Ok(Some(Step::Return(v)))
                 }
             };
+        }
+        if head == s.let_ {
+            return self.let_form(args, env).map(Some);
         }
         if head == s.quasiquote {
             // Expanded into ordinary code and then evaluated, so this needs
@@ -1047,6 +1111,113 @@ impl Vm {
     /// Begin evaluating a body, pushing a `Seq` frame only if there is more
     /// than one expression -- the last one is in tail position and must have
     /// nothing behind it.
+    /// `(let ((v init) ...) body ...)` and `(let name ((v init) ...) body ...)`.
+    ///
+    /// A core form rather than a macro, for the two reasons S5b measured: the
+    /// macro was re-expanded on every call, and what it expanded to -- an
+    /// applied literal lambda, or for a named `let` a `letrec` cell holding a
+    /// self-reference -- had thrown away the structure. A compiler had to
+    /// pattern-match its way back to a loop that was right here in the source.
+    fn let_form(&mut self, args: &[Value], env: Option<ObjRef>) -> VResult<Step> {
+        let (name, rest) = match args.first() {
+            Some(&Value::Symbol(n)) => (Some(n), &args[1..]),
+            _ => (None, args),
+        };
+        let Some((spec, body)) = rest.split_first() else {
+            return Err(self.err("let: expected a binding list"));
+        };
+        if body.is_empty() {
+            return Err(self.err("let: expected a body"));
+        }
+        let pairs = self.binding_items(*spec)?;
+        let mut vars = Vec::with_capacity(pairs.len());
+        let mut inits = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            let parts = self.binding_items(pair)?;
+            match parts.as_slice() {
+                [Value::Symbol(v), init] => {
+                    vars.push(*v);
+                    inits.push(*init);
+                }
+                _ => return Err(self.err("let: each binding is (variable init)")),
+            }
+        }
+        let vars = Rc::new(vars);
+        let body = Rc::new(body.to_vec());
+        if inits.is_empty() {
+            // `(let () body ...)` still opens a scope, so an internal
+            // `define` lands in it and not in the enclosing frame.
+            return self.finish_let(name, vars, Vec::new(), body, env);
+        }
+        let inits = Rc::new(inits);
+        let first = inits[0];
+        self.push(Frame::Let {
+            name,
+            vars,
+            inits,
+            idx: 0,
+            done: Vec::new(),
+            body,
+            env,
+        });
+        Ok(Step::Eval(first, env))
+    }
+
+    fn finish_let(
+        &mut self,
+        name: Option<SymId>,
+        vars: Rc<Vec<SymId>>,
+        done: Vec<Value>,
+        body: Rc<Vec<Value>>,
+        env: Option<ObjRef>,
+    ) -> VResult<Step> {
+        match name {
+            None => {
+                let slots = vars.iter().copied().zip(done).collect();
+                let new_env = self.engine.env(env, slots);
+                Ok(self.enter_body(body, Some(new_env)))
+            }
+            Some(n) => {
+                // The loop variable has to be visible from inside the loop,
+                // so the closure's environment is the frame that holds it.
+                // `alloc` never collects -- collection is safepoint-driven --
+                // so the half-built frame cannot be swept here.
+                let loop_env = self.engine.env(env, vec![(n, Value::Unspecified)]);
+                let cl = self.engine.alloc(Obj::Closure {
+                    name: Some(n),
+                    params: vars,
+                    opt: Rc::new(Vec::new()),
+                    named: Rc::new(Vec::new()),
+                    keys: None,
+                    rest: None,
+                    body,
+                    env: Some(loop_env),
+                });
+                if let Obj::Env { slots, .. } = self.engine.obj_mut(loop_env) {
+                    slots[0].1 = cl;
+                }
+                // It is a real closure because `loop` is a real value: a
+                // scene can pass it to `map`. The win over the macro is that
+                // nothing is re-expanded, not that nothing is allocated.
+                self.apply(cl, done)
+            }
+        }
+    }
+
+    /// The items of a binding list or a binding: a proper list, or a bracket
+    /// vector, which plan §4.9 makes paren-ish in every binding form.
+    fn binding_items(&self, v: Value) -> VResult<Vec<Value>> {
+        if let Value::Obj(r) = v
+            && let Obj::Vector {
+                items,
+                bracket: true,
+            } = self.engine.obj(r)
+        {
+            return Ok(items.clone());
+        }
+        self.list_to_vec(v)
+    }
+
     fn enter_body(&mut self, body: Rc<Vec<Value>>, env: Option<ObjRef>) -> Step {
         let first = body[0];
         if body.len() > 1 {
@@ -1296,6 +1467,32 @@ impl Vm {
                 let callee = done[0];
                 let argv = done.split_off(1);
                 self.apply(callee, argv)
+            }
+            Frame::Let {
+                name,
+                vars,
+                inits,
+                idx,
+                mut done,
+                body,
+                env,
+            } => {
+                done.push(v);
+                let next = idx + 1;
+                if next < inits.len() {
+                    let expr = inits[next];
+                    self.push(Frame::Let {
+                        name,
+                        vars,
+                        inits,
+                        idx: next,
+                        done,
+                        body,
+                        env,
+                    });
+                    return Ok(Step::Eval(expr, env));
+                }
+                self.finish_let(name, vars, done, body, env)
             }
             Frame::Assign { sym, define, env } => {
                 self.bind(sym, v, define, env)?;

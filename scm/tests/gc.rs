@@ -267,3 +267,38 @@ fn collection_happens_without_being_asked() {
         vm.engine.slot_count()
     );
 }
+
+#[test]
+fn the_expansion_cache_survives_collection_pressure() {
+    // The cache is keyed on the macro call's heap cell and is CLEARED by
+    // every collection, so under stress it is cold every single time -- which
+    // is exactly the case that would expose a dangling key or an expansion
+    // freed while it was still being evaluated. If clearing were done after
+    // the roots were gathered, or if a cached expansion were not reachable
+    // from the step in flight, this is where it would show up.
+    let mut vm = stressed();
+    let src = "(define (clamp x)
+                 (cond [(< x 0) 0]
+                       [(> x 10) 10]
+                       [else (let ([y (* x 2)]) (when (>= y 0) (quotient y 2)))]))
+               (let loop ([i -3] [acc '()])
+                 (if (= i 14) (reverse acc) (loop (+ i 1) (cons (clamp i) acc))))";
+    let v = vm.eval_str(src).expect("macro-heavy code under gc stress");
+    assert_eq!(
+        write_str(&vm.engine, v),
+        "(0 0 0 0 1 2 3 4 5 6 7 8 9 10 10 10 10)"
+    );
+}
+
+#[test]
+fn evaluating_a_quoted_form_does_not_mutate_it() {
+    // The cheap way to memoise an expansion is to overwrite the macro call's
+    // own cell in place. This deliberately does not do that: a program can
+    // still SEE a quoted form it handed to `eval`, and
+    // `(when #t 1)` must not turn into `(if #t (begin 1))` underneath it.
+    let mut vm = stressed();
+    let src = "(define form '(when #t 42))
+               (list (eval form) (eval form) form)";
+    let v = vm.eval_str(src).expect("eval a quoted macro use twice");
+    assert_eq!(write_str(&vm.engine, v), "(42 42 (when #t 42))");
+}

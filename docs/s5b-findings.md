@@ -189,13 +189,79 @@ that re-expands macros per call (bug 1 above), so it is ~15× slower than Janet
 per texel. The honest comparison for ray's purposes is compiled-vs-Janet, and
 the ratio against T0 mostly measures how much room T1 has at S12.
 
+## What the recommendations bought (2026-10-12, same day)
+
+Recommendations 1 and 2 are **done**. Both were measured before and after, on
+200,000 calls, same arithmetic in each case.
+
+### `let` and named `let` are core forms
+
+In `vm.rs`, not `prelude.scm`. One `Frame::Let` evaluates the inits left to
+right in the enclosing environment; a named `let` then builds the loop closure
+in a frame that holds it, so the loop variable is visible from inside the loop.
+
+| | before | after |
+|---|---|---|
+| `(define (with-let x) (let ([y (* x 2.0)]) (+ y 1.0)))` | 647 ms | **263 ms** |
+| the same with no `let` | 207 ms | 217 ms |
+| so a `let` in a body costs | 2.2 µs/call | **0.23 µs/call** |
+
+The 3.1× penalty is now 1.21× — **a 17× reduction in what a `let` costs** —
+and it is the macro expansion that went away, not the frame.
+
+### The expansion cache
+
+Keyed on the macro call's own heap cell, and **cleared by every collection**.
+That last part is a deliberate trade, and the reasoning is in the field's own
+comment: an in-place rewrite of the call site would be cheaper, but then
+`(eval '(when #t 1))` would mutate the caller's quoted list into
+`(if #t (begin 1))`, and data a program can still see must not change under
+it. Clearing on collection also stops a key dangling onto a reused slot and
+stops `eval` of generated forms leaking an entry per form. There is a
+gc-stress test, where the cache is cold on every single lookup.
+
+Measured on macros that are *still* macros, against a 239 ms no-macro
+baseline:
+
+| | no cache | with cache | the macro's own overhead |
+|---|---|---|---|
+| `cond` with three clauses | 1,178 ms | **290 ms** | 939 ms → 48 ms (**20× less**) |
+| `when` | 479 ms | **262 ms** | 240 ms → 20 ms (**12× less**) |
+
+### And the compiler got smaller
+
+The point of findings 1 and 2 was that the compiler had to undo the macros.
+It no longer does:
+
+- `as_let` (recognise an applied literal lambda) and `as_named_let` (undo a
+  `letrec` cell holding a self-reference) **became one extractor**, because
+  the binding structure and the loop are now in the form where the author
+  wrote them.
+- The trap is gone with them. `as_named_let` only worked by *refusing* to
+  expand the operator, since expanding it destroyed the shape being matched —
+  a thing that had to be known rather than discovered.
+
+The analysis half is the same story: `let` joins the `SPECIAL` list and the
+walk reads the bindings directly, replacing nothing with nothing.
+
+Everything else held: 8 functions compiled, the module verifies, **0 allocas**,
+and **bit-exact agreement with T0 on 343 samples**. And T0 itself got faster
+at the thing it is slowest at:
+
+```
+64x64 texels:  T0  61,436 ns/texel  ->  22,513 ns/texel   (2.7x)
+```
+
+Item (4)'s promotion and items (2) and (5) are unchanged, and the small-vector
+return still needs its target hook.
+
 ## Recommendations
 
-1. **Decide `let` and named `let` in the core**, not as macros that erase
-   their structure (findings 1 and 2). Cheap now.
-2. **An expansion pass, or a memoised expansion.** Bug 1 gives it a measured
-   3.1× on ordinary code with no compiler in sight, and finding 3 says every
-   consumer needs it.
+1. ~~**Decide `let` and named `let` in the core**~~ — **done**, see above.
+2. ~~**An expansion pass, or a memoised expansion.**~~ — **done**, as a cache
+   cleared on collection. A full ahead-of-time expansion pass is still the
+   better answer for a compiler, because it would give "how expanded is this
+   subtree?" an answer; the cache fixes the cost, not finding 3.
 3. **Item (4) moves to the front of §6's list.** It gates items (1) and (5).
 4. **Keep the small-vector return behind a target hook** from the first
    commit of `scm-llvm`, as §2.5 already said. This spike confirms the need

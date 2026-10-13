@@ -63,6 +63,11 @@ pub struct Analysis<'a> {
 /// genuine core.
 const SPECIAL: &[&str] = &[
     "quote", "if", "lambda", "begin", "set!", "define", "quasiquote", "and", "or",
+    // `let` and named `let` are core forms now, not macros. For this analysis
+    // that is a straight simplification: the binding structure is in the form
+    // where the author wrote it, instead of having to be recovered from an
+    // applied literal lambda or a `letrec` cell.
+    "let",
 ];
 
 impl<'a> Analysis<'a> {
@@ -385,6 +390,38 @@ impl<'a> Analysis<'a> {
                 }
                 Ok(())
             }
+            // `(let [name] ((v init) ...) body ...)`. The inits are evaluated
+            // in the ENCLOSING scope, which is the one thing a walk has to
+            // get right here, so they are walked before the variables are
+            // pushed.
+            "let" => {
+                let (name, rest) = match args.first() {
+                    Some(&Value::Symbol(n)) => (Some(n), &args[1..]),
+                    _ => (None, args),
+                };
+                let Some((spec, body)) = rest.split_first() else {
+                    return Err("`let` with no binding list".into());
+                };
+                let mut vars = Vec::new();
+                for pair in self.binding_items(*spec)? {
+                    let parts = self.binding_items(pair)?;
+                    match parts.as_slice() {
+                        [Value::Symbol(v), init] => {
+                            self.walk(*init, locals, acc)?;
+                            vars.push(*v);
+                        }
+                        _ => return Err("a `let` binding that is not (variable init)".into()),
+                    }
+                }
+                let depth = locals.len();
+                locals.extend(vars);
+                locals.extend(name);
+                for b in body {
+                    self.walk(*b, locals, acc)?;
+                }
+                locals.truncate(depth);
+                Ok(())
+            }
             "define" => {
                 // An internal define: bind it, then walk the value.
                 match args.first() {
@@ -442,6 +479,20 @@ impl<'a> Analysis<'a> {
             }
             _ => Err("a formal that is not a symbol".into()),
         }
+    }
+
+    /// A binding list or a binding: a proper list, or a bracket vector, which
+    /// plan §4.9 makes paren-ish in every binding form.
+    fn binding_items(&self, v: Value) -> Result<Vec<Value>, String> {
+        if let Value::Obj(r) = v
+            && let Obj::Vector {
+                items,
+                bracket: true,
+            } = self.vm.engine.obj(r)
+        {
+            return Ok(items.clone());
+        }
+        self.list(v)
     }
 
     /// A proper list as a vector. An improper tail is a refusal, not a panic.
