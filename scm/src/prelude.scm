@@ -53,13 +53,17 @@
     ;; `t` is the classic hygiene test: a user's own `t` must not be captured.
     [(_ e rest ...) (let ((t e)) (if t t (or rest ...)))]))
 
+;; `(if #f #f)` is the idiom for the unspecified value, and R7RS says that is
+;; what a `when` with a false test produces. Returning `#f` would be legal and
+;; would also make `(when #f 1)` indistinguishable from a body that returned
+;; false on purpose.
 (define-syntax when
   (syntax-rules ()
-    [(_ test body ...) (if test (begin body ...) #f)]))
+    [(_ test body ...) (if test (begin body ...) (if #f #f))]))
 
 (define-syntax unless
   (syntax-rules ()
-    [(_ test body ...) (if test #f (begin body ...))]))
+    [(_ test body ...) (if test (if #f #f) (begin body ...))]))
 
 (define-syntax cond
   (syntax-rules (else =>)
@@ -178,11 +182,11 @@
   (if (null? more)
       (let loop ((lst lst))
         (if (null? lst)
-            #f
+            (if #f #f)
             (begin (f (car lst)) (loop (cdr lst)))))
       (let loop ((ls (cons lst more)))
         (if (any-null? ls)
-            #f
+            (if #f #f)
             (begin (apply f (map-car ls)) (loop (map-cdr ls)))))))
 
 (define (filter pred lst)
@@ -237,3 +241,48 @@
        (if (< var hi)
            (loop (+ var 1) (cons expr acc))
            (reverse acc)))]))
+
+;; ── derived from the vector and string primitives ───────────────────────
+
+(define (vector-map f v) (list->vector (map f (vector->list v))))
+(define (vector-for-each f v) (for-each f (vector->list v)))
+(define (vector-length* v) (vector-length v))
+
+;; Janet's `inc`/`dec`, kept because the corpus uses them 151 times and they
+;; cost two lines.
+(define (inc n) (+ n 1))
+(define (dec n) (- n 1))
+
+(define (string-join strs sep)
+  (if (null? strs)
+      ""
+      (let loop ((rest (cdr strs)) (acc (car strs)))
+        (if (null? rest)
+            acc
+            (loop (cdr rest) (string-append acc sep (car rest)))))))
+
+;; `->string` is what a converted `(string a b c)` needs: Janet's `string`
+;; stringifies and concatenates, where R7RS `string` takes characters
+;; (scene-language-survey, and plan §4.8's hazard table).
+(define (->string x)
+  (cond [(string? x) x]
+        [(number? x) (number->string x)]
+        [(symbol? x) (symbol->string x)]
+        [(keyword? x) (string-append ":" (keyword->string x))]
+        [(char? x) (string x)]
+        [else (format "~a" x)]))
+
+(define (string-concat . xs)
+  (let loop ((xs xs) (acc ""))
+    (if (null? xs) acc (loop (cdr xs) (string-append acc (->string (car xs)))))))
+
+;; `assert`, which 11 corpus files use.
+(define-syntax assert
+  (syntax-rules ()
+    [(_ test) (unless test (error "assertion failed:" 'test))]
+    [(_ test msg) (unless test (error msg))]))
+
+;; A growable vector, under the name a converted `array/push` reaches for. It
+;; is the SAME vector type -- see prim.rs -- so there is nothing to convert
+;; between, and `vector?` stays true of it.
+(define (make-growable) (make-vector 0))

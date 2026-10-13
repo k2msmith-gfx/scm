@@ -200,9 +200,12 @@ fn and_or_when_unless() {
     assert_eq!(eval("(or)"), "#f");
     assert_eq!(eval("(or #f #f 3)"), "3");
     assert_eq!(eval("(when #t 1 2)"), "2");
-    assert_eq!(eval("(when #f 1)"), "#f");
+    // R7RS: the value of a `when` whose test is false is unspecified, and
+    // `#f` would be legal but would make it indistinguishable from a body
+    // that returned false on purpose.
+    assert_eq!(eval("(when #f 1)"), "#<unspecified>");
     assert_eq!(eval("(unless #f 'yes)"), "yes");
-    assert_eq!(eval("(unless #t 'no)"), "#f");
+    assert_eq!(eval("(unless #t 'no)"), "#<unspecified>");
     // Short-circuiting is real, not incidental.
     assert_eq!(eval("(define n 0) (and #f (set! n 1)) n"), "0");
     assert_eq!(eval("(define n 0) (or #t (set! n 1)) n"), "0");

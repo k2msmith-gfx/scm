@@ -560,6 +560,653 @@ fn newline(_e: &mut Engine, _a: &[Value]) -> PResult {
     Ok(Value::Unspecified)
 }
 
+
+// ── vectors ──────────────────────────────────────────────────────────────
+//
+// One vector type, and it grows. R7RS vectors are fixed-length and the
+// standard has no growable sequence at all, but ray's scene corpus does
+// `array/push` 248 times across 48 files (scene-language-survey §2), so the
+// idiom has to exist. The survey floated a separate growable type with a
+// wrapper; this is simpler and was the better answer once written down --
+// `Obj::Vector` already holds a `Vec<Value>`, so `vector-push!` is one
+// operation rather than a second type that every `vector?` has to know about.
+//
+// It is a documented non-standard addition, not the recommended idiom: a model
+// writes accumulate-and-reverse (plan §4.9), and that path is the fast one.
+
+fn vec_ref(who: &str, e: &Engine, v: Value) -> Result<crate::value::ObjRef, VmError> {
+    match v {
+        Value::Obj(r) if matches!(e.obj(r), Obj::Vector { .. }) => Ok(r),
+        _ => Err(err(format!("{who}: not a vector: {}", write_str(e, v)))),
+    }
+}
+
+fn make_vector(e: &mut Engine, a: &[Value]) -> PResult {
+    let (n, fill) = match a {
+        [Value::Fixnum(n)] => (*n, Value::Bool(false)),
+        [Value::Fixnum(n), fill] => (*n, *fill),
+        _ => return Err(err("make-vector: expects a length and an optional fill")),
+    };
+    if n < 0 {
+        return Err(err("make-vector: negative length"));
+    }
+    Ok(e.vector(vec![fill; n as usize], true))
+}
+
+fn vector_set(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [v, Value::Fixnum(i), x] => {
+            let r = vec_ref("vector-set!", e, *v)?;
+            let (i, x) = (*i, *x);
+            let Obj::Vector { items, .. } = e.obj_mut(r) else {
+                unreachable!("checked")
+            };
+            match items.get_mut(i as usize) {
+                Some(slot) => {
+                    *slot = x;
+                    Ok(Value::Unspecified)
+                }
+                None => Err(err(format!("vector-set!: index {i} out of range"))),
+            }
+        }
+        _ => Err(err("vector-set!: expects a vector, an index and a value")),
+    }
+}
+
+/// The growable addition.
+fn vector_push(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [v, rest @ ..] => {
+            let r = vec_ref("vector-push!", e, *v)?;
+            let rest: Vec<Value> = rest.to_vec();
+            let Obj::Vector { items, .. } = e.obj_mut(r) else {
+                unreachable!("checked")
+            };
+            items.extend(rest);
+            Ok(*v)
+        }
+        _ => Err(err("vector-push!: expects a vector and a value")),
+    }
+}
+
+fn vector_pop(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("vector-pop!", a)?;
+    let r = vec_ref("vector-pop!", e, v)?;
+    let Obj::Vector { items, .. } = e.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    items.pop().ok_or_else(|| err("vector-pop!: empty vector"))
+}
+
+fn vector_to_list(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("vector->list", a)?;
+    let r = vec_ref("vector->list", e, v)?;
+    let Obj::Vector { items, .. } = e.obj(r) else {
+        unreachable!("checked")
+    };
+    let items = items.clone();
+    Ok(e.list(&items))
+}
+
+fn list_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut v = one("list->vector", a)?;
+    let mut items = Vec::new();
+    loop {
+        match v {
+            Value::Null => break,
+            Value::Obj(r) => match e.obj(r) {
+                Obj::Pair(car, cdr) => {
+                    items.push(*car);
+                    v = *cdr;
+                }
+                _ => return Err(err("list->vector: not a proper list")),
+            },
+            _ => return Err(err("list->vector: not a proper list")),
+        }
+    }
+    Ok(e.vector(items, true))
+}
+
+fn vector_fill(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [v, x] => {
+            let r = vec_ref("vector-fill!", e, *v)?;
+            let x = *x;
+            let Obj::Vector { items, .. } = e.obj_mut(r) else {
+                unreachable!("checked")
+            };
+            items.fill(x);
+            Ok(Value::Unspecified)
+        }
+        _ => Err(err("vector-fill!: expects a vector and a value")),
+    }
+}
+
+fn vector_copy(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("vector-copy", a)?;
+    let r = vec_ref("vector-copy", e, v)?;
+    let Obj::Vector { items, bracket } = e.obj(r) else {
+        unreachable!("checked")
+    };
+    let (items, bracket) = (items.clone(), *bracket);
+    Ok(e.vector(items, bracket))
+}
+
+fn is_vector(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("vector?", a)?;
+    Ok(Value::Bool(
+        matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::Vector { .. })),
+    ))
+}
+
+// ── strings ──────────────────────────────────────────────────────────────
+
+fn str_ref(who: &str, e: &Engine, v: Value) -> Result<crate::value::ObjRef, VmError> {
+    match v {
+        Value::Obj(r) if matches!(e.obj(r), Obj::Str(_)) => Ok(r),
+        _ => Err(err(format!("{who}: not a string: {}", write_str(e, v)))),
+    }
+}
+
+fn chars_of(who: &str, e: &Engine, v: Value) -> Result<Vec<char>, VmError> {
+    let r = str_ref(who, e, v)?;
+    let Obj::Str(cs) = e.obj(r) else {
+        unreachable!("checked")
+    };
+    Ok(cs.clone())
+}
+
+fn string_length(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string-length", a)?;
+    Ok(Value::Fixnum(chars_of("string-length", e, v)?.len() as i64))
+}
+
+fn string_ref(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [v, Value::Fixnum(i)] => {
+            let cs = chars_of("string-ref", e, *v)?;
+            cs.get(*i as usize)
+                .copied()
+                .map(Value::Char)
+                .ok_or_else(|| err(format!("string-ref: index {i} out of range")))
+        }
+        _ => Err(err("string-ref: expects a string and an index")),
+    }
+}
+
+fn string_set(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [v, Value::Fixnum(i), Value::Char(c)] => {
+            let r = str_ref("string-set!", e, *v)?;
+            let (i, c) = (*i, *c);
+            let Obj::Str(cs) = e.obj_mut(r) else {
+                unreachable!("checked")
+            };
+            match cs.get_mut(i as usize) {
+                Some(slot) => {
+                    *slot = c;
+                    Ok(Value::Unspecified)
+                }
+                None => Err(err(format!("string-set!: index {i} out of range"))),
+            }
+        }
+        _ => Err(err("string-set!: expects a string, an index and a character")),
+    }
+}
+
+fn make_string(e: &mut Engine, a: &[Value]) -> PResult {
+    let (n, fill) = match a {
+        [Value::Fixnum(n)] => (*n, ' '),
+        [Value::Fixnum(n), Value::Char(c)] => (*n, *c),
+        _ => return Err(err("make-string: expects a length and an optional character")),
+    };
+    if n < 0 {
+        return Err(err("make-string: negative length"));
+    }
+    Ok(e.alloc(Obj::Str(vec![fill; n as usize])))
+}
+
+/// R7RS `string` builds a string from CHARACTERS.
+///
+/// Janet's `string` stringifies and concatenates, which is a conversion
+/// hazard rather than something to imitate: 75 corpus uses of `(string a b)`
+/// become `(string-append …)` with `number->string` where needed. Plan §4.9
+/// says the standard spelling wins, because that is what a model writes.
+fn string_from_chars(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut out = Vec::with_capacity(a.len());
+    for &v in a {
+        match v {
+            Value::Char(c) => out.push(c),
+            _ => {
+                return Err(err(format!(
+                    "string: expects characters, got {} (for concatenation use string-append)",
+                    write_str(e, v)
+                )));
+            }
+        }
+    }
+    Ok(e.alloc(Obj::Str(out)))
+}
+
+fn string_append(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut out = Vec::new();
+    for &v in a {
+        out.extend(chars_of("string-append", e, v)?);
+    }
+    Ok(e.alloc(Obj::Str(out)))
+}
+
+fn substring(e: &mut Engine, a: &[Value]) -> PResult {
+    let (v, start, end) = match a {
+        [v, Value::Fixnum(s)] => (*v, *s, None),
+        [v, Value::Fixnum(s), Value::Fixnum(x)] => (*v, *s, Some(*x)),
+        _ => return Err(err("substring: expects a string, a start and an optional end")),
+    };
+    let cs = chars_of("substring", e, v)?;
+    let end = end.unwrap_or(cs.len() as i64);
+    if start < 0 || end > cs.len() as i64 || start > end {
+        return Err(err(format!(
+            "substring: {start}..{end} is out of range for a string of {}",
+            cs.len()
+        )));
+    }
+    Ok(e.alloc(Obj::Str(cs[start as usize..end as usize].to_vec())))
+}
+
+fn string_to_list(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string->list", a)?;
+    let cs: Vec<Value> = chars_of("string->list", e, v)?
+        .into_iter()
+        .map(Value::Char)
+        .collect();
+    Ok(e.list(&cs))
+}
+
+fn list_to_string(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut v = one("list->string", a)?;
+    let mut out = Vec::new();
+    loop {
+        match v {
+            Value::Null => break,
+            Value::Obj(r) => match *e.obj(r) {
+                Obj::Pair(Value::Char(c), cdr) => {
+                    out.push(c);
+                    v = cdr;
+                }
+                Obj::Pair(..) => return Err(err("list->string: not a list of characters")),
+                _ => return Err(err("list->string: not a proper list")),
+            },
+            _ => return Err(err("list->string: not a proper list")),
+        }
+    }
+    Ok(e.alloc(Obj::Str(out)))
+}
+
+fn string_compare(
+    who: &'static str,
+    e: &Engine,
+    a: &[Value],
+    ok: fn(std::cmp::Ordering) -> bool,
+    fold: bool,
+) -> PResult {
+    if a.len() < 2 {
+        return Err(err(format!("{who}: needs at least two strings")));
+    }
+    let mut prev = chars_of(who, e, a[0])?;
+    if fold {
+        prev = prev.iter().flat_map(|c| c.to_lowercase()).collect();
+    }
+    for &v in &a[1..] {
+        let mut next = chars_of(who, e, v)?;
+        if fold {
+            next = next.iter().flat_map(|c| c.to_lowercase()).collect();
+        }
+        if !ok(prev.cmp(&next)) {
+            return Ok(Value::Bool(false));
+        }
+        prev = next;
+    }
+    Ok(Value::Bool(true))
+}
+
+fn string_eq(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string=?", e, a, |o| o == std::cmp::Ordering::Equal, false)
+}
+fn string_lt(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string<?", e, a, |o| o == std::cmp::Ordering::Less, false)
+}
+fn string_gt(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string>?", e, a, |o| o == std::cmp::Ordering::Greater, false)
+}
+fn string_ci_eq(e: &mut Engine, a: &[Value]) -> PResult {
+    string_compare("string-ci=?", e, a, |o| o == std::cmp::Ordering::Equal, true)
+}
+
+fn string_upcase(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string-upcase", a)?;
+    let cs: Vec<char> = chars_of("string-upcase", e, v)?
+        .iter()
+        .flat_map(|c| c.to_uppercase())
+        .collect();
+    Ok(e.alloc(Obj::Str(cs)))
+}
+
+fn string_downcase(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string-downcase", a)?;
+    let cs: Vec<char> = chars_of("string-downcase", e, v)?
+        .iter()
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    Ok(e.alloc(Obj::Str(cs)))
+}
+
+fn string_copy(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string-copy", a)?;
+    let cs = chars_of("string-copy", e, v)?;
+    Ok(e.alloc(Obj::Str(cs)))
+}
+
+fn is_string(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string?", a)?;
+    Ok(Value::Bool(
+        matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::Str(_))),
+    ))
+}
+
+// ── conversions between the name-ish types ──────────────────────────────
+
+fn string_to_symbol(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string->symbol", a)?;
+    let s: String = chars_of("string->symbol", e, v)?.into_iter().collect();
+    Ok(e.sym(&s))
+}
+
+fn symbol_to_string(e: &mut Engine, a: &[Value]) -> PResult {
+    match one("symbol->string", a)? {
+        Value::Symbol(id) => {
+            let name = e.interner.sym_name(e.resolve(id)).to_string();
+            Ok(e.string(&name))
+        }
+        v => Err(err(format!(
+            "symbol->string: not a symbol: {}",
+            write_str(e, v)
+        ))),
+    }
+}
+
+/// `string->keyword` and `keyword->string`, which are how a converted scene
+/// gets at Janet's `(keyword …)` -- 101 uses in the corpus.
+fn string_to_keyword(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string->keyword", a)?;
+    let s: String = chars_of("string->keyword", e, v)?.into_iter().collect();
+    Ok(e.kw(&s))
+}
+
+fn keyword_to_string(e: &mut Engine, a: &[Value]) -> PResult {
+    match one("keyword->string", a)? {
+        Value::Keyword(id) => {
+            let name = e.interner.kw_name(id).to_string();
+            Ok(e.string(&name))
+        }
+        v => Err(err(format!(
+            "keyword->string: not a keyword: {}",
+            write_str(e, v)
+        ))),
+    }
+}
+
+/// `string->number`, which is Janet's `scan-number` -- 45 corpus uses. Returns
+/// `#f` rather than raising, as R7RS requires.
+fn string_to_number(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("string->number", a)?;
+    let s: String = chars_of("string->number", e, v)?.into_iter().collect();
+    let mut scratch = Engine::new();
+    match crate::reader::Reader::new(s.trim()).read(&mut scratch) {
+        Ok(Some(n @ (Value::Fixnum(_) | Value::Flonum(_)))) => Ok(n),
+        _ => Ok(Value::Bool(false)),
+    }
+}
+
+fn number_to_string(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("number->string", a)?;
+    want_number("number->string", v, e)?;
+    let text = write_str(e, v);
+    Ok(e.string(&text))
+}
+
+// ── characters ──────────────────────────────────────────────────────────
+
+fn char_to_integer(e: &mut Engine, a: &[Value]) -> PResult {
+    match one("char->integer", a)? {
+        Value::Char(c) => Ok(Value::Fixnum(c as i64)),
+        v => Err(err(format!(
+            "char->integer: not a character: {}",
+            write_str(e, v)
+        ))),
+    }
+}
+
+fn integer_to_char(_e: &mut Engine, a: &[Value]) -> PResult {
+    match one("integer->char", a)? {
+        Value::Fixnum(n) => u32::try_from(n)
+            .ok()
+            .and_then(char::from_u32)
+            .map(Value::Char)
+            .ok_or_else(|| err(format!("integer->char: {n} is not a Unicode scalar value"))),
+        _ => Err(err("integer->char: expects an exact integer")),
+    }
+}
+
+fn char_pred(who: &'static str, a: &[Value], f: fn(char) -> bool) -> PResult {
+    match a {
+        [Value::Char(c)] => Ok(Value::Bool(f(*c))),
+        _ => Err(err(format!("{who}: expects one character"))),
+    }
+}
+
+fn is_char(_e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(matches!(one("char?", a)?, Value::Char(_))))
+}
+fn char_alpha(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_pred("char-alphabetic?", a, |c| c.is_alphabetic())
+}
+fn char_numeric(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_pred("char-numeric?", a, |c| c.is_numeric())
+}
+fn char_white(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_pred("char-whitespace?", a, |c| c.is_whitespace())
+}
+fn char_upcase(_e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [Value::Char(c)] => Ok(Value::Char(c.to_uppercase().next().unwrap_or(*c))),
+        _ => Err(err("char-upcase: expects one character")),
+    }
+}
+fn char_downcase(_e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [Value::Char(c)] => Ok(Value::Char(c.to_lowercase().next().unwrap_or(*c))),
+        _ => Err(err("char-downcase: expects one character")),
+    }
+}
+fn char_cmp(who: &'static str, a: &[Value], ok: fn(char, char) -> bool) -> PResult {
+    if a.len() < 2 {
+        return Err(err(format!("{who}: needs at least two characters")));
+    }
+    for w in a.windows(2) {
+        match (w[0], w[1]) {
+            (Value::Char(x), Value::Char(y)) => {
+                if !ok(x, y) {
+                    return Ok(Value::Bool(false));
+                }
+            }
+            _ => return Err(err(format!("{who}: expects characters"))),
+        }
+    }
+    Ok(Value::Bool(true))
+}
+fn char_eq(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char=?", a, |x, y| x == y)
+}
+fn char_lt(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char<?", a, |x, y| x < y)
+}
+fn char_gt(_e: &mut Engine, a: &[Value]) -> PResult {
+    char_cmp("char>?", a, |x, y| x > y)
+}
+
+// ── format ───────────────────────────────────────────────────────────────
+
+/// SRFI-28's `~a`, `~s`, `~%` and `~~`, plus `~d` and a `~,Nf` extension.
+///
+/// The spelling is SRFI-28's rather than Janet's `%s`/`%.3f`, because a model
+/// writing Scheme writes `~a` (plan §4.9). `~,3f` is Common Lisp's and is
+/// here because a readout needs fixed precision and SRFI-28 has no directive
+/// for it -- the corpus formats one on every drag event.
+fn format(e: &mut Engine, a: &[Value]) -> PResult {
+    let (fmt, args) = match a {
+        [] => return Err(err("format: expects a format string")),
+        [f, rest @ ..] => (*f, rest),
+    };
+    let cs = chars_of("format", e, fmt)?;
+    let mut out = String::new();
+    let mut next = 0usize;
+    let mut i = 0usize;
+    let take = |next: &mut usize| -> Result<Value, VmError> {
+        let v = args
+            .get(*next)
+            .copied()
+            .ok_or_else(|| err("format: not enough arguments for the directives"))?;
+        *next += 1;
+        Ok(v)
+    };
+    while i < cs.len() {
+        if cs[i] != '~' {
+            out.push(cs[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let Some(&d) = cs.get(i) else {
+            return Err(err("format: a `~` at the end of the string"));
+        };
+        match d {
+            'a' | 'A' => {
+                let v = take(&mut next)?;
+                out.push_str(&display_str(e, v));
+            }
+            's' | 'S' => {
+                let v = take(&mut next)?;
+                out.push_str(&write_str(e, v));
+            }
+            'd' | 'D' => {
+                let v = take(&mut next)?;
+                want_number("format", v, e)?;
+                out.push_str(&display_str(e, v));
+            }
+            '%' | 'n' => out.push('\n'),
+            '~' => out.push('~'),
+            // `~,Nf` -- fixed precision.
+            ',' => {
+                let mut digits = String::new();
+                i += 1;
+                while let Some(c) = cs.get(i) {
+                    if c.is_ascii_digit() {
+                        digits.push(*c);
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                match cs.get(i) {
+                    Some('f') | Some('F') => {
+                        let prec: usize = digits.parse().unwrap_or(6);
+                        let v = take(&mut next)?;
+                        want_number("format", v, e)?;
+                        let x = as_f64(v).expect("checked");
+                        out.push_str(&format!("{x:.prec$}"));
+                    }
+                    _ => return Err(err("format: expected ~,Nf")),
+                }
+            }
+            other => return Err(err(format!("format: unknown directive ~{other}"))),
+        }
+        i += 1;
+    }
+    if next < args.len() {
+        return Err(err(format!(
+            "format: {} argument(s) left over",
+            args.len() - next
+        )));
+    }
+    Ok(e.string(&out))
+}
+
+// ── errors and the remaining predicates ─────────────────────────────────
+
+/// `(error message irritant …)`. The message and the irritants are joined the
+/// way R7RS describes, and the result is an ordinary refusal -- the VM stays
+/// usable, which is requirement 8.
+fn error_prim(e: &mut Engine, a: &[Value]) -> PResult {
+    let mut text = match a.first() {
+        Some(v) => display_str(e, *v),
+        None => "error".to_string(),
+    };
+    for &v in a.iter().skip(1) {
+        text.push(' ');
+        text.push_str(&write_str(e, v));
+    }
+    Err(err(text))
+}
+
+fn is_boolean(_e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(matches!(one("boolean?", a)?, Value::Bool(_))))
+}
+
+fn is_procedure(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("procedure?", a)?;
+    Ok(Value::Bool(match v {
+        Value::Primitive(_) => true,
+        Value::Obj(r) => matches!(e.obj(r), Obj::Closure { .. }),
+        _ => false,
+    }))
+}
+
+fn is_exact_integer(_e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(matches!(
+        one("exact-integer?", a)?,
+        Value::Fixnum(_)
+    )))
+}
+
+fn num_pred(who: &'static str, e: &Engine, a: &[Value], f: fn(f64) -> bool) -> PResult {
+    let v = one(who, a)?;
+    want_number(who, v, e)?;
+    Ok(Value::Bool(f(as_f64(v).expect("checked"))))
+}
+
+fn is_positive(e: &mut Engine, a: &[Value]) -> PResult {
+    num_pred("positive?", e, a, |x| x > 0.0)
+}
+fn is_negative(e: &mut Engine, a: &[Value]) -> PResult {
+    num_pred("negative?", e, a, |x| x < 0.0)
+}
+fn is_even(e: &mut Engine, a: &[Value]) -> PResult {
+    num_pred("even?", e, a, |x| x % 2.0 == 0.0)
+}
+fn is_odd(e: &mut Engine, a: &[Value]) -> PResult {
+    num_pred("odd?", e, a, |x| x % 2.0 != 0.0)
+}
+fn is_nan(e: &mut Engine, a: &[Value]) -> PResult {
+    num_pred("nan?", e, a, |x| x.is_nan())
+}
+
+fn write_prim(e: &mut Engine, a: &[Value]) -> PResult {
+    for &v in a {
+        print!("{}", write_str(e, v));
+    }
+    Ok(Value::Unspecified)
+}
+
 pub fn install(vm: &mut Vm) {
     vm.define_prim("+", add);
     vm.define_prim("-", sub);
@@ -613,5 +1260,65 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("exact?", p_is_exact);
     vm.define_prim("number?", p_is_number);
     vm.define_prim("display", display);
+    vm.define_prim("write", write_prim);
     vm.define_prim("newline", newline);
+    // vectors, including the growable addition
+    vm.define_prim("make-vector", make_vector);
+    vm.define_prim("vector-set!", vector_set);
+    vm.define_prim("vector-push!", vector_push);
+    vm.define_prim("vector-pop!", vector_pop);
+    vm.define_prim("vector->list", vector_to_list);
+    vm.define_prim("list->vector", list_to_vector);
+    vm.define_prim("vector-fill!", vector_fill);
+    vm.define_prim("vector-copy", vector_copy);
+    vm.define_prim("vector?", is_vector);
+    // strings
+    vm.define_prim("string-length", string_length);
+    vm.define_prim("string-ref", string_ref);
+    vm.define_prim("string-set!", string_set);
+    vm.define_prim("make-string", make_string);
+    vm.define_prim("string", string_from_chars);
+    vm.define_prim("string-append", string_append);
+    vm.define_prim("substring", substring);
+    vm.define_prim("string->list", string_to_list);
+    vm.define_prim("list->string", list_to_string);
+    vm.define_prim("string=?", string_eq);
+    vm.define_prim("string<?", string_lt);
+    vm.define_prim("string>?", string_gt);
+    vm.define_prim("string-ci=?", string_ci_eq);
+    vm.define_prim("string-upcase", string_upcase);
+    vm.define_prim("string-downcase", string_downcase);
+    vm.define_prim("string-copy", string_copy);
+    vm.define_prim("string?", is_string);
+    // the name-ish conversions
+    vm.define_prim("string->symbol", string_to_symbol);
+    vm.define_prim("symbol->string", symbol_to_string);
+    vm.define_prim("string->keyword", string_to_keyword);
+    vm.define_prim("keyword->string", keyword_to_string);
+    vm.define_prim("string->number", string_to_number);
+    vm.define_prim("number->string", number_to_string);
+    // characters
+    vm.define_prim("char->integer", char_to_integer);
+    vm.define_prim("integer->char", integer_to_char);
+    vm.define_prim("char?", is_char);
+    vm.define_prim("char=?", char_eq);
+    vm.define_prim("char<?", char_lt);
+    vm.define_prim("char>?", char_gt);
+    vm.define_prim("char-upcase", char_upcase);
+    vm.define_prim("char-downcase", char_downcase);
+    vm.define_prim("char-alphabetic?", char_alpha);
+    vm.define_prim("char-numeric?", char_numeric);
+    vm.define_prim("char-whitespace?", char_white);
+    // format, and errors
+    vm.define_prim("format", format);
+    vm.define_prim("error", error_prim);
+    // the remaining predicates
+    vm.define_prim("boolean?", is_boolean);
+    vm.define_prim("procedure?", is_procedure);
+    vm.define_prim("exact-integer?", is_exact_integer);
+    vm.define_prim("positive?", is_positive);
+    vm.define_prim("negative?", is_negative);
+    vm.define_prim("even?", is_even);
+    vm.define_prim("odd?", is_odd);
+    vm.define_prim("nan?", is_nan);
 }

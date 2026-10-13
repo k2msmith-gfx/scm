@@ -792,7 +792,8 @@ checklist for the port (S6, S13) and for whatever does the converting.
 | `(verts a)` | `(verts a)` | Janet lets you call a data structure as an index. In scm that is "attempt to call a vector" — loud, which is the good case. `(vector-ref verts a)` |
 | `[1 2 3]` vs `@[1 2 3]` | both to `[…]` | Janet's `[…]` is an **immutable tuple**, `@[…]` a mutable array. scm's `[…]` makes a mutable vector; code that pushed into `@[…]` still works, code that relied on tuple immutability loses a guarantee |
 | a misspelled `:radiuss` | passes silently | **Janet ignores unknown named arguments.** scm errors by name (§4), so the port will *surface* latent typos in the corpus as new failures. Expect some, and treat each as a found bug rather than a regression |
-| `(string/format "%.3f" x)` | — | R7RS has no `format`. The POC had to rebuild it from `quotient`, `number->string` and padding; scm ships one |
+| `(string/format "%.3f" x)` | — | R7RS has no `format`. scm ships one in SRFI-28's spelling (`~a`, `~s`, `~%`) plus `~,Nf` for precision; a `%s`-shaped translation is the converter's job |
+| `(string a b c)` | `(string a b c)` | Janet's `string` stringifies and **concatenates**; R7RS's takes **characters**, so this silently builds the wrong thing or refuses. 75 corpus uses. Use `string-append`, or the prelude's `->string`/`string-concat` |
 | exact/inexact | `(/ 8 3)` | Janet's `/` is float division. scm matches it (no `ratios`, §4) — so this one is safe, and is called out because Steel's `8/3` silently turned `lorenz` into bignum arithmetic |
 | `(with-dyns [:out buf] …)` around `eval` | `(parameterize …)` | ray's own prelude avoids `with-dyns` there because it makes top-level definitions vanish; the scm version must not reproduce the trap |
 
