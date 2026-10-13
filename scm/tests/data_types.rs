@@ -296,3 +296,35 @@ fn everything_survives_gc_stress() {
         .expect("the new layer under gc stress");
     assert_eq!(write_str(&vm.engine, v), "(20 \"2:3.00\" 162)");
 }
+
+// ── equal? on graphs ─────────────────────────────────────────────────────
+//
+// R7RS: "equal? must always terminate even if its arguments contain
+// cycles." The R7RS `equal` benchmark found the naive walk looping on a
+// cycle and taking 100! steps on a tree with sharing.
+
+#[test]
+fn equal_terminates_on_cycles_and_is_linear_on_shared_trees() {
+    assert_eq!(
+        eval("(let ([a (list 1 2)] [b (list 1 2)] [c (list 1 3)])
+                (set-cdr! (cdr a) a) (set-cdr! (cdr b) b) (set-cdr! (cdr c) c)
+                (list (equal? a b) (equal? a c) (equal? a (list 1 2))))"),
+        "(#t #f #f)"
+    );
+    // A tree whose unshared size is 60!, compared in well under a second.
+    assert_eq!(
+        eval("(begin
+                (define (ml n x) (if (zero? n) '() (cons x (ml (- n 1) x))))
+                (define (mt n) (if (zero? n) '() (ml n (mt (- n 1)))))
+                (list (equal? (mt 60) (mt 60)) (equal? (mt 12) (mt 11))))"),
+        "(#t #f)"
+    );
+    // Two cycles of different period that unroll to the same stream are
+    // equal? -- the coinductive reading, which is what the standard means.
+    assert_eq!(
+        eval("(let ([a (list 1 1)] [b (list 1)])
+                (set-cdr! (cdr a) a) (set-cdr! b b)
+                (equal? a b))"),
+        "#t"
+    );
+}

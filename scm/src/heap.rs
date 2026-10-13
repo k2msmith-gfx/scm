@@ -72,6 +72,8 @@ pub enum PortKind {
     /// blocks -- eager reading hung `scm -e` under any harness that leaves
     /// stdin open, which is every CI. Only `scm-cli` creates one.
     Stdin,
+    /// A file being written: buffered here, written on flush and on close.
+    FileOut { path: String, buf: String },
 }
 
 impl PortKind {
@@ -714,10 +716,44 @@ impl Engine {
     /// contain the same elements and so are `equal?`, even though they do not
     /// evaluate the same way.
     ///
-    /// Iterative, with its own worklist. A 200k-element list is ordinary, and
-    /// recursing down one would overflow the C stack.
+    /// R7RS: "`equal?` must always terminate even if its arguments contain
+    /// cycles." The first version walked structure naively, and the R7RS
+    /// `equal` benchmark found both of its failure modes in one afternoon:
+    /// it looped on a cycle, and on a tree with sharing it walked the
+    /// *unshared* size -- 100! for the published input. This is Adams and
+    /// Dybvig's two-phase scheme: a bounded plain walk, which is all ordinary
+    /// data ever needs, and when that runs out of budget a second walk that
+    /// unions each pair of containers it compares, so a pair met twice --
+    /// through sharing or a cycle -- is assumed equal the second time. That
+    /// assumption is the coinductive reading of `equal?` on graphs, and it
+    /// is the one the standard means.
     pub fn equal(&self, a: Value, b: Value) -> bool {
+        match self.equal_walk(a, b, Some(4096)) {
+            Some(r) => r,
+            None => self.equal_walk(a, b, None).expect("the unbounded walk decides"),
+        }
+    }
+
+    /// `budget: Some(n)` is the plain walk, giving up with `None` after `n`
+    /// container comparisons. `None` is the union-find walk, which always
+    /// decides.
+    fn equal_walk(&self, a: Value, b: Value, budget: Option<usize>) -> Option<bool> {
         let mut work = vec![(a, b)];
+        let mut left = budget;
+        let mut parent: HashMap<u32, u32> = HashMap::new();
+        fn find(parent: &mut HashMap<u32, u32>, mut x: u32) -> u32 {
+            while let Some(&p) = parent.get(&x) {
+                if p == x {
+                    break;
+                }
+                // Halve the path on the way up.
+                if let Some(&gp) = parent.get(&p) {
+                    parent.insert(x, gp);
+                }
+                x = p;
+            }
+            x
+        }
         while let Some((a, b)) = work.pop() {
             match (a, b) {
                 (Value::Obj(ra), Value::Obj(rb)) => {
@@ -725,41 +761,55 @@ impl Engine {
                         continue;
                     }
                     match (self.obj(ra), self.obj(rb)) {
-                        (Obj::Pair(a1, d1), Obj::Pair(a2, d2)) => {
-                            work.push((*d1, *d2));
-                            work.push((*a1, *a2));
+                        (Obj::Pair(..), Obj::Pair(..)) | (Obj::Vector { .. }, Obj::Vector { .. }) => {
+                            match left.as_mut() {
+                                Some(0) => return None,
+                                Some(n) => *n -= 1,
+                                None => {
+                                    let (xa, xb) = (find(&mut parent, ra.0), find(&mut parent, rb.0));
+                                    if xa == xb {
+                                        continue;
+                                    }
+                                    parent.insert(xa, xb);
+                                }
+                            }
+                            match (self.obj(ra), self.obj(rb)) {
+                                (Obj::Pair(a1, d1), Obj::Pair(a2, d2)) => {
+                                    work.push((*d1, *d2));
+                                    work.push((*a1, *a2));
+                                }
+                                (Obj::Vector { items: i1, .. }, Obj::Vector { items: i2, .. }) => {
+                                    if i1.len() != i2.len() {
+                                        return Some(false);
+                                    }
+                                    work.extend(i1.iter().copied().zip(i2.iter().copied()));
+                                }
+                                _ => unreachable!("matched above"),
+                            }
                         }
                         (Obj::Str(s1), Obj::Str(s2)) => {
                             if s1 != s2 {
-                                return false;
+                                return Some(false);
                             }
-                        }
-                        (Obj::Vector { items: i1, .. }, Obj::Vector { items: i2, .. }) => {
-                            if i1.len() != i2.len() {
-                                return false;
-                            }
-                            work.extend(i1.iter().copied().zip(i2.iter().copied()));
                         }
                         (Obj::Bytevector(b1), Obj::Bytevector(b2)) => {
                             if b1 != b2 {
-                                return false;
+                                return Some(false);
                             }
                         }
                         // Environments and closures compare by identity, and
                         // `ra == rb` above already settled that.
-                        _ => return false,
+                        _ => return Some(false),
                     }
                 }
                 // Flonums compare by value, so NaN is not `equal?` to itself.
-                // Close enough to `eqv?` on inexact numbers for now; `equal?`
-                // gets its real specification at S9.
                 _ => {
                     if a != b {
-                        return false;
+                        return Some(false);
                     }
                 }
             }
         }
-        true
+        Some(true)
     }
 }

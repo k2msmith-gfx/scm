@@ -1872,7 +1872,7 @@ fn emit(e: &mut Engine, port: Value, text: &str) -> Result<(), VmError> {
     match e.obj_mut(r) {
         Obj::Port { open: false, .. } => Err(err("write: the port is closed")),
         Obj::Port {
-            kind: PortKind::StringOut(s),
+            kind: PortKind::StringOut(s) | PortKind::FileOut { buf: s, .. },
             ..
         } => {
             s.push_str(text);
@@ -1954,12 +1954,40 @@ fn read_line(e: &mut Engine, a: &[Value]) -> PResult {
 fn read_datum(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("read", a)?;
     let r = port_ref("read", e, v)?;
-    let (text, base) = match e.obj(r) {
+    // The reader wants a `&str`, and the port holds chars, so some copy is
+    // unavoidable -- but copying *everything left* for every datum made
+    // reading a 1.1 MB file of numbers quadratic (the R7RS `sum1`
+    // benchmark: 85 s). So: a window, cut at whitespace so no token is
+    // split, doubled whenever the reader says the datum is incomplete or
+    // sees nothing but a comment before the cut.
+    let base = match e.obj(r) {
         Obj::Port {
-            kind: PortKind::StringIn { chars, pos },
+            kind: PortKind::StringIn { pos, .. },
             ..
-        } => (chars[*pos..].iter().collect::<String>(), *pos),
+        } => *pos,
         _ => return Err(err("read: not a textual input port")),
+    };
+    let mut window = 1024usize;
+    let text = loop {
+        let Obj::Port { kind: PortKind::StringIn { chars, .. }, .. } = e.obj(r) else {
+            unreachable!("checked above")
+        };
+        let rest = &chars[base..];
+        if window >= rest.len() {
+            break rest.iter().collect::<String>();
+        }
+        let mut end = window;
+        while end < rest.len() && !rest[end].is_whitespace() {
+            end += 1;
+        }
+        let text: String = rest[..=end.min(rest.len() - 1)].iter().collect();
+        let mut probe = crate::reader::Reader::new(&text);
+        match probe.read(e) {
+            Ok(Some(_)) => break text,
+            // Incomplete, or only a comment before the cut: widen.
+            Ok(None) | Err(crate::reader::ReadError::Incomplete) => window *= 2,
+            Err(_) => break text,
+        }
     };
     let mut reader = crate::reader::Reader::new(&text);
     match reader.read(e) {
@@ -2055,10 +2083,31 @@ fn is_output_port_open(e: &mut Engine, a: &[Value]) -> PResult {
 fn close_port(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("close-port", a)?;
     let r = port_ref("close-port", e, v)?;
+    flush_file(e, r)?;
     if let Obj::Port { open, .. } = e.obj_mut(r) {
         *open = false;
     }
     Ok(Value::Unspecified)
+}
+
+/// A file output port buffers in memory and reaches the file on flush and
+/// on close -- the same moments a C `FILE` would, so a port that is never
+/// closed is a script bug here as it is there.
+fn flush_file(e: &mut Engine, r: crate::value::ObjRef) -> Result<(), VmError> {
+    let Obj::Port { kind: PortKind::FileOut { path, buf }, open: true } = e.obj_mut(r) else {
+        return Ok(());
+    };
+    if buf.is_empty() {
+        return Ok(());
+    }
+    use std::io::Write;
+    let result = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&*path)
+        .and_then(|mut f| f.write_all(buf.as_bytes()));
+    let path = path.clone();
+    buf.clear();
+    result.map_err(|io| file_err(e, &format!("write: {path}: {io}")))
 }
 
 /// `char-ready?` is true for a string port: the characters are already here.
@@ -2274,7 +2323,8 @@ fn flush_output_port(e: &mut Engine, a: &[Value]) -> PResult {
     match a {
         [] => {}
         [p] => {
-            let _ = port_ref("flush-output-port", e, *p)?;
+            let r = port_ref("flush-output-port", e, *p)?;
+            flush_file(e, r)?;
         }
         _ => return Err(err("flush-output-port: expects an optional port")),
     }
@@ -3080,6 +3130,18 @@ fn p_open_input_file(e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
+/// `(open-output-file path)`: truncates the file now, so a failure to
+/// create it is reported here as a file error, and writes reach it on flush
+/// and close.
+fn p_open_output_file(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("open-output-file", a)?;
+    let path: String = chars_of("open-output-file", e, v)?.into_iter().collect();
+    match std::fs::File::create(&path) {
+        Ok(_) => Ok(e.port(PortKind::FileOut { path, buf: String::new() })),
+        Err(err_io) => Err(file_err(e, &format!("open-output-file: {path}: {err_io}"))),
+    }
+}
+
 /// `(doc 'name)` -> its docstring, or `#f`.
 fn doc_prim(vm: &mut Vm, a: &[Value]) -> PResult {
     let Some(sym) = named_arg("doc", a)? else {
@@ -3413,4 +3475,5 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("file-exists?", p_file_exists);
     vm.define_prim("delete-file", p_delete_file);
     vm.define_prim("open-input-file", p_open_input_file);
+    vm.define_prim("open-output-file", p_open_output_file);
 }

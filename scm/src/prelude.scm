@@ -489,13 +489,19 @@
     (close-port port)
     r))
 
-;; The input half of (scheme file)'s conveniences. The output half waits on a
-;; file output port kind, which does not exist yet.
+;; (scheme file)'s conveniences.
 (define (call-with-input-file path proc)
   (call-with-port (open-input-file path) proc))
+(define (call-with-output-file path proc)
+  (call-with-port (open-output-file path) proc))
 (define (with-input-from-file path thunk)
   (let ([port (open-input-file path)])
     (let ([r (parameterize ([current-input-port port]) (thunk))])
+      (close-port port)
+      r)))
+(define (with-output-to-file path thunk)
+  (let ([port (open-output-file path)])
+    (let ([r (parameterize ([current-output-port port]) (thunk))])
       (close-port port)
       r)))
 

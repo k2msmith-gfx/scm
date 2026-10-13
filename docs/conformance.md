@@ -384,3 +384,41 @@ Two results run the other way and are worth keeping: `fibc`, which is
 continuation-heavy, finished in 113 s against Chibi's 296 s, and `string` in
 0.8 s against 10.8 s. Escape continuations on an explicit frame stack cost
 nothing, as §3.1 argued they would.
+
+### Second afternoon: the suite as a gate, and what it found
+
+2026-10-13. Decided: the suite is **two instruments with one set of
+programs**. At reduced sizes it is a language check, `cargo test -p
+scm-conform --test benchmarks` — 53 programs, iteration count 1, problem
+sizes cut until T0 finishes each in seconds, the answer recorded. At the
+published sizes it stays the performance instrument, run by hand. The
+reasoning: T0 cannot finish the published inputs, and S12's exit criterion
+is agreement between tiers, which needs every program to *run*. See
+`scm-conform/bench/README.md`.
+
+Building the reduced set found four more things, two of them real bugs:
+
+- **`equal?` was exponential on shared structure and looped on a cycle.**
+  The `equal` benchmark's first case is a tree with sharing whose unshared
+  size is 100!, and the naive walk walked it. R7RS also requires `equal?` to
+  terminate on cycles, and it did not. It is now the Adams–Dybvig two-phase
+  walk: bounded and plain for ordinary data, union-find over container pairs
+  when the budget runs out. Depth 100 with sharing: 10 ms.
+- **`read` on a port was quadratic.** It copied everything left in the port
+  for every datum, so `sum1` reading a 1.1 MB file of numbers took 85 s. A
+  window cut at whitespace, doubled when the reader says *incomplete*, made
+  it 0.4 s.
+- **A file output port kind**, with `open-output-file`,
+  `call-with-output-file` and `with-output-to-file`: `cat`, `tail`, `slatex`,
+  `scheme` and `ray` write files. That completes `(scheme file)`.
+- `cargo test` now builds the `scm` crate at `opt-level = 2`: unoptimized,
+  the interpreter is 11× slower and the gate took four minutes for no
+  diagnostic gain. The whole `cargo test` is 38 s with the gate in it.
+
+| | programs |
+|---|---|
+| in the gate, running and right | **53** |
+| outside the declared subset (bignums, complex) | 4 |
+
+The `triangl` program is the slow one at 18 s in release: its input is a
+fixed puzzle with no size to cut.

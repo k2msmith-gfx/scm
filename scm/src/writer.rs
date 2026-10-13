@@ -280,6 +280,7 @@ fn emit(
                     crate::heap::PortKind::Stdout => "#<output-port stdout>",
                     crate::heap::PortKind::Stderr => "#<output-port stderr>",
                     crate::heap::PortKind::Stdin => "#<input-port stdin>",
+                    crate::heap::PortKind::FileOut { .. } => "#<output-port file>",
                 });
             }
             // Printed as the message it carries, so `(display e)` in a

@@ -6,3 +6,10 @@ resolver = "2"
 version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+
+# `cargo test` runs an interpreter through two corpora -- the R7RS suite and
+# the benchmark programs at reduced size -- and unoptimized that is 11x
+# slower than release for no diagnostic gain: the tests check answers, not
+# the debugger's view of the VM. The test binaries themselves stay debug.
+[profile.test.package.scm]
+opt-level = 2
