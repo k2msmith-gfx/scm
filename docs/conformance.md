@@ -14,10 +14,20 @@ forms:          1191
 unreadable:       19
 forms aborted:   150
 
-tests passed:    432
-tests failed:    510
-conformance:    45.9% of 942 assertions reached
+tests passed:    439
+tests failed:    503
+conformance:    46.6% of 942 assertions reached
 ```
+
+| | passed | % |
+|---|---|---|
+| first run | 419 | 44.5% |
+| after the three bugs below | 432 | 45.9% |
+| after `quasiquote` | **439** | **46.6%** |
+
+`quasiquote` gained exactly the 7 assertions the table below predicted, which
+is a useful calibration: the priority list can be trusted to be roughly
+right about size as well as about order.
 
 That is the baseline, and a low number is the correct outcome rather than a
 grade: the suite's own header says it "assumes full-unicode", which §2.3
@@ -67,7 +77,7 @@ Counted by how many assertions each absence costs:
 | 2 | 24 | **Bytevectors** — `bytevector`, `bytevector?`, `bytevector-append`, and the rest |
 | 3 | 11 | **`guard`** — exceptions. `%try` exists now as the mechanism (see below) but `guard`/`raise`/`with-exception-handler` do not |
 | 4 | ~20 | **Multiple values** — `call-with-values`, `define-values`, `let*-values`, and the 9 `test-values` entries |
-| 5 | 7 | **`quasiquote`** — the reader produces it and nothing evaluates it. Small, fundamental, and a model writes it constantly |
+| 5 | ~~7~~ | ~~**`quasiquote`**~~ — **done**, and it gained exactly the 7 predicted |
 | 6 | 6 | **`call/cc`** — escape continuations are the §3.1 rung we committed to |
 | 7 | ~45 | **A long tail of absent procedures**, each cheap: `vector-copy!`, `vector-append`, `string-copy!`, `string-foldcase`, `string>=?`, `digit-value`, `list-copy`, `boolean=?`, `real?`, `rational?`, `char-ready?`, … |
 

@@ -268,6 +268,12 @@ struct SpecialForms {
     define_syntax: SymId,
     parameterize: SymId,
     try_: SymId,
+    quasiquote: SymId,
+    unquote: SymId,
+    unquote_splicing: SymId,
+    qq_cons: SymId,
+    qq_append: SymId,
+    qq_list_to_vector: SymId,
     /// The lambda-list markers (plan §4). Janet's names, kept because they are
     /// unambiguous and familiar; `&` is an R7RS special initial, so these are
     /// ordinary symbols and only `lambda` treats them specially.
@@ -299,6 +305,12 @@ impl Vm {
             define_syntax: engine.interner.symbol("define-syntax"),
             parameterize: engine.interner.symbol("%parameterize"),
             try_: engine.interner.symbol("%try"),
+            quasiquote: engine.interner.symbol("quasiquote"),
+            unquote: engine.interner.symbol("unquote"),
+            unquote_splicing: engine.interner.symbol("unquote-splicing"),
+            qq_cons: engine.interner.symbol("%qq-cons"),
+            qq_append: engine.interner.symbol("%qq-append"),
+            qq_list_to_vector: engine.interner.symbol("%qq-list->vector"),
             amp_opt: engine.interner.symbol("&opt"),
             amp_named: engine.interner.symbol("&named"),
             amp_keys: engine.interner.symbol("&keys"),
@@ -729,6 +741,19 @@ impl Vm {
                 }
             };
         }
+        if head == s.quasiquote {
+            // Expanded into ordinary code and then evaluated, so this needs
+            // no frame of its own: a pure syntactic transformation, which is
+            // all quasiquote is.
+            return match args {
+                [tmpl] => {
+                    let tmpl = *tmpl;
+                    let form = self.qq(tmpl, 1)?;
+                    Ok(Some(Step::Eval(form, env)))
+                }
+                _ => Err(self.err("quasiquote: expected one template")),
+            };
+        }
         if head == s.try_ {
             return match args {
                 [expr] => {
@@ -822,6 +847,98 @@ impl Vm {
             };
         }
         Ok(None)
+    }
+
+    /// Expand a quasiquote template into ordinary code.
+    ///
+    /// `depth` is 1 inside one `` ` ``; a nested quasiquote raises it and an
+    /// unquote lowers it, so only an unquote at depth 1 evaluates and the
+    /// deeper ones are rebuilt as data. That is the whole of the algorithm and
+    /// the only part worth being careful about.
+    fn qq(&mut self, tmpl: Value, depth: usize) -> VResult<Value> {
+        let Value::Obj(r) = tmpl else {
+            return self.quoted(tmpl);
+        };
+        // A vector template: expand as a list, then rebuild, keeping the kind.
+        if let Obj::Vector { items, bracket } = self.engine.obj(r).clone() {
+            let as_list = self.engine.list(&items);
+            let inner = self.qq(as_list, depth)?;
+            let f = Value::Symbol(self.syms.qq_list_to_vector);
+            let flag = Value::Bool(bracket);
+            return Ok(self.engine.list(&[f, inner, flag]));
+        }
+        let Obj::Pair(car, cdr) = *self.engine.obj(r) else {
+            return self.quoted(tmpl);
+        };
+
+        // `(unquote e)` and `(quasiquote e)` as the whole template.
+        if let Some((tag, inner)) = self.tagged(tmpl)? {
+            if tag == self.syms.unquote {
+                if depth == 1 {
+                    return Ok(inner);
+                }
+                let rebuilt = self.qq(inner, depth - 1)?;
+                return self.rebuild_tag(self.syms.unquote, rebuilt);
+            }
+            if tag == self.syms.quasiquote {
+                let rebuilt = self.qq(inner, depth + 1)?;
+                return self.rebuild_tag(self.syms.quasiquote, rebuilt);
+            }
+        }
+
+        // `(,@e . rest)` -- splicing in the head position.
+        if let Some((tag, inner)) = self.tagged(car)?
+            && tag == self.syms.unquote_splicing
+        {
+            let rest = self.qq(cdr, depth)?;
+            if depth == 1 {
+                let f = Value::Symbol(self.syms.qq_append);
+                return Ok(self.engine.list(&[f, inner, rest]));
+            }
+            let rebuilt_inner = self.qq(inner, depth - 1)?;
+            let head = self.rebuild_tag(self.syms.unquote_splicing, rebuilt_inner)?;
+            let f = Value::Symbol(self.syms.qq_cons);
+            return Ok(self.engine.list(&[f, head, rest]));
+        }
+
+        let a = self.qq(car, depth)?;
+        let d = self.qq(cdr, depth)?;
+        let f = Value::Symbol(self.syms.qq_cons);
+        Ok(self.engine.list(&[f, a, d]))
+    }
+
+    /// `(tag x)` where `tag` is one of the three quasiquote markers.
+    fn tagged(&mut self, v: Value) -> VResult<Option<(SymId, Value)>> {
+        let Value::Obj(r) = v else { return Ok(None) };
+        let Obj::Pair(Value::Symbol(head), rest) = *self.engine.obj(r) else {
+            return Ok(None);
+        };
+        let head = self.engine.resolve(head);
+        if head != self.syms.unquote
+            && head != self.syms.unquote_splicing
+            && head != self.syms.quasiquote
+        {
+            return Ok(None);
+        }
+        let Value::Obj(r2) = rest else { return Ok(None) };
+        let Obj::Pair(inner, Value::Null) = *self.engine.obj(r2) else {
+            return Ok(None);
+        };
+        Ok(Some((head, inner)))
+    }
+
+    /// Put a deeper `(unquote …)` back as *data*, not as code.
+    fn rebuild_tag(&mut self, tag: SymId, inner: Value) -> VResult<Value> {
+        let f = Value::Symbol(self.syms.qq_cons);
+        let quoted_tag = self.quoted(Value::Symbol(tag))?;
+        let nil = self.quoted(Value::Null)?;
+        let tail = self.engine.list(&[f, inner, nil]);
+        Ok(self.engine.list(&[f, quoted_tag, tail]))
+    }
+
+    fn quoted(&mut self, v: Value) -> VResult<Value> {
+        let q = Value::Symbol(self.syms.quote);
+        Ok(self.engine.list(&[q, v]))
     }
 
     /// Begin evaluating a body, pushing a `Seq` frame only if there is more

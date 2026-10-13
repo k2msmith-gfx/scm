@@ -1340,6 +1340,81 @@ fn is_random_source(e: &mut Engine, a: &[Value]) -> PResult {
     ))
 }
 
+// ── quasiquote's runtime helpers ────────────────────────────────────────
+//
+// `quasiquote` expands into calls to these rather than to `cons`, `append`
+// and `list->vector`, because the expansion is built in Rust and would
+// otherwise reference whatever those names mean *at the use site*. A user
+// writing `(let ([cons list]) `(1 ,x))` would then get something surprising.
+// The `%` names cannot be shadowed by accident.
+
+fn qq_cons(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [car, cdr] => Ok(e.cons(*car, *cdr)),
+        _ => Err(err("%qq-cons: expects two arguments")),
+    }
+}
+
+/// Append one list to a tail, which may be improper -- `` `(1 ,@x . 2) ``.
+fn qq_append(e: &mut Engine, a: &[Value]) -> PResult {
+    let (list, tail) = match a {
+        [l, t] => (*l, *t),
+        _ => return Err(err("%qq-append: expects two arguments")),
+    };
+    let mut items = Vec::new();
+    let mut cur = list;
+    loop {
+        match cur {
+            Value::Null => break,
+            Value::Obj(r) => match e.obj(r) {
+                Obj::Pair(car, cdr) => {
+                    items.push(*car);
+                    cur = *cdr;
+                }
+                // Splicing a vector is an extension, and a convenient one
+                // when a scene has accumulated its points into one.
+                Obj::Vector { items: vs, .. } => {
+                    items.extend(vs.iter().copied());
+                    break;
+                }
+                _ => return Err(err("unquote-splicing: not a list")),
+            },
+            _ => return Err(err("unquote-splicing: not a list")),
+        }
+    }
+    let mut acc = tail;
+    for v in items.into_iter().rev() {
+        acc = e.cons(v, acc);
+    }
+    Ok(acc)
+}
+
+/// Build a vector from a list, remembering which brackets it was written
+/// with -- `` `[1 ,x] `` must stay a bracket vector and `` `#(1 ,x) `` must
+/// not (plan §4.5).
+fn qq_list_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
+    let (list, bracket) = match a {
+        [l, b] => (*l, b.is_truthy()),
+        _ => return Err(err("%qq-list->vector: expects a list and a flag")),
+    };
+    let mut items = Vec::new();
+    let mut cur = list;
+    loop {
+        match cur {
+            Value::Null => break,
+            Value::Obj(r) => match *e.obj(r) {
+                Obj::Pair(car, cdr) => {
+                    items.push(car);
+                    cur = cdr;
+                }
+                _ => return Err(err("%qq-list->vector: not a proper list")),
+            },
+            _ => return Err(err("%qq-list->vector: not a proper list")),
+        }
+    }
+    Ok(e.vector(items, bracket))
+}
+
 pub fn install(vm: &mut Vm) {
     vm.define_prim("+", add);
     vm.define_prim("-", sub);
@@ -1463,4 +1538,8 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("random-source?", is_random_source);
     vm.define_vm_prim("random-real", random_real);
     vm.define_vm_prim("random-integer", random_integer);
+    // quasiquote's runtime, under names nothing will shadow
+    vm.define_prim("%qq-cons", qq_cons);
+    vm.define_prim("%qq-append", qq_append);
+    vm.define_prim("%qq-list->vector", qq_list_to_vector);
 }
