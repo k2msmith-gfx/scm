@@ -11,6 +11,7 @@
 use crate::heap::{Engine, Obj};
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
+use crate::value::ObjRef;
 use crate::writer::{display_str, write_str};
 
 type PResult = Result<Value, VmError>;
@@ -1207,6 +1208,135 @@ fn write_prim(e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Unspecified)
 }
 
+// ── parameters ───────────────────────────────────────────────────────────
+
+/// `(%make-parameter init [converter])`, the raw constructor.
+///
+/// R7RS says the parameter's initial value is `(converter init)`, and applying
+/// a procedure needs the control stack -- so the prelude's `make-parameter`
+/// wraps this and does the call in Scheme. Installing the raw one under a `%`
+/// name keeps that ordering honest instead of silently storing an
+/// unconverted init.
+fn make_parameter(vm: &mut Vm, a: &[Value]) -> PResult {
+    match a {
+        [init] => Ok(vm.make_parameter(*init, None)),
+        [init, conv] => Ok(vm.make_parameter(*init, Some(*conv))),
+        _ => Err(err("make-parameter: expects an initial value and an optional converter")),
+    }
+}
+
+fn param_converter(e: &mut Engine, a: &[Value]) -> PResult {
+    match one("%param-converter", a)? {
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Parameter { converter, .. } => Ok(converter.unwrap_or(Value::Bool(false))),
+            _ => Err(err("%param-converter: not a parameter")),
+        },
+        _ => Err(err("%param-converter: not a parameter")),
+    }
+}
+
+fn is_parameter(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("parameter?", a)?;
+    Ok(Value::Bool(
+        matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::Parameter { .. })),
+    ))
+}
+
+// ── randomness ───────────────────────────────────────────────────────────
+//
+// R7RS has no RNG at all, and the corpus needs one that is REPRODUCIBLE:
+// `math/random` appears in 6 scene files but `:seed` in 17, and ray's
+// `:ray-rng` is why `grow-branches` can be replayed (survey §4). So the
+// generator is a *value* reachable through a parameter, never a global --
+// which is exactly what lets `parameterize` scope a seed to one build.
+//
+// SRFI-27's names, because a model writing Scheme knows them.
+
+/// SplitMix64. Small, fast, and good enough for scattering points; it is not
+/// a cryptographic generator and nothing here pretends otherwise.
+fn next_u64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn make_random_source(e: &mut Engine, a: &[Value]) -> PResult {
+    let seed = match a {
+        [] => 0x2545_F491_4F6C_DD1D,
+        [Value::Fixnum(n)] => *n as u64,
+        _ => return Err(err("make-random-source: expects an optional exact seed")),
+    };
+    Ok(e.alloc(Obj::Rng(seed)))
+}
+
+fn rng_ref(who: &str, vm: &Vm, v: Value) -> Result<ObjRef, VmError> {
+    match v {
+        Value::Obj(r) if matches!(vm.engine.obj(r), Obj::Rng(_)) => Ok(r),
+        _ => Err(err(format!(
+            "{who}: not a random source: {}",
+            write_str(&vm.engine, v)
+        ))),
+    }
+}
+
+/// The source to use when none is given: the value of `current-random-source`.
+fn current_source(vm: &mut Vm, who: &str, a: &[Value], at: usize) -> Result<ObjRef, VmError> {
+    if let Some(v) = a.get(at) {
+        return rng_ref(who, vm, *v);
+    }
+    let sym = vm.engine.interner.symbol("current-random-source");
+    let Some(param) = vm.global(sym) else {
+        return Err(err(format!("{who}: current-random-source is not bound")));
+    };
+    let slot = match param {
+        Value::Obj(r) => match vm.engine.obj(r) {
+            Obj::Parameter { slot, .. } => *slot,
+            _ => return Err(err("current-random-source is not a parameter")),
+        },
+        _ => return Err(err("current-random-source is not a parameter")),
+    };
+    let v = vm.param_value(slot);
+    rng_ref(who, vm, v)
+}
+
+fn random_real(vm: &mut Vm, a: &[Value]) -> PResult {
+    let r = current_source(vm, "random-real", a, 0)?;
+    let Obj::Rng(state) = vm.engine.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    let n = next_u64(state);
+    // 53 bits of mantissa, so the result is uniform in [0, 1).
+    Ok(Value::Flonum((n >> 11) as f64 / (1u64 << 53) as f64))
+}
+
+fn random_integer(vm: &mut Vm, a: &[Value]) -> PResult {
+    let (bound, at) = match a.first() {
+        Some(Value::Fixnum(n)) if *n > 0 => (*n as u64, 1),
+        _ => return Err(err("random-integer: expects a positive exact bound")),
+    };
+    let r = current_source(vm, "random-integer", a, at)?;
+    let Obj::Rng(state) = vm.engine.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    // Rejection sampling, so the distribution is actually uniform rather
+    // than biased toward the low values by a modulo.
+    let limit = u64::MAX - (u64::MAX % bound);
+    let mut n = next_u64(state);
+    while n >= limit {
+        n = next_u64(state);
+    }
+    Ok(Value::Fixnum((n % bound) as i64))
+}
+
+fn is_random_source(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("random-source?", a)?;
+    Ok(Value::Bool(
+        matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::Rng(_))),
+    ))
+}
+
 pub fn install(vm: &mut Vm) {
     vm.define_prim("+", add);
     vm.define_prim("-", sub);
@@ -1321,4 +1451,13 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("even?", is_even);
     vm.define_prim("odd?", is_odd);
     vm.define_prim("nan?", is_nan);
+    // parameters
+    vm.define_vm_prim("%make-parameter", make_parameter);
+    vm.define_prim("%param-converter", param_converter);
+    vm.define_prim("parameter?", is_parameter);
+    // randomness, SRFI-27 flavoured
+    vm.define_prim("make-random-source", make_random_source);
+    vm.define_prim("random-source?", is_random_source);
+    vm.define_vm_prim("random-real", random_real);
+    vm.define_vm_prim("random-integer", random_integer);
 }

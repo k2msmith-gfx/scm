@@ -59,6 +59,18 @@ pub enum Obj {
         bracket: bool,
     },
     Bytevector(Vec<u8>),
+    /// A parameter object (R7RS `make-parameter`). `slot` indexes the VM's
+    /// table of current values; the converter, if any, is applied by
+    /// `parameterize`'s expansion rather than here, so that calling it is an
+    /// ordinary Scheme call the machine already knows how to do.
+    Parameter {
+        slot: usize,
+        converter: Option<Value>,
+    },
+    /// A pseudo-random generator's state. Mutable, and reachable only through
+    /// a parameter, so `parameterize` can rebind it the way ray's `:ray-rng`
+    /// does -- which is what makes a `:seed` replayable.
+    Rng(u64),
     /// A lexical frame. The chain of these is the environment; the chain of
     /// `Frame`s in the VM is the *control* stack. Keeping them separate is
     /// what lets a closure outlive the call that made it.
@@ -354,7 +366,8 @@ impl Engine {
                             work.push(Value::Obj(*p));
                         }
                     }
-                    Obj::Str(_) | Obj::Bytevector(_) => {}
+                    Obj::Parameter { converter, .. } => work.extend(converter.iter().copied()),
+                    Obj::Str(_) | Obj::Bytevector(_) | Obj::Rng(_) => {}
                 },
             }
         }

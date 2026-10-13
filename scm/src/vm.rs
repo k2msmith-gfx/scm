@@ -62,6 +62,11 @@ pub const PRELUDE: &str = include_str!("prelude.scm");
 /// would have to become a special form.
 pub type PrimFn = fn(&mut Engine, &[Value]) -> VResult<Value>;
 
+/// A primitive that needs the whole VM: `make-parameter` allocates a slot in
+/// the parameter table, and the random source reads one. Neither applies a
+/// procedure, so neither needs a frame -- they just need more than the heap.
+pub type VmPrimFn = fn(&mut Vm, &[Value]) -> VResult<Value>;
+
 /// One pending computation.
 #[derive(Clone, Debug)]
 enum Frame {
@@ -109,6 +114,17 @@ enum Frame {
         body: Rc<Vec<Value>>,
         env: ObjRef,
     },
+    /// `%parameterize`'s parameter and value expressions are being evaluated,
+    /// alternating, into `done`.
+    ParamArgs {
+        exprs: Rc<Vec<Value>>,
+        idx: usize,
+        done: Vec<Value>,
+        body: Rc<Vec<Value>>,
+        env: Option<ObjRef>,
+    },
+    /// The body of a `%parameterize` has returned; put the old values back.
+    ParamRestore { count: usize },
     /// An element of a `[…]` vector is being evaluated. This is the whole
     /// reason the reader keeps a `bracket` flag: a bracket vector *evaluates*
     /// its elements, where `#(…)` is a constant (plan §4.5).
@@ -146,6 +162,18 @@ impl Frame {
                 env
             }
             Frame::Assign { env, .. } => env,
+            Frame::ParamArgs {
+                exprs, done, body, env, ..
+            } => {
+                out.extend(exprs.iter().copied());
+                out.extend(done.iter().copied());
+                out.extend(body.iter().copied());
+                if let Some(r) = env {
+                    out.push(Value::Obj(*r));
+                }
+                return;
+            }
+            Frame::ParamRestore { .. } => return,
             Frame::Defaults {
                 todo, body, env, ..
             } => {
@@ -192,6 +220,7 @@ pub struct Vm {
     /// store into a slot every caller already reads through.
     globals: Vec<Option<Value>>,
     prims: Vec<PrimFn>,
+    vm_prims: Vec<Option<VmPrimFn>>,
     /// Top-level macros. A macro applies only when nothing shadows its name,
     /// the same rule the special forms follow.
     macros: MacroTable,
@@ -208,6 +237,14 @@ pub struct Vm {
     /// Cached symbols for the special forms, so the hot path compares `SymId`s
     /// rather than strings.
     syms: SpecialForms,
+    /// Current values of every parameter object, indexed by its slot.
+    param_values: Vec<Value>,
+    /// The dynamic binding stack: `(slot, previous value)`. `parameterize`
+    /// pushes, and both a normal return and an **error unwind** pop -- the
+    /// latter in `eval`, because an error discards the frames that would
+    /// otherwise have restored them. That is `dynamic-wind`'s "after" half,
+    /// arriving early because `parameterize` cannot be correct without it.
+    param_bindings: Vec<(usize, Value)>,
     /// `apply` cannot be an ordinary primitive: a `PrimFn` gets the engine and
     /// its arguments and deliberately cannot reach the control stack, so it
     /// has no way to call anything. It is recognised here instead.
@@ -222,6 +259,7 @@ struct SpecialForms {
     lambda: SymId,
     begin: SymId,
     define_syntax: SymId,
+    parameterize: SymId,
     /// The lambda-list markers (plan §4). Janet's names, kept because they are
     /// unambiguous and familiar; `&` is an R7RS special initial, so these are
     /// ordinary symbols and only `lambda` treats them specially.
@@ -251,6 +289,7 @@ impl Vm {
             lambda: engine.interner.symbol("lambda"),
             begin: engine.interner.symbol("begin"),
             define_syntax: engine.interner.symbol("define-syntax"),
+            parameterize: engine.interner.symbol("%parameterize"),
             amp_opt: engine.interner.symbol("&opt"),
             amp_named: engine.interner.symbol("&named"),
             amp_keys: engine.interner.symbol("&keys"),
@@ -259,6 +298,7 @@ impl Vm {
             engine,
             globals: Vec::new(),
             prims: Vec::new(),
+            vm_prims: Vec::new(),
             macros: MacroTable::new(),
             stack: Vec::new(),
             high_water: 0,
@@ -266,6 +306,8 @@ impl Vm {
             fuel: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             syms,
+            param_values: Vec::new(),
+            param_bindings: Vec::new(),
             apply_prim: None,
         };
         crate::prim::install(&mut vm);
@@ -300,10 +342,46 @@ impl Vm {
         self.high_water
     }
 
+    /// Make a parameter object. The initial value has already had the
+    /// converter applied by the caller, for the same reason `parameterize`
+    /// does it: applying a procedure is the machine's job, not a primitive's.
+    pub fn make_parameter(&mut self, init: Value, converter: Option<Value>) -> Value {
+        let slot = self.param_values.len();
+        self.param_values.push(init);
+        self.engine.alloc(Obj::Parameter { slot, converter })
+    }
+
+    pub fn param_value(&self, slot: usize) -> Value {
+        self.param_values[slot]
+    }
+
+    pub fn set_param_value(&mut self, slot: usize, v: Value) {
+        self.param_values[slot] = v;
+    }
+
+    /// Parameter values are roots: nothing else refers to them.
+    fn param_roots(&self, out: &mut Vec<Value>) {
+        out.extend(self.param_values.iter().copied());
+        out.extend(self.param_bindings.iter().map(|(_, v)| *v));
+    }
+
     pub fn define_prim(&mut self, name: &str, f: PrimFn) {
         let id = self.engine.register_prim_name(name);
         debug_assert_eq!(id as usize, self.prims.len());
         self.prims.push(f);
+        self.vm_prims.push(None);
+        let sym = self.engine.interner.symbol(name);
+        self.set_global(sym, Value::Primitive(PrimId(id)));
+    }
+
+    /// A primitive that gets the whole VM. See [`VmPrimFn`].
+    pub fn define_vm_prim(&mut self, name: &str, f: VmPrimFn) {
+        let id = self.engine.register_prim_name(name);
+        debug_assert_eq!(id as usize, self.prims.len());
+        self.prims.push(|_, _| {
+            Err(VmError::Error("internal: VM primitive called as a plain one".into()))
+        });
+        self.vm_prims.push(Some(f));
         let sym = self.engine.interner.symbol(name);
         self.set_global(sym, Value::Primitive(PrimId(id)));
     }
@@ -355,7 +433,27 @@ impl Vm {
 
     pub fn eval(&mut self, expr: Value) -> VResult<Value> {
         let base = self.stack.len();
+        let param_base = self.param_bindings.len();
         self.expansions = 0;
+        let out = self.eval_inner(expr, base);
+        if out.is_err() {
+            // An error discards the frames that would have restored the
+            // dynamic bindings, so the unwind has to do it. Without this a
+            // failed `parameterize` leaks its binding into everything after.
+            self.restore_params(param_base);
+            self.stack.truncate(base);
+        }
+        out
+    }
+
+    fn restore_params(&mut self, depth: usize) {
+        while self.param_bindings.len() > depth {
+            let (slot, old) = self.param_bindings.pop().expect("len > depth");
+            self.param_values[slot] = old;
+        }
+    }
+
+    fn eval_inner(&mut self, expr: Value, base: usize) -> VResult<Value> {
         let mut step = Step::Eval(expr, None);
         let mut ticks: u32 = 0;
         loop {
@@ -416,6 +514,7 @@ impl Vm {
         }
         roots.extend(self.globals.iter().flatten().copied());
         self.macro_roots(&mut roots);
+        self.param_roots(&mut roots);
         self.engine.collect(&roots);
     }
 
@@ -436,6 +535,7 @@ impl Vm {
         }
         roots.extend(self.globals.iter().flatten().copied());
         self.macro_roots(&mut roots);
+        self.param_roots(&mut roots);
         self.engine.collect(&roots)
     }
 
@@ -491,7 +591,12 @@ impl Vm {
                     });
                     Ok(Step::Eval(first, env))
                 }
-                Obj::Closure { .. } | Obj::Env { .. } => Ok(Step::Return(expr)),
+                // A parameter object, an RNG and a closure all evaluate to
+                // themselves; only a pair is a form.
+                Obj::Closure { .. }
+                | Obj::Env { .. }
+                | Obj::Parameter { .. }
+                | Obj::Rng(_) => Ok(Step::Return(expr)),
                 Obj::Pair(car, cdr) => {
                     // A macro use is expanded before anything else is decided
                     // about the form, and only when nothing shadows its name.
@@ -581,6 +686,44 @@ impl Vm {
                     Ok(Some(Step::Return(v)))
                 }
             };
+        }
+        if head == s.parameterize {
+            // `(%parameterize ((param value) …) body …)`. The prelude's
+            // `parameterize` macro wraps each value in its converter call
+            // before it gets here, so converters are ordinary Scheme calls
+            // and this form never has to apply a procedure itself.
+            let Some((spec, body)) = args.split_first() else {
+                return Err(self.err("%parameterize: expected a binding list"));
+            };
+            if body.is_empty() {
+                return Err(self.err("%parameterize: expected a body"));
+            }
+            let pairs = self.list_to_vec(*spec)?;
+            let mut exprs = Vec::with_capacity(pairs.len() * 2);
+            for p in pairs {
+                let parts = self.list_to_vec(p)?;
+                match parts.as_slice() {
+                    [param, value] => {
+                        exprs.push(*param);
+                        exprs.push(*value);
+                    }
+                    _ => return Err(self.err("%parameterize: each binding is (param value)")),
+                }
+            }
+            let body = Rc::new(body.to_vec());
+            if exprs.is_empty() {
+                return Ok(Some(self.enter_body(body, env)));
+            }
+            let exprs = Rc::new(exprs);
+            let first = exprs[0];
+            self.push(Frame::ParamArgs {
+                exprs,
+                idx: 0,
+                done: Vec::new(),
+                body,
+                env,
+            });
+            return Ok(Some(Step::Eval(first, env)));
         }
         if head == s.define_syntax {
             return match args {
@@ -885,6 +1028,49 @@ impl Vm {
                 self.bind(sym, v, define, env)?;
                 Ok(Step::Return(Value::Unspecified))
             }
+            Frame::ParamArgs {
+                exprs,
+                idx,
+                mut done,
+                body,
+                env,
+            } => {
+                done.push(v);
+                let next = idx + 1;
+                if next < exprs.len() {
+                    let expr = exprs[next];
+                    self.push(Frame::ParamArgs {
+                        exprs,
+                        idx: next,
+                        done,
+                        body,
+                        env,
+                    });
+                    return Ok(Step::Eval(expr, env));
+                }
+                // Install, remembering what to put back.
+                let mut count = 0;
+                for pair in done.chunks(2) {
+                    let (param, value) = (pair[0], pair[1]);
+                    let slot = match param {
+                        Value::Obj(r) => match self.engine.obj(r) {
+                            Obj::Parameter { slot, .. } => *slot,
+                            _ => return Err(self.err("parameterize: not a parameter")),
+                        },
+                        _ => return Err(self.err("parameterize: not a parameter")),
+                    };
+                    let old = self.param_values[slot];
+                    self.param_bindings.push((slot, old));
+                    self.param_values[slot] = value;
+                    count += 1;
+                }
+                self.push(Frame::ParamRestore { count });
+                Ok(self.enter_body(body, env))
+            }
+            Frame::ParamRestore { count } => {
+                self.restore_params(self.param_bindings.len().saturating_sub(count));
+                Ok(Step::Return(v))
+            }
             Frame::Defaults {
                 todo,
                 idx,
@@ -955,8 +1141,28 @@ impl Vm {
             args.extend(spread);
             return self.apply(f, args);
         }
+        // A parameter object is callable: `(p)` reads it, `(p v)` sets the
+        // current binding.
+        if let Value::Obj(r) = callee
+            && let Obj::Parameter { slot, .. } = *self.engine.obj(r)
+        {
+            return match args.len() {
+                0 => Ok(Step::Return(self.param_values[slot])),
+                1 => {
+                    self.param_values[slot] = args[0];
+                    Ok(Step::Return(Value::Unspecified))
+                }
+                n => Err(self.err(format!(
+                    "a parameter takes zero or one argument, got {n}"
+                ))),
+            };
+        }
         match callee {
             Value::Primitive(id) => {
+                if let Some(f) = self.vm_prims[id.0 as usize] {
+                    let v = f(self, &args)?;
+                    return Ok(Step::Return(v));
+                }
                 let f = self.prims[id.0 as usize];
                 let v = f(&mut self.engine, &args)?;
                 Ok(Step::Return(v))

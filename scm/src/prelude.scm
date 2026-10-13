@@ -286,3 +286,52 @@
 ;; is the SAME vector type -- see prim.rs -- so there is nothing to convert
 ;; between, and `vector?` stays true of it.
 (define (make-growable) (make-vector 0))
+
+;; ── parameters and dynamic binding ──────────────────────────────────────
+;;
+;; `parameterize` wraps each value in its converter call *here*, in Scheme, so
+;; that applying the converter is an ordinary call the machine already knows
+;; how to do. `%parameterize` is the VM form underneath, and it restores the
+;; old values both on a normal return and on an error unwind -- which is
+;; `dynamic-wind`'s "after" half arriving early, because `parameterize` cannot
+;; be correct without it.
+
+;; R7RS: a parameter's initial value is `(converter init)`, so the converter
+;; has to run at construction too -- not only on a later `parameterize`. The
+;; raw constructor is `%make-parameter`, because applying the converter needs
+;; the control stack and so has to happen here rather than in a primitive.
+(define (make-parameter init . conv)
+  (if (null? conv)
+      (%make-parameter init)
+      (let ([c (car conv)])
+        (%make-parameter (c init) c))))
+
+(define (%convert p v)
+  (let ([c (%param-converter p)])
+    (if c (c v) v)))
+
+(define-syntax parameterize
+  (syntax-rules ()
+    [(_ ((p v) ...) body ...)
+     (%parameterize ((p (%convert p v)) ...) body ...)]))
+
+;; ── randomness ──────────────────────────────────────────────────────────
+;;
+;; The generator is a value behind a parameter, never a global, so a seed can
+;; be scoped to one build:
+;;
+;;   (parameterize ([current-random-source (make-random-source 42)])
+;;     (build-the-scene))
+;;
+;; which is ray's `:ray-rng` and why a `:seed` replays (survey §4).
+
+(define current-random-source (make-parameter (make-random-source 20261012)))
+
+;; Janet's spellings, for a converted scene.
+(define (random) (random-real))
+(define (random-int n) (random-integer n))
+
+;; A fresh source from a seed, which is what `:seed` means.
+(define (with-seed seed thunk)
+  (parameterize ([current-random-source (make-random-source seed)])
+    (thunk)))

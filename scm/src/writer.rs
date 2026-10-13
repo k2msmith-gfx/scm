@@ -102,6 +102,8 @@ fn print(e: &Engine, v: Value, quoted: bool, out: &mut String) {
                 None => out.push_str("#<procedure>"),
             },
             Obj::Env { .. } => out.push_str("#<environment>"),
+            Obj::Parameter { .. } => out.push_str("#<parameter>"),
+            Obj::Rng(_) => out.push_str("#<random-source>"),
         },
     }
 }
