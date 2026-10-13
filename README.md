@@ -10,6 +10,29 @@ macOS — and ray's scripting language.
 [docs/plan.md](docs/plan.md); the LLVM feasibility results are in
 [docs/s0-findings.md](docs/s0-findings.md).
 
+## Running it
+
+    cargo build --release
+    ./target/release/scm                      # a REPL
+    ./target/release/scm -e '(+ 1 2 3)'       # one expression
+    ./target/release/scm scene.scm            # a file
+    ./target/release/scm --fuel 10000 …       # bound a runaway
+
+```
+scm> (define (fact n)
+...    (if (= n 0) 1 (* n (fact (- n 1)))))
+scm> (fact 20)
+2432902008176640000
+scm> (let ([x 1] [y 2]) (+ x y))
+3
+scm> (seq (i 0 5) (* i i))
+(0 1 4 9 16)
+```
+
+An unclosed paren continues the entry rather than reporting an error, which
+is what S1's *incomplete* vs *invalid* distinction was for. This is the thin
+REPL; the protocol with several clients is S8.
+
 ## Requirements
 
 Language-side: R7RS-small (qualified — see plan §3.1), embedding as a crate

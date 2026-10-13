@@ -1,0 +1,13 @@
+[package]
+name = "scm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The scm binary: a REPL and a script runner"
+
+[[bin]]
+name = "scm"
+path = "src/main.rs"
+
+[dependencies]
+scm = { path = "../scm" }

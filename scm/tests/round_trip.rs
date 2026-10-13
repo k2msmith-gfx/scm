@@ -290,3 +290,27 @@ fn a_scene_in_the_shape_ray_writes() {
     let vs = Reader::read_all("[(- 0.58) 2]", &mut e).unwrap();
     assert_eq!(write_str(&e, vs[0]), "[(- 0.58) 2]");
 }
+
+// ---- the question a REPL and an editor both ask -------------------------
+
+#[test]
+fn parse_status_separates_keep_typing_from_wrong() {
+    use scm::{ParseStatus, parse_status};
+    // Complete: evaluate it.
+    assert_eq!(parse_status("(+ 1 2)"), ParseStatus::Complete);
+    assert_eq!(parse_status("(+ 1 2) (+ 3 4)"), ParseStatus::Complete);
+    assert_eq!(parse_status(""), ParseStatus::Complete);
+    assert_eq!(parse_status("; just a comment\n"), ParseStatus::Complete);
+
+    // Incomplete: print a continuation prompt. A REPL that said "syntax
+    // error" to any of these would be unusable.
+    assert_eq!(parse_status("(define (f n)"), ParseStatus::Incomplete);
+    assert_eq!(parse_status("(let ([x 1]"), ParseStatus::Incomplete);
+    assert_eq!(parse_status("\"unterminated"), ParseStatus::Incomplete);
+    assert_eq!(parse_status("#| open"), ParseStatus::Incomplete);
+    assert_eq!(parse_status("'"), ParseStatus::Incomplete);
+
+    // Invalid: say so now rather than swallowing more input.
+    assert!(matches!(parse_status(")"), ParseStatus::Invalid(_)));
+    assert!(matches!(parse_status("(1 . 2 3)"), ParseStatus::Invalid(_)));
+}

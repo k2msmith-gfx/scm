@@ -20,8 +20,33 @@ pub use heap::{Engine, Interner, Obj};
 pub use reader::{ReadError, Reader, ReaderOptions, Span};
 pub use value::{KwId, ObjRef, SymId, Value};
 pub use value::PrimId;
-pub use vm::{Vm, VmError};
+pub use vm::{PRELUDE, Vm, VmError};
 pub use writer::{display_str, write_str};
+
+/// Whether a chunk of source is a complete set of datums, needs more input,
+/// or is wrong.
+///
+/// This is the question a REPL asks before evaluating and an editor asks
+/// before deciding whether `RET` submits -- the whole reason S1 made
+/// *incomplete* and *invalid* different answers.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ParseStatus {
+    Complete,
+    /// Keep typing.
+    Incomplete,
+    Invalid(String),
+}
+
+pub fn parse_status(src: &str) -> ParseStatus {
+    // A scratch engine: this is a question about the text, and answering it
+    // should not intern anything into a live heap.
+    let mut scratch = Engine::new();
+    match Reader::read_all(src, &mut scratch) {
+        Ok(_) => ParseStatus::Complete,
+        Err(ReadError::Incomplete) => ParseStatus::Incomplete,
+        Err(e) => ParseStatus::Invalid(format!("{e}")),
+    }
+}
 
 /// Read one datum from a string, for tests and for the shortest possible
 /// path through the whole pipe.

@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "scm"
 version = "0.0.1"
+
+[[package]]
+name = "scm-cli"
+version = "0.0.1"
+dependencies = [
+ "scm",
+]
