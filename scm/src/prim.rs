@@ -248,6 +248,16 @@ fn eq(_e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
+/// `eqv?`. For the types that exist so far this is `eq?`, since numbers are
+/// immediates and compare by value. It gets its own entry because the prelude
+/// and R7RS both name it, and because it will diverge when records arrive.
+fn eqv(_e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [x, y] => Ok(Value::Bool(x == y)),
+        _ => Err(err("eqv?: expects two arguments")),
+    }
+}
+
 fn equal(e: &mut Engine, a: &[Value]) -> PResult {
     match a {
         [x, y] => Ok(Value::Bool(e.equal(*x, *y))),
@@ -327,6 +337,217 @@ fn is_symbol(_e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Bool(matches!(one("symbol?", a)?, Value::Symbol(_))))
 }
 
+/// A placeholder: `apply` is recognised by the VM before a primitive is ever
+/// called, because a primitive cannot reach the control stack to call
+/// anything. This body exists so the name has a slot in the table.
+fn apply_placeholder(_e: &mut Engine, _a: &[Value]) -> PResult {
+    Err(err("apply: internal error (should be handled by the VM)"))
+}
+
+/// The R7RS numeric tower, minus the parts §2.3 does not claim.
+macro_rules! float_prim {
+    ($name:ident, $f:expr) => {
+        fn $name(e: &mut Engine, a: &[Value]) -> PResult {
+            let v = one(stringify!($name), a)?;
+            want_number(stringify!($name), v, e)?;
+            let x: f64 = as_f64(v).expect("checked");
+            Ok(Value::Flonum($f(x)))
+        }
+    };
+}
+
+float_prim!(p_sin, f64::sin);
+float_prim!(p_cos, f64::cos);
+float_prim!(p_tan, f64::tan);
+float_prim!(p_asin, f64::asin);
+float_prim!(p_acos, f64::acos);
+float_prim!(p_exp, f64::exp);
+
+/// `sqrt` of an exact perfect square is exact, which R7RS asks for and which
+/// keeps `(sqrt 4)` from becoming inexact in a scene.
+fn p_sqrt(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("sqrt", a)?;
+    want_number("sqrt", v, e)?;
+    if let Value::Fixnum(n) = v
+        && n >= 0
+    {
+        let r = (n as f64).sqrt().round() as i64;
+        if r * r == n {
+            return Ok(Value::Fixnum(r));
+        }
+    }
+    Ok(Value::Flonum(as_f64(v).expect("checked").sqrt()))
+}
+
+/// One argument is the natural log; two is a log in the given base.
+fn p_log(e: &mut Engine, a: &[Value]) -> PResult {
+    for &x in a {
+        want_number("log", x, e)?;
+    }
+    match a {
+        [x] => Ok(Value::Flonum(as_f64(*x).expect("checked").ln())),
+        [x, b] => Ok(Value::Flonum(
+            as_f64(*x).expect("checked").ln() / as_f64(*b).expect("checked").ln(),
+        )),
+        _ => Err(err("log: expects one or two arguments")),
+    }
+}
+
+/// R7RS's two-argument `atan` *is* Janet's `math/atan2`, which is one less
+/// thing for a conversion to get wrong.
+fn p_atan(e: &mut Engine, a: &[Value]) -> PResult {
+    for &x in a {
+        want_number("atan", x, e)?;
+    }
+    match a {
+        [x] => Ok(Value::Flonum(as_f64(*x).expect("checked").atan())),
+        [y, x] => Ok(Value::Flonum(
+            as_f64(*y).expect("checked").atan2(as_f64(*x).expect("checked")),
+        )),
+        _ => Err(err("atan: expects one or two arguments")),
+    }
+}
+
+/// `expt`, exact when it can be.
+fn p_expt(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [base, exp] => {
+            want_number("expt", *base, e)?;
+            want_number("expt", *exp, e)?;
+            if let (Value::Fixnum(b), Value::Fixnum(x)) = (base, exp)
+                && *x >= 0
+                && *x < 63
+            {
+                let mut acc: i64 = 1;
+                for _ in 0..*x {
+                    acc = acc.checked_mul(*b).ok_or_else(|| {
+                        err("expt: exact integer overflow (the `exact-closed` feature is absent)")
+                    })?;
+                }
+                return Ok(Value::Fixnum(acc));
+            }
+            Ok(Value::Flonum(
+                as_f64(*base).expect("checked").powf(as_f64(*exp).expect("checked")),
+            ))
+        }
+        _ => Err(err("expt: expects two arguments")),
+    }
+}
+
+/// `floor`, `ceiling`, `round` and `truncate` keep exactness on an exact
+/// argument, as R7RS requires.
+macro_rules! round_prim {
+    ($name:ident, $who:expr, $f:expr) => {
+        fn $name(e: &mut Engine, a: &[Value]) -> PResult {
+            let v = one($who, a)?;
+            want_number($who, v, e)?;
+            match v {
+                Value::Fixnum(_) => Ok(v),
+                _ => Ok(Value::Flonum($f(as_f64(v).expect("checked")))),
+            }
+        }
+    };
+}
+
+round_prim!(p_floor, "floor", f64::floor);
+round_prim!(p_ceiling, "ceiling", f64::ceil);
+round_prim!(p_truncate, "truncate", f64::trunc);
+// R7RS `round` rounds to even, which `f64::round` does not.
+round_prim!(p_round, "round", |x: f64| {
+    let r = x.round();
+    if (x - x.trunc()).abs() == 0.5 && r % 2.0 != 0.0 {
+        r - x.signum()
+    } else {
+        r
+    }
+});
+
+fn p_abs(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("abs", a)?;
+    want_number("abs", v, e)?;
+    match v {
+        Value::Fixnum(n) => n
+            .checked_abs()
+            .map(Value::Fixnum)
+            .ok_or_else(|| err("abs: exact integer overflow")),
+        _ => Ok(Value::Flonum(as_f64(v).expect("checked").abs())),
+    }
+}
+
+fn int_pair(who: &'static str, a: &[Value]) -> Result<(i64, i64), VmError> {
+    match a {
+        [Value::Fixnum(x), Value::Fixnum(y)] => {
+            if *y == 0 {
+                return Err(err(format!("{who}: division by zero")));
+            }
+            Ok((*x, *y))
+        }
+        _ => Err(err(format!("{who}: expects two exact integers"))),
+    }
+}
+
+fn p_quotient(_e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y) = int_pair("quotient", a)?;
+    Ok(Value::Fixnum(x / y))
+}
+
+fn p_remainder(_e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y) = int_pair("remainder", a)?;
+    Ok(Value::Fixnum(x % y))
+}
+
+fn p_modulo(_e: &mut Engine, a: &[Value]) -> PResult {
+    let (x, y) = int_pair("modulo", a)?;
+    Ok(Value::Fixnum(x.rem_euclid(y.abs()) * if y < 0 { -1 } else { 1 }))
+}
+
+fn p_min(e: &mut Engine, a: &[Value]) -> PResult {
+    fold_extreme("min", e, a, true)
+}
+
+fn p_max(e: &mut Engine, a: &[Value]) -> PResult {
+    fold_extreme("max", e, a, false)
+}
+
+/// R7RS: if any argument is inexact, the result is inexact.
+fn fold_extreme(who: &'static str, e: &Engine, a: &[Value], want_min: bool) -> PResult {
+    if a.is_empty() {
+        return Err(err(format!("{who}: needs at least one argument")));
+    }
+    for &x in a {
+        want_number(who, x, e)?;
+    }
+    let inexact = a.iter().any(|v| matches!(v, Value::Flonum(_)));
+    let mut best = a[0];
+    for &x in &a[1..] {
+        let (bx, xx) = (as_f64(best).expect("checked"), as_f64(x).expect("checked"));
+        if (want_min && xx < bx) || (!want_min && xx > bx) {
+            best = x;
+        }
+    }
+    Ok(if inexact {
+        Value::Flonum(as_f64(best).expect("checked"))
+    } else {
+        best
+    })
+}
+
+fn p_exact_to_inexact(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("exact->inexact", a)?;
+    want_number("exact->inexact", v, e)?;
+    Ok(Value::Flonum(as_f64(v).expect("checked")))
+}
+
+fn p_is_exact(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("exact?", a)?;
+    want_number("exact?", v, e)?;
+    Ok(Value::Bool(matches!(v, Value::Fixnum(_))))
+}
+
+fn p_is_number(_e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(as_f64(one("number?", a)?).is_some()))
+}
+
 fn display(e: &mut Engine, a: &[Value]) -> PResult {
     for &v in a {
         print!("{}", display_str(e, v));
@@ -357,6 +578,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("not", not);
     vm.define_prim("zero?", is_zero);
     vm.define_prim("eq?", eq);
+    vm.define_prim("eqv?", eqv);
     vm.define_prim("equal?", equal);
     vm.define_prim("list", list);
     vm.define_prim("length", length);
@@ -365,6 +587,31 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("vector-length", vector_length);
     vm.define_prim("keyword?", is_keyword);
     vm.define_prim("symbol?", is_symbol);
+    vm.define_prim("apply", apply_placeholder);
+    vm.define_prim("sin", p_sin);
+    vm.define_prim("cos", p_cos);
+    vm.define_prim("tan", p_tan);
+    vm.define_prim("asin", p_asin);
+    vm.define_prim("acos", p_acos);
+    vm.define_prim("atan", p_atan);
+    vm.define_prim("exp", p_exp);
+    vm.define_prim("log", p_log);
+    vm.define_prim("sqrt", p_sqrt);
+    vm.define_prim("expt", p_expt);
+    vm.define_prim("floor", p_floor);
+    vm.define_prim("ceiling", p_ceiling);
+    vm.define_prim("truncate", p_truncate);
+    vm.define_prim("round", p_round);
+    vm.define_prim("abs", p_abs);
+    vm.define_prim("quotient", p_quotient);
+    vm.define_prim("remainder", p_remainder);
+    vm.define_prim("modulo", p_modulo);
+    vm.define_prim("min", p_min);
+    vm.define_prim("max", p_max);
+    vm.define_prim("exact->inexact", p_exact_to_inexact);
+    vm.define_prim("inexact", p_exact_to_inexact);
+    vm.define_prim("exact?", p_is_exact);
+    vm.define_prim("number?", p_is_number);
     vm.define_prim("display", display);
     vm.define_prim("newline", newline);
 }

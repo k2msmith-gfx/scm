@@ -11,6 +11,7 @@
 pub mod heap;
 pub mod prim;
 pub mod reader;
+pub mod syntax;
 pub mod value;
 pub mod vm;
 pub mod writer;

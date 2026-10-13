@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::heap::{Engine, NamedParam, Obj, Param};
+use crate::syntax::{MacroTable, SyntaxRules};
 use crate::value::{KwId, ObjRef, PrimId, SymId, Value};
 use crate::writer::write_str;
 
@@ -52,6 +53,9 @@ impl std::fmt::Display for VmError {
 }
 
 type VResult<T> = Result<T, VmError>;
+
+/// The derived forms, in Scheme. See `prelude.scm`.
+pub const PRELUDE: &str = include_str!("prelude.scm");
 
 /// A primitive's Rust side. It gets the engine (to allocate) and its
 /// arguments, and cannot touch the control stack -- a primitive that needed to
@@ -188,16 +192,26 @@ pub struct Vm {
     /// store into a slot every caller already reads through.
     globals: Vec<Option<Value>>,
     prims: Vec<PrimFn>,
+    /// Top-level macros. A macro applies only when nothing shadows its name,
+    /// the same rule the special forms follow.
+    macros: MacroTable,
     stack: Vec<Frame>,
     /// The deepest the stack has been this run. A tail loop must leave this
     /// flat, which is S2's exit criterion, so it is measured rather than
     /// asserted by inspection.
     high_water: usize,
+    /// Guards against a macro that expands into itself. Requirement 8: a
+    /// runaway must be an error, not a hang.
+    expansions: u64,
     fuel: Option<u64>,
     interrupt: Arc<AtomicBool>,
     /// Cached symbols for the special forms, so the hot path compares `SymId`s
     /// rather than strings.
     syms: SpecialForms,
+    /// `apply` cannot be an ordinary primitive: a `PrimFn` gets the engine and
+    /// its arguments and deliberately cannot reach the control stack, so it
+    /// has no way to call anything. It is recognised here instead.
+    apply_prim: Option<PrimId>,
 }
 
 struct SpecialForms {
@@ -207,6 +221,7 @@ struct SpecialForms {
     set: SymId,
     lambda: SymId,
     begin: SymId,
+    define_syntax: SymId,
     /// The lambda-list markers (plan §4). Janet's names, kept because they are
     /// unambiguous and familiar; `&` is an R7RS special initial, so these are
     /// ordinary symbols and only `lambda` treats them specially.
@@ -235,6 +250,7 @@ impl Vm {
             set: engine.interner.symbol("set!"),
             lambda: engine.interner.symbol("lambda"),
             begin: engine.interner.symbol("begin"),
+            define_syntax: engine.interner.symbol("define-syntax"),
             amp_opt: engine.interner.symbol("&opt"),
             amp_named: engine.interner.symbol("&named"),
             amp_keys: engine.interner.symbol("&keys"),
@@ -243,13 +259,28 @@ impl Vm {
             engine,
             globals: Vec::new(),
             prims: Vec::new(),
+            macros: MacroTable::new(),
             stack: Vec::new(),
             high_water: 0,
+            expansions: 0,
             fuel: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             syms,
+            apply_prim: None,
         };
         crate::prim::install(&mut vm);
+        {
+            let sym = vm.engine.interner.symbol("apply");
+            if let Some(Value::Primitive(id)) = vm.global(sym) {
+                vm.apply_prim = Some(id);
+            }
+        }
+        // The derived forms are Scheme, not Rust. Compiling them at every
+        // `Vm::new` is exactly the cost plan §7 budgets a build-time image
+        // against at S10 -- measured there, not guessed at here.
+        if let Err(e) = vm.eval_str(PRELUDE) {
+            panic!("the prelude failed to load: {e}");
+        }
         vm
     }
 
@@ -275,6 +306,11 @@ impl Vm {
         self.prims.push(f);
         let sym = self.engine.interner.symbol(name);
         self.set_global(sym, Value::Primitive(PrimId(id)));
+    }
+
+    /// How many globals are bound. For the boot measurement.
+    pub fn global_count(&self) -> usize {
+        self.globals.iter().flatten().count()
     }
 
     pub fn global(&self, sym: SymId) -> Option<Value> {
@@ -319,6 +355,7 @@ impl Vm {
 
     pub fn eval(&mut self, expr: Value) -> VResult<Value> {
         let base = self.stack.len();
+        self.expansions = 0;
         let mut step = Step::Eval(expr, None);
         let mut ticks: u32 = 0;
         loop {
@@ -378,7 +415,17 @@ impl Vm {
             frame.trace(&mut roots);
         }
         roots.extend(self.globals.iter().flatten().copied());
+        self.macro_roots(&mut roots);
         self.engine.collect(&roots);
+    }
+
+    /// Patterns and templates are heap data and nothing else refers to them.
+    /// Missing this showed up immediately under gc stress, as a root pointing
+    /// at a freed slot -- which is the stress mode doing its job.
+    fn macro_roots(&self, out: &mut Vec<Value>) {
+        for m in self.macros.values() {
+            m.trace(out);
+        }
     }
 
     /// Collect now, for tests and for a host that wants to.
@@ -388,6 +435,7 @@ impl Vm {
             frame.trace(&mut roots);
         }
         roots.extend(self.globals.iter().flatten().copied());
+        self.macro_roots(&mut roots);
         self.engine.collect(&roots)
     }
 
@@ -445,10 +493,31 @@ impl Vm {
                 }
                 Obj::Closure { .. } | Obj::Env { .. } => Ok(Step::Return(expr)),
                 Obj::Pair(car, cdr) => {
+                    // A macro use is expanded before anything else is decided
+                    // about the form, and only when nothing shadows its name.
+                    if let Value::Symbol(head) = car
+                        && self.lookup_exact(head, env).is_none()
+                    {
+                        let resolved = self.engine.resolve(head);
+                        if let Some(m) = self.macros.get(&resolved).cloned() {
+                            self.expansions += 1;
+                            if self.expansions > 10_000 {
+                                return Err(self.err(format!(
+                                    "macro expansion of {} did not terminate",
+                                    self.engine.interner.sym_name(resolved)
+                                )));
+                            }
+                            let out = m
+                                .expand(&mut self.engine, expr)
+                                .map_err(VmError::Error)?;
+                            return Ok(Step::Eval(out, env));
+                        }
+                    }
                     let args = self.list_to_vec(cdr)?;
                     if let Value::Symbol(head) = car
-                        && self.lookup(head, env).is_none()
-                        && let Some(step) = self.special_form(head, &args, env)?
+                        && self.lookup_exact(head, env).is_none()
+                        && let Some(step) =
+                            self.special_form(self.engine.resolve(head), &args, env)?
                     {
                         // A special form, and only because nothing shadows its
                         // name: a local called `if` is a variable, not syntax.
@@ -471,7 +540,14 @@ impl Vm {
         let s = &self.syms;
         if head == s.quote {
             return match args {
-                [v] => Ok(Some(Step::Return(*v))),
+                // `syntax->datum`: a template-introduced identifier is renamed
+                // for hygiene, and that renaming must not leak into *data*.
+                // Without this, `(list 'none)` in a template yields the symbol
+                // `none.126`.
+                [v] => {
+                    let d = self.strip_renames(*v);
+                    Ok(Some(Step::Return(d)))
+                }
                 _ => Err(self.err("quote takes exactly one datum")),
             };
         }
@@ -504,6 +580,18 @@ impl Vm {
                     let v = self.make_closure(None, *formals, body, env)?;
                     Ok(Some(Step::Return(v)))
                 }
+            };
+        }
+        if head == s.define_syntax {
+            return match args {
+                [Value::Symbol(name), spec] => {
+                    let (name, spec) = (*name, *spec);
+                    let rules = SyntaxRules::parse(&mut self.engine, name, spec, env)
+                        .map_err(VmError::Error)?;
+                    self.macros.insert(self.engine.resolve(name), Rc::new(rules));
+                    Ok(Some(Step::Return(Value::Unspecified)))
+                }
+                _ => Err(self.err("define-syntax: expected (define-syntax name (syntax-rules …))")),
             };
         }
         if head == s.set || head == s.define {
@@ -849,7 +937,24 @@ impl Vm {
         }
     }
 
-    fn apply(&mut self, callee: Value, args: Vec<Value>) -> VResult<Step> {
+    fn apply(&mut self, callee: Value, mut args: Vec<Value>) -> VResult<Step> {
+        // `(apply f a b '(c d))` -- splice the final list and re-dispatch.
+        if let Value::Primitive(id) = callee
+            && Some(id) == self.apply_prim
+        {
+            if args.is_empty() {
+                return Err(self.err("apply: expects a procedure"));
+            }
+            let f = args.remove(0);
+            let spread = match args.pop() {
+                Some(last) => self.list_to_vec(last).map_err(|_| {
+                    VmError::Error("apply: the last argument must be a list".into())
+                })?,
+                None => Vec::new(),
+            };
+            args.extend(spread);
+            return self.apply(f, args);
+        }
         match callee {
             Value::Primitive(id) => {
                 let f = self.prims[id.0 as usize];
@@ -1028,6 +1133,26 @@ impl Vm {
     // ---- environments ---------------------------------------------------
 
     fn lookup(&self, sym: SymId, env: Option<ObjRef>) -> Option<Value> {
+        if let Some(v) = self.lookup_exact(sym, env) {
+            return Some(v);
+        }
+        // Not lexically bound, so a renamed template identifier means whatever
+        // it meant where the macro was defined -- which for a top-level macro
+        // is the globals, and deliberately NOT the call site. Resolving it in
+        // `env` instead would let `(let ((+ -)) (add2 3 2))` change what the
+        // template's `+` means, which is the referential-transparency half of
+        // hygiene.
+        //
+        // When `let-syntax` arrives, the alias will have to carry its own
+        // environment; for a top-level macro the globals are that environment.
+        let resolved = self.engine.resolve(sym);
+        if resolved != sym {
+            return self.global(resolved);
+        }
+        None
+    }
+
+    fn lookup_exact(&self, sym: SymId, env: Option<ObjRef>) -> Option<Value> {
         let mut cur = env;
         while let Some(r) = cur {
             let Obj::Env { parent, slots } = self.engine.obj(r) else {
@@ -1097,6 +1222,28 @@ impl Vm {
                 },
                 _ => return Err(VmError::Error("improper list in source".into())),
             }
+        }
+    }
+
+    /// Resolve every renamed identifier in a datum back to what it was
+    /// written as. Iterative, because quoted data can be arbitrarily deep.
+    fn strip_renames(&mut self, v: Value) -> Value {
+        match v {
+            Value::Symbol(s) => Value::Symbol(self.engine.resolve(s)),
+            Value::Obj(r) => match self.engine.obj(r).clone() {
+                Obj::Pair(car, cdr) => {
+                    let a = self.strip_renames(car);
+                    let d = self.strip_renames(cdr);
+                    self.engine.cons(a, d)
+                }
+                Obj::Vector { items, bracket } => {
+                    let out: Vec<Value> =
+                        items.into_iter().map(|i| self.strip_renames(i)).collect();
+                    self.engine.vector(out, bracket)
+                }
+                _ => v,
+            },
+            _ => v,
         }
     }
 

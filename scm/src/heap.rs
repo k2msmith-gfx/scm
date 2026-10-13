@@ -130,6 +130,19 @@ impl Interner {
         KwId(id)
     }
 
+    /// A symbol no source text can name.
+    ///
+    /// The name is pushed into the table but deliberately **not** into the
+    /// lookup map, so interning the same spelling from source produces a
+    /// *different* `SymId`. That is what makes a renamed, template-introduced
+    /// identifier genuinely uncapturable rather than merely unlikely to
+    /// collide.
+    pub fn fresh(&mut self, base: &str) -> SymId {
+        let id = self.sym_names.len() as u32;
+        self.sym_names.push(format!("{base}.{id}"));
+        SymId(id)
+    }
+
     pub fn sym_name(&self, id: SymId) -> &str {
         &self.sym_names[id.0 as usize]
     }
@@ -173,6 +186,11 @@ pub struct Engine {
     /// Values rooted from outside the VM -- the host's, and the VM's own
     /// source forms while it holds them across an evaluation.
     handles: Vec<Option<Value>>,
+    /// Renamed macro identifiers, pointing back at what they meant where the
+    /// macro was defined. Consulted only when a name is not lexically bound,
+    /// which is what gives a template both hygiene and referential
+    /// transparency -- see `syntax.rs`.
+    aliases: HashMap<SymId, SymId>,
     pub interner: Interner,
     prim_names: Vec<String>,
 }
@@ -196,6 +214,7 @@ impl Engine {
             stress: false,
             collections: 0,
             handles: Vec::new(),
+            aliases: HashMap::new(),
             interner: Interner::default(),
             prim_names: Vec::new(),
         }
@@ -389,6 +408,25 @@ impl Engine {
 
     pub fn rooted_count(&self) -> usize {
         self.handles.iter().flatten().count()
+    }
+
+    // ---- macro renaming -------------------------------------------------
+
+    pub fn set_alias(&mut self, fresh: SymId, original: SymId) {
+        self.aliases.insert(fresh, original);
+    }
+
+    /// Follow a renamed identifier back to what it meant at the macro's
+    /// definition site. Idempotent for ordinary symbols.
+    pub fn resolve(&self, mut sym: SymId) -> SymId {
+        // A chain can form when a macro expands into another macro's output.
+        for _ in 0..64 {
+            match self.aliases.get(&sym) {
+                Some(&next) if next != sym => sym = next,
+                _ => return sym,
+            }
+        }
+        sym
     }
 
     // ---- primitives -----------------------------------------------------
