@@ -383,3 +383,17 @@ fn applys_final_list_is_not_optional() {
     assert_eq!(eval("(apply + '(1 2))"), "3");
     assert_eq!(eval("(apply + 1 2 '(3))"), "6");
 }
+
+#[test]
+fn list_p_returns_on_a_circular_list() {
+    // R7RS requires `list?` to ANSWER on a cycle, not to hang on one. The
+    // obvious cdr-walk spins forever as soon as set-cdr! exists -- which is
+    // the same consequence that made `write` need datum labels.
+    assert_eq!(eval("(let ((x (list 'a))) (set-cdr! x x) (list? x))"), "#f");
+    assert_eq!(
+        eval("(let ((x (list 'a 'b 'c))) (set-cdr! (cddr x) x) (list? x))"),
+        "#f"
+    );
+    // The ordinary answers are unchanged, including the improper tail.
+    assert_eq!(eval("(list (list? '()) (list? '(1 2 3)) (list? '(a . b)) (list? 4))"), "(#t #t #f #f)");
+}

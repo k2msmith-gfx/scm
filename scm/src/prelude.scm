@@ -108,11 +108,20 @@
 (define (caddr p) (car (cddr p)))
 (define (cdddr p) (cdr (cddr p)))
 
+;; R7RS requires `list?` to RETURN -- `#f` -- on a circular list, not to
+;; hang on one. Walking the cdrs is the obvious implementation and it spins
+;; forever the moment `set-cdr!` exists, so this is tortoise-and-hare: `fast`
+;; moves two cells for every one of `slow`, and if they ever meet there is a
+;; cycle. Same cost in the common case, bounded in the pathological one.
 (define (list? x)
-  (let loop ((x x))
-    (cond [(null? x) #t]
-          [(pair? x) (loop (cdr x))]
-          [else #f])))
+  (let loop ((slow x) (fast x))
+    (cond [(null? fast) #t]
+          [(not (pair? fast)) #f]
+          [(null? (cdr fast)) #t]
+          [(not (pair? (cdr fast))) #f]
+          [else
+           (let ((slow (cdr slow)) (fast (cdr (cdr fast))))
+             (if (eq? slow fast) #f (loop slow fast)))])))
 
 (define (reverse lst)
   (let loop ((lst lst) (acc '()))
