@@ -857,11 +857,17 @@ fn parse_number(tok: &str) -> Result<Option<Value>, String> {
     }
 
     // Exact rationals are not supported: `ratios` is not claimed (plan §2.3),
-    // so say so rather than reading `1/2` as something else.
-    if rest.contains('/') && rest.chars().any(|c| c.is_ascii_digit()) {
-        return Err(format!(
-            "`{rest}`: exact rationals are not supported (the `ratios` feature is absent)"
-        ));
+    // so say so rather than reading `1/2` as something else. But only for a
+    // token that *is* a rational -- digits on both sides of one slash. `n/2`
+    // and `constant-pi/2` are identifiers, and the R7RS benchmarks use them.
+    if let Some((num, den)) = rest.split_once('/') {
+        let num = num.strip_prefix(['+', '-']).unwrap_or(num);
+        let is_digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_digit(radix));
+        if is_digits(num) && is_digits(den) {
+            return Err(format!(
+                "`{rest}`: exact rationals are not supported (the `ratios` feature is absent)"
+            ));
+        }
     }
 
     // R7RS spells these in lower case but says nothing about matching case,

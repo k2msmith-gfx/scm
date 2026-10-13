@@ -66,6 +66,12 @@ pub enum PortKind {
     BytesOut(Vec<u8>),
     Stdout,
     Stderr,
+    /// The process's stdin, **not yet read**. The first input primitive to
+    /// touch it reads stdin to the end and turns it into a `StringIn`, so
+    /// installing it costs nothing and a script that never reads never
+    /// blocks -- eager reading hung `scm -e` under any harness that leaves
+    /// stdin open, which is every CI. Only `scm-cli` creates one.
+    Stdin,
 }
 
 impl PortKind {
@@ -74,7 +80,7 @@ impl PortKind {
     /// `matches!(k, StringIn { .. })` in five places, so adding a second kind
     /// of input port would have silently made each of them wrong.
     pub fn is_input(&self) -> bool {
-        matches!(self, PortKind::StringIn { .. } | PortKind::BytesIn { .. })
+        matches!(self, PortKind::StringIn { .. } | PortKind::BytesIn { .. } | PortKind::Stdin)
     }
 
     pub fn is_binary(&self) -> bool {

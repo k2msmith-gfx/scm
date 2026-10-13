@@ -694,6 +694,37 @@ fn p_is_number(_e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Bool(as_f64(one("number?", a)?).is_some()))
 }
 
+/// R7RS makes the port optional on every input primitive, defaulting to
+/// `current-input-port`. The engine-level readers take it positionally, so
+/// this fills position `at` from the parameter when the call left it out,
+/// and otherwise passes the arguments through untouched -- an arity error
+/// stays the primitive's own.
+fn with_in_port(vm: &mut Vm, a: &[Value], at: usize, f: crate::vm::PrimFn) -> PResult {
+    if let Some(&port) = a.get(at) {
+        materialize_stdin(&mut vm.engine, port);
+        return f(&mut vm.engine, a);
+    }
+    let port = param_now(vm, "current-input-port")?;
+    materialize_stdin(&mut vm.engine, port);
+    let mut args = a.to_vec();
+    args.push(port);
+    f(&mut vm.engine, &args)
+}
+
+/// A `PortKind::Stdin` becomes a string port over everything stdin had, the
+/// first time something reads it. See the variant's note in `heap.rs`.
+fn materialize_stdin(e: &mut Engine, port: Value) {
+    let Value::Obj(r) = port else { return };
+    if !matches!(e.obj(r), Obj::Port { kind: PortKind::Stdin, .. }) {
+        return;
+    }
+    let mut text = String::new();
+    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut text);
+    if let Obj::Port { kind, .. } = e.obj_mut(r) {
+        *kind = PortKind::StringIn { chars: text.chars().collect(), pos: 0 };
+    }
+}
+
 /// The port to write to: the optional argument, or `current-output-port`.
 fn out_port(vm: &Vm, a: &[Value], at: usize) -> Result<Value, VmError> {
     match a.get(at) {
@@ -1961,6 +1992,10 @@ fn stderr_port(e: &mut Engine, _a: &[Value]) -> PResult {
     Ok(e.port(PortKind::Stderr))
 }
 
+fn stdin_port(e: &mut Engine, _a: &[Value]) -> PResult {
+    Ok(e.port(PortKind::Stdin))
+}
+
 fn eof_object(_e: &mut Engine, a: &[Value]) -> PResult {
     if !a.is_empty() {
         return Err(err("eof-object: takes no arguments"));
@@ -3189,10 +3224,10 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("open-input-string", open_input_string);
     vm.define_prim("open-output-string", open_output_string);
     vm.define_prim("get-output-string", get_output_string);
-    vm.define_prim("read", read_datum);
-    vm.define_prim("read-char", read_char_prim);
-    vm.define_prim("peek-char", peek_char_prim);
-    vm.define_prim("read-line", read_line);
+    vm.define_vm_prim("read", |vm, a| with_in_port(vm, a, 0, read_datum));
+    vm.define_vm_prim("read-char", |vm, a| with_in_port(vm, a, 0, read_char_prim));
+    vm.define_vm_prim("peek-char", |vm, a| with_in_port(vm, a, 0, peek_char_prim));
+    vm.define_vm_prim("read-line", |vm, a| with_in_port(vm, a, 0, read_line));
     vm.define_prim("eof-object", eof_object);
     vm.define_prim("eof-object?", is_eof_object);
     vm.define_prim("port?", is_port);
@@ -3200,14 +3235,14 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("output-port?", is_output_port);
     vm.define_prim("textual-port?", is_textual_port);
     vm.define_prim("binary-port?", is_binary_port);
-    vm.define_prim("u8-ready?", is_u8_ready);
+    vm.define_vm_prim("u8-ready?", |vm, a| with_in_port(vm, a, 0, is_u8_ready));
     vm.define_prim("open-input-bytevector", open_input_bytevector);
     vm.define_prim("open-output-bytevector", open_output_bytevector);
     vm.define_prim("get-output-bytevector", get_output_bytevector);
-    vm.define_prim("read-u8", read_u8);
-    vm.define_prim("peek-u8", peek_u8);
+    vm.define_vm_prim("read-u8", |vm, a| with_in_port(vm, a, 0, read_u8));
+    vm.define_vm_prim("peek-u8", |vm, a| with_in_port(vm, a, 0, peek_u8));
     vm.define_prim("write-u8", write_u8);
-    vm.define_prim("read-bytevector", read_bytevector);
+    vm.define_vm_prim("read-bytevector", |vm, a| with_in_port(vm, a, 1, read_bytevector));
     vm.define_prim("read-bytevector!", read_bytevector_into);
     vm.define_prim("write-bytevector", write_bytevector);
     vm.define_prim("flush-output-port", flush_output_port);
@@ -3216,8 +3251,9 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("close-port", close_port);
     vm.define_prim("close-input-port", close_port);
     vm.define_prim("close-output-port", close_port);
-    vm.define_prim("char-ready?", is_char_ready);
+    vm.define_vm_prim("char-ready?", |vm, a| with_in_port(vm, a, 0, is_char_ready));
     vm.define_prim("%stdout-port", stdout_port);
+    vm.define_prim("%stdin-port", stdin_port);
     vm.define_prim("%stderr-port", stderr_port);
     // vectors, including the growable addition
     vm.define_prim("make-vector", make_vector);
@@ -3300,6 +3336,8 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("%qq-list->vector", qq_list_to_vector);
     // the cheap tail: numbers
     vm.define_prim("real?", p_is_real);
+    // Every number here is real, so the top of the tower is the whole tower.
+    vm.define_prim("complex?", p_is_number);
     vm.define_prim("rational?", p_is_rational);
     vm.define_prim("integer?", p_is_integer);
     vm.define_prim("inexact?", p_is_inexact);

@@ -136,7 +136,19 @@ fn ask(session: &mut Session, id: u64, op: Op) -> Response {
     session.handle(Request { id, op })
 }
 
+/// A script's `(current-input-port)` is the process's stdin. The runtime's
+/// default is an empty string port, which is right for an embedded host
+/// (plan §7a: a script must not read the host's stdin), so it is the client
+/// that connects the two, and only this client: the REPL and `--serve` own
+/// the terminal and the socket themselves. The port is lazy -- nothing is
+/// read until the script reads -- so a script that never does cannot block.
+fn connect_stdin(session: &mut Session) {
+    let code = "(define current-input-port (make-parameter (%stdin-port)))".to_string();
+    let _ = ask(session, 0, Op::Eval { code, source: Some("<stdin>".into()) });
+}
+
 fn run_once(session: &mut Session, src: &str, source: &str) -> ExitCode {
+    connect_stdin(session);
     let r = ask(session, 1, Op::Eval { code: src.into(), source: Some(source.into()) });
     match r.outcome {
         Outcome::Value { value, output } => {

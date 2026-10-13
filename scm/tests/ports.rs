@@ -187,3 +187,37 @@ fn ports_survive_gc_stress() {
         .expect("ports under gc stress");
     assert_eq!(write_str(&vm.engine, v), "20");
 }
+
+// ── the port argument is optional ────────────────────────────────────────
+//
+// R7RS makes the port optional on every input primitive, defaulting to
+// `current-input-port`. The R7RS benchmark harness reads its three inputs
+// with a bare `(read)`, and every one of its 57 programs failed on it.
+
+#[test]
+fn input_primitives_default_to_current_input_port() {
+    assert_eq!(
+        eval(r#"(parameterize ([current-input-port (open-input-string "42 x\ny")])
+                  (list (read) (read-char) (peek-char) (read-line) (read-line) (eof-object? (read))))"#),
+        r#"(42 #\space #\x "x" "y" #t)"#
+    );
+    assert_eq!(
+        eval(r#"(parameterize ([current-input-port (open-input-bytevector (bytevector 7 8))])
+                  (list (peek-u8) (read-u8) (u8-ready?) (read-bytevector 5)))"#),
+        "(7 7 #t #u8(8))"
+    );
+    // The runtime's default input port is empty: an embedded script does not
+    // get its host's stdin. Connecting the two is `scm-cli`'s decision.
+    assert_eq!(eval("(eof-object? (read))"), "#t");
+}
+
+#[test]
+fn the_stdin_port_is_an_input_port_before_it_is_read() {
+    // Lazy on purpose: installing it must not touch stdin, or `scm -e` blocks
+    // under any harness that leaves stdin open. Reading it is covered by the
+    // CLI, which is the only thing that creates one.
+    assert_eq!(
+        eval("(let ([p (%stdin-port)]) (list (input-port? p) (textual-port? p) (output-port? p)))"),
+        "(#t #t #f)"
+    );
+}

@@ -279,6 +279,7 @@ fn emit(
                     crate::heap::PortKind::BytesOut(_) => "#<output-port bytevector>",
                     crate::heap::PortKind::Stdout => "#<output-port stdout>",
                     crate::heap::PortKind::Stderr => "#<output-port stderr>",
+                    crate::heap::PortKind::Stdin => "#<input-port stdin>",
                 });
             }
             // Printed as the message it carries, so `(display e)` in a

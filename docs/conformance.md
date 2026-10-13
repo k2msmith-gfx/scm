@@ -338,3 +338,49 @@ These are the only places where scm claims a feature and gets it wrong, and
 they are recorded here rather than fixed because the cost is in the expander's
 hardest region for seven assertions. If a *real* macro ever trips on one, that
 changes the arithmetic.
+
+## The R7RS benchmark suite, first run
+
+2026-10-13. [ecraven/r7rs-benchmarks](https://github.com/ecraven/r7rs-benchmarks),
+57 programs, run the way its own `bench` script runs them —
+`scm-conform/bench/run.py`. The plan lists this suite as a second
+*correctness* corpus for S12; this run was to learn whether scm can run it at
+all, before a bytecode VM exists to compare against.
+
+**Every program failed on the first run, for three reasons that took an
+afternoon:** the harness reads its inputs with a bare `(read)` and every
+input primitive demanded its port; the reader refused `n/2`, `constant-pi/2`
+and `inexact-+1/2` as unsupported rationals when they are identifiers; and
+`scheme` opens with `caaar`. All three are fixed, with `(scheme cxr)` now
+complete and a lazy stdin port that `scm-cli` installs for a script — lazy
+because an eager read of stdin hung `scm -e` under every harness that leaves
+stdin open, which is every CI. The conformance number moved from 1103 to
+1106 on the way.
+
+Second run, release build, two minutes per program:
+
+| outcome | programs | |
+|---|---|---|
+| **passed** | 3 | `string` 0.8 s, `ctak` 61 s, `fibc` 113 s |
+| **timed out** | 41 | the interpreter, not the language — see below |
+| needs file *output* | 1 | `ray`: `call-with-output-file`, no file output port kind yet |
+| needs bignums | 3 | `pi`, `chudnovsky`, and `compiler` has a literal `9223372036854775808` — declined, plan §2.3 |
+| needs complex numbers | 1 | `mbrotZ`: `-1.0-0.5i` — declined |
+| needed `call-with-input-file` | 7 | `sum1 cat tail wc read1 parsing slatex` — added after the run, untested at full size |
+| `scheme` needed `complex?` | 1 | added after the run |
+
+So the language covers 52 of 57, and the 5 it does not are the numeric tower
+scm declined on purpose plus one missing port kind.
+
+**The 41 timeouts are a speed measurement, not a conformance one.** The
+suite's inputs are sized for compiled Schemes: Chibi, an interpreter, needs
+73 minutes for the whole suite with its own five-minute cap, and takes 60 s
+on `fib:40:5`. scm does `(fib 30)` in 1.25 s, which puts `fib:40:5` near
+770 s — **T0 is roughly 13× slower than Chibi** on a call-heavy loop. That is
+the number S12's bytecode VM and S13's general tier exist to move, and this
+suite is now the instrument.
+
+Two results run the other way and are worth keeping: `fibc`, which is
+continuation-heavy, finished in 113 s against Chibi's 296 s, and `string` in
+0.8 s against 10.8 s. Escape continuations on an explicit frame stack cost
+nothing, as §3.1 argued they would.

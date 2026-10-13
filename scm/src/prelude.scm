@@ -105,6 +105,31 @@
 (define (caddr p) (car (cddr p)))
 (define (cdddr p) (cdr (cddr p)))
 
+;; The rest of (scheme cxr): every three- and four-letter composition. The
+;; R7RS benchmarks' `scheme` interpreter uses `caaar` on its first line.
+(define (caaar p) (car (caar p)))
+(define (caadr p) (car (cadr p)))
+(define (cadar p) (car (cdar p)))
+(define (cdaar p) (cdr (caar p)))
+(define (cdadr p) (cdr (cadr p)))
+(define (cddar p) (cdr (cdar p)))
+(define (caaaar p) (car (caaar p)))
+(define (caaadr p) (car (caadr p)))
+(define (caadar p) (car (cadar p)))
+(define (caaddr p) (car (caddr p)))
+(define (cadaar p) (car (cdaar p)))
+(define (cadadr p) (car (cdadr p)))
+(define (caddar p) (car (cddar p)))
+(define (cadddr p) (car (cdddr p)))
+(define (cdaaar p) (cdr (caaar p)))
+(define (cdaadr p) (cdr (caadr p)))
+(define (cdadar p) (cdr (cadar p)))
+(define (cdaddr p) (cdr (caddr p)))
+(define (cddaar p) (cdr (cdaar p)))
+(define (cddadr p) (cdr (cdadr p)))
+(define (cdddar p) (cdr (cddar p)))
+(define (cddddr p) (cdr (cdddr p)))
+
 ;; R7RS requires `list?` to RETURN -- `#f` -- on a circular list, not to
 ;; hang on one. Walking the cdrs is the obvious implementation and it spins
 ;; forever the moment `set-cdr!` exists, so this is tortoise-and-hare: `fast`
@@ -463,6 +488,16 @@
   (let ([r (proc port)])
     (close-port port)
     r))
+
+;; The input half of (scheme file)'s conveniences. The output half waits on a
+;; file output port kind, which does not exist yet.
+(define (call-with-input-file path proc)
+  (call-with-port (open-input-file path) proc))
+(define (with-input-from-file path thunk)
+  (let ([port (open-input-file path)])
+    (let ([r (parameterize ([current-input-port port]) (thunk))])
+      (close-port port)
+      r)))
 
 ;; Not R7RS, and the single most useful thing a readout wants.
 (define (with-output-to-string thunk)

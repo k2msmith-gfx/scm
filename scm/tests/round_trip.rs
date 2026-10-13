@@ -314,3 +314,18 @@ fn parse_status_separates_keep_typing_from_wrong() {
     assert!(matches!(parse_status(")"), ParseStatus::Invalid(_)));
     assert!(matches!(parse_status("(1 . 2 3)"), ParseStatus::Invalid(_)));
 }
+
+#[test]
+fn a_slash_in_an_identifier_is_not_a_rational() {
+    // `constant-pi/2`, `n/2` and `inexact-+1/2` are identifiers in the R7RS
+    // benchmarks; the reader refused all three as unsupported rationals.
+    for src in ["n/2", "constant-pi/2", "inexact-+1/2", "a/b", "/", "1/", "/2"] {
+        round_trips(src);
+    }
+    // The real thing is still refused with the reason, not misread.
+    let mut e = scm::Engine::new();
+    for src in ["1/2", "-3/4", "+1/2"] {
+        let err = scm::read_one(src, &mut e).unwrap_err().to_string();
+        assert!(err.contains("ratios"), "{src}: {err}");
+    }
+}
