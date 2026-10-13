@@ -107,3 +107,35 @@ length".
 - **Integers as a type**: a leaf that needs 64-bit integer semantics —
   bit operations, exact arithmetic past 2^53 — is outside the subset.
   Nothing in the corpus does.
+
+## S11a — live recompilation (2026-10-13)
+
+`scm_llvm::Live`, `scm-llvm/src/live.rs`, tests in `tests/live.rs`.
+
+Plan §3.2a's third consequence: redefine a texture while a render is
+running and rayon workers hold a native function pointer. S11 gave the
+handle its lifetime; this adds ray's `live.rs` pattern on top:
+
+- **A generation**, bumped on every successful replacement. A pass calls
+  `snapshot()` once at its start and gets the code *and* its generation;
+  the clone keeps that code alive for the pass, whatever happens meanwhile,
+  and a pass that wants to abandon early compares `generation()` between
+  strips.
+- **Staleness is a comparison, not a guess.** The VM now bumps a version on
+  every store to a global (`Vm::global_version`, one `+= 1` in the single
+  write path). A `Live` records the versions of the leaf, every helper it
+  reaches and every table or constant it captured; `refresh` recompiles
+  only when one of them has moved. Twenty textures and a `(define
+  unrelated 42)` at the REPL cost nothing.
+- **A refusal keeps the old code running.** Redefine `texel` with a
+  `display` in it and `refresh` returns the refusal for the REPL to show,
+  the generation does not move, the render goes on, and the deps stay
+  stale so the corrected definition is picked up next time.
+- **`vector-set!` on a captured table moves no binding**, so it is not
+  staleness; `recompile` is the explicit re-snapshot for that case.
+
+Exit criterion met: a render thread running passes back to back, each
+checked for self-consistency against its own snapshot, while the main
+thread redefines the texture twenty times and refreshes after each. No
+crash; the pass in flight finishes with the old code; the next pass uses
+the new; the last pass's generation matches the definition it used.

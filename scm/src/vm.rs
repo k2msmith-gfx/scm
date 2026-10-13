@@ -353,6 +353,11 @@ pub struct Vm {
     /// resolution). Indexed by `SymId`, so a redefinition at the REPL is a
     /// store into a slot every caller already reads through.
     globals: Vec<Option<Value>>,
+    /// Bumped on every store to the global of the same index. A compiled
+    /// leaf records the versions of everything it read at compile time, and
+    /// "is it stale?" is a comparison rather than a guess (S11a). Indexed
+    /// like `globals`; absent means 0.
+    global_versions: Vec<u64>,
     prims: Vec<PrimFn>,
     vm_prims: Vec<Option<VmPrimFn>>,
     /// Top-level macros. A macro applies only when nothing shadows its name,
@@ -560,6 +565,7 @@ impl Vm {
         let mut vm = Vm {
             engine,
             globals: Vec::new(),
+            global_versions: Vec::new(),
             prims: Vec::new(),
             vm_prims: Vec::new(),
             macros: MacroTable::new(),
@@ -791,8 +797,17 @@ impl Vm {
         let i = sym.0 as usize;
         if self.globals.len() <= i {
             self.globals.resize(i + 1, None);
+            self.global_versions.resize(i + 1, 0);
         }
         self.globals[i] = Some(v);
+        self.global_versions[i] += 1;
+    }
+
+    /// How many times this global has been stored to. Zero if never.
+    /// `vector-set!` on a value the global holds does not move it: the
+    /// version tracks the *binding*, which is what a redefinition changes.
+    pub fn global_version(&self, sym: SymId) -> u64 {
+        self.global_versions.get(sym.0 as usize).copied().unwrap_or(0)
     }
 
     /// Expand a macro use by exactly one step, or `None` if the form is not

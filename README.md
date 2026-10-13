@@ -6,8 +6,8 @@ macOS — and ray's scripting language.
 
 **Status: S0–S11 done** on aarch64 macOS — reader, interpreter, GC, the
 lambda list, `syntax-rules`, the embedding API, the REPL protocol, the rest
-of R7RS-small, the boot budget, and the leaf compiler. Next is S11a, live
-recompilation, then S12, the bytecode VM.
+of R7RS-small, the boot budget, the leaf compiler and live recompilation
+of a leaf under a running render. Next is S12, the bytecode VM.
 Development targets **aarch64 macOS first**; x86-64 Linux is sequenced
 later, not dropped (plan §2.5). The plan is in [docs/plan.md](docs/plan.md);
 the LLVM feasibility results are in [docs/s0-findings.md](docs/s0-findings.md).

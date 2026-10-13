@@ -30,6 +30,7 @@
 
 mod codegen;
 mod jit;
+mod live;
 mod subset;
 
 use std::fmt;
@@ -37,6 +38,7 @@ use std::sync::Arc;
 
 use scm::Vm;
 
+pub use live::Live;
 pub use subset::{Analysis, Summary};
 
 /// What a compiled leaf returns.

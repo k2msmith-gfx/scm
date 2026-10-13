@@ -263,3 +263,19 @@ fn errors_say_what_and_who() {
     assert!(eval_err("(1 2)").contains("not applicable"));
     assert!(eval_err("()").contains("empty application"));
 }
+
+#[test]
+fn a_global_has_a_version_that_moves_on_every_store() {
+    let mut vm = scm::Vm::new();
+    let x = vm.engine.interner.symbol("x");
+    let y = vm.engine.interner.symbol("y");
+    assert_eq!(vm.global_version(x), 0);
+    vm.eval_str("(define x 1)").unwrap();
+    assert_eq!(vm.global_version(x), 1);
+    vm.eval_str("(set! x 2) (define x (vector 1))").unwrap();
+    assert_eq!(vm.global_version(x), 3);
+    // In-place mutation of the value is not a store to the binding.
+    vm.eval_str("(vector-set! x 0 5)").unwrap();
+    assert_eq!(vm.global_version(x), 3);
+    assert_eq!(vm.global_version(y), 0);
+}
