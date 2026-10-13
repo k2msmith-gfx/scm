@@ -12,12 +12,14 @@ pub mod embed;
 pub mod heap;
 pub mod prim;
 pub mod reader;
+pub mod repl;
 pub mod syntax;
 pub mod value;
 pub mod vm;
 pub mod writer;
 
-pub use embed::{Error as EmbedError, Interp, Rooted, Val};
+pub use embed::{Description, Error as EmbedError, Interp, Rooted, Val};
+pub use repl::{Framing, Op, Outcome, Request, Response, Session};
 pub use heap::{Engine, Interner, Obj};
 pub use reader::{ReadError, Reader, ReaderOptions, Span};
 pub use value::{KwId, ObjRef, SymId, Value};

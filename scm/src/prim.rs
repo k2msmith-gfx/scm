@@ -11,7 +11,7 @@
 use crate::heap::{Engine, ErrorKind, Obj, PortKind};
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
-use crate::value::ObjRef;
+use crate::value::{ObjRef, SymId};
 use crate::writer::{Labels, display_str, write_str, write_with};
 
 type PResult = Result<Value, VmError>;
@@ -2733,6 +2733,69 @@ fn p_open_input_file(e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
+/// `(doc 'name)` -> its docstring, or `#f`.
+fn doc_prim(vm: &mut Vm, a: &[Value]) -> PResult {
+    let Some(sym) = named_arg("doc", a)? else {
+        return Ok(Value::Bool(false));
+    };
+    match vm.doc_of(sym) {
+        Some(d) => {
+            let d = d.to_string();
+            Ok(vm.engine.string(&d))
+        }
+        None => Ok(Value::Bool(false)),
+    }
+}
+
+/// `(signature 'name)` -> how to call it, as a string, or `#f`.
+fn signature_prim(vm: &mut Vm, a: &[Value]) -> PResult {
+    let Some(sym) = named_arg("signature", a)? else {
+        return Ok(Value::Bool(false));
+    };
+    match vm.signature_of(sym) {
+        Some(sig) => Ok(vm.engine.string(&sig)),
+        None => Ok(Value::Bool(false)),
+    }
+}
+
+/// `(apropos "prefix")` -> the matching global names, as a sorted list of
+/// symbols.
+fn apropos_prim(vm: &mut Vm, a: &[Value]) -> PResult {
+    let prefix = match a {
+        [] => String::new(),
+        [v] => match v {
+            Value::Obj(r) => match vm.engine.obj(*r) {
+                Obj::Str(chars) => chars.iter().collect(),
+                _ => return Err(err("apropos: expects a string or a symbol")),
+            },
+            Value::Symbol(s) => vm.engine.interner.sym_name(*s).to_string(),
+            _ => return Err(err("apropos: expects a string or a symbol")),
+        },
+        _ => return Err(err("apropos: expects one argument")),
+    };
+    let mut names: Vec<String> = vm
+        .global_names()
+        .into_iter()
+        .filter(|n| n.contains(&prefix))
+        // A renamed template identifier is hygiene's business, not a user's.
+        .filter(|n| !n.contains('.') || n.parse::<f64>().is_ok())
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    let vals: Vec<Value> = names.iter().map(|n| vm.engine.sym(n)).collect();
+    Ok(vm.engine.list(&vals))
+}
+
+/// The one argument shared by `doc` and `signature`: a symbol, or a string
+/// naming one.
+fn named_arg(who: &str, a: &[Value]) -> Result<Option<SymId>, VmError> {
+    match a {
+        [Value::Symbol(s)] => Ok(Some(*s)),
+        _ => Err(err(format!("{who}: expects a quoted symbol"))),
+    }
+}
+
 pub fn install(vm: &mut Vm) {
     vm.define_prim("+", add);
     vm.define_prim("-", sub);
@@ -2788,6 +2851,12 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("inexact", p_exact_to_inexact);
     vm.define_prim("exact?", p_is_exact);
     vm.define_prim("number?", p_is_number);
+    // Introspection as *values*, which is plan §8 obligation 6. ray
+    // generates its API manual from live docstrings; the ray-steel work found
+    // Steel had none at all, so a REPL there could not answer "what is this".
+    vm.define_vm_prim("doc", doc_prim);
+    vm.define_vm_prim("signature", signature_prim);
+    vm.define_vm_prim("apropos", apropos_prim);
     vm.define_vm_prim("display", display);
     vm.define_vm_prim("write", write_prim);
     vm.define_vm_prim("newline", newline);

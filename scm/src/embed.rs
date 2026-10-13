@@ -127,6 +127,20 @@ impl PartialEq for Rooted {
     }
 }
 
+/// What a name is, for a REPL's `describe`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Description {
+    pub name: String,
+    /// How to call it, when it is callable.
+    pub signature: Option<String>,
+    /// Its docstring, when it was defined with one.
+    pub doc: Option<String>,
+    /// `"procedure"`, `"primitive"`, `"parameter"` or `"variable"`.
+    pub kind: String,
+    /// Its current value, printed.
+    pub value: String,
+}
+
 /// A host's view of a Scheme value.
 ///
 /// Deliberately not every case the heap has: a closure, a port and a
@@ -376,6 +390,110 @@ impl Interp {
     /// that drops its handles should see this return to where it started.
     pub fn rooted_count(&self) -> usize {
         self.vm.engine.rooted_count()
+    }
+
+    // ---- introspection (plan §8 obligation 6) ---------------------------
+
+    /// Global names beginning with `prefix`, sorted. The REPL's completion.
+    pub fn complete(&self, prefix: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .vm
+            .global_names()
+            .into_iter()
+            .filter(|n| n.starts_with(prefix))
+            // A renamed template identifier (`tmp.1274`) is an implementation
+            // detail of hygiene and must not be offered as a completion.
+            .filter(|n| !n.contains('.') || n.parse::<f64>().is_ok())
+            .map(str::to_string)
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// What a name is: how to call it, and what it says about itself.
+    pub fn describe(&mut self, name: &str) -> Option<Description> {
+        let sym = self.vm.engine.interner.symbol(name);
+        let v = self.vm.global(sym)?;
+        Some(Description {
+            name: name.to_string(),
+            signature: self.vm.signature_of(sym),
+            doc: self.vm.doc_of(sym).map(str::to_string),
+            kind: match v {
+                Value::Primitive(_) => "primitive",
+                Value::Obj(r) if matches!(self.vm.engine.obj(r), Obj::Closure { .. }) => {
+                    "procedure"
+                }
+                Value::Obj(r) if matches!(self.vm.engine.obj(r), Obj::Parameter { .. }) => {
+                    "parameter"
+                }
+                _ => "variable",
+            }
+            .to_string(),
+            value: crate::writer::write_str(&self.vm.engine, v),
+        })
+    }
+
+    /// Whether a name is bound as syntax rather than as a variable, which a
+    /// client needs to know before offering to show its value.
+    pub fn is_syntax(&mut self, name: &str) -> bool {
+        let sym = self.vm.engine.interner.symbol(name);
+        self.vm.is_macro(sym)
+    }
+
+    // ---- evaluation with output captured --------------------------------
+
+    /// Evaluate, and return whatever the form *printed* alongside its value.
+    ///
+    /// A socket client cannot see the server's stdout, so output has to come
+    /// back in the answer. Done by rebinding `current-output-port`'s
+    /// parameter slot **from Rust** rather than by wrapping the source in
+    /// `parameterize`: wrapping would put the form inside a `lambda` and a
+    /// top-level `(define x 1)` would silently become a local.
+    ///
+    /// The output is returned even when the evaluation fails, because what a
+    /// form printed before it broke is usually the most useful part.
+    pub fn eval_capturing(&mut self, src: &str) -> (Result<Rooted, Error>, String) {
+        let Some(slot) = self.output_slot() else {
+            // No `current-output-port` means a prelude older than ports;
+            // evaluate without capturing rather than refuse.
+            return (self.eval(src), String::new());
+        };
+        let port = self.vm.engine.alloc(Obj::Port {
+            kind: crate::heap::PortKind::StringOut(String::new()),
+            open: true,
+        });
+        // Root it: the eval below will collect, and the only other reference
+        // is the parameter slot, which is not a root.
+        let keep = self.vm.engine.root(port);
+        let saved = self.vm.param_value(slot);
+        self.vm.set_param_value(slot, port);
+        let out = self.eval(src);
+        self.vm.set_param_value(slot, saved);
+        let text = match port {
+            Value::Obj(r) => match self.vm.engine.obj(r) {
+                Obj::Port {
+                    kind: crate::heap::PortKind::StringOut(buf),
+                    ..
+                } => buf.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        self.vm.engine.unroot(keep);
+        (out, text)
+    }
+
+    /// The parameter slot behind `current-output-port`.
+    fn output_slot(&mut self) -> Option<usize> {
+        let sym = self.vm.engine.interner.symbol("current-output-port");
+        let Value::Obj(r) = self.vm.global(sym)? else {
+            return None;
+        };
+        match self.vm.engine.obj(r) {
+            Obj::Parameter { slot, .. } => Some(*slot),
+            _ => None,
+        }
     }
 
     // ---- internals ------------------------------------------------------

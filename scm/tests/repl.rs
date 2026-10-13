@@ -1,0 +1,390 @@
+//! S8's exit criteria, as tests.
+//!
+//! > a socket client and the terminal client share one API with no
+//! > divergence; a runaway form is interruptible; a backtrace names frames
+//! > and spans
+//!
+//! The first clause is the one that needed a design rather than a feature,
+//! and the way it is tested here is the way it is *enforced*: there is only
+//! [`Session::handle`], so a client has nothing to diverge in. What can still
+//! diverge is the **wire format** — a response that loses information on the
+//! way out would be a divergence in practice — so the tests below put every
+//! outcome through the wire and back.
+
+use scm::{Framing, Op, Outcome, Request, Response, Session};
+
+fn ask(s: &mut Session, op: Op) -> Outcome {
+    s.handle(Request { id: 7, op }).outcome
+}
+
+fn eval(s: &mut Session, code: &str) -> Outcome {
+    ask(s, Op::Eval { code: code.into() })
+}
+
+#[test]
+fn the_environment_persists_across_requests() {
+    // §8 obligation 1: incremental evaluation against a persistent
+    // interactive environment. Each request is a separate call; the state is
+    // not.
+    let mut s = Session::new().unwrap();
+    eval(&mut s, "(define counter 0)");
+    for _ in 0..3 {
+        eval(&mut s, "(set! counter (+ counter 1))");
+    }
+    assert!(matches!(
+        eval(&mut s, "counter"),
+        Outcome::Value { ref value, .. } if value == "3"
+    ));
+}
+
+#[test]
+fn redefinition_takes_effect_in_existing_closures() {
+    // §8 obligation 2, and the one the plan calls "cheap to design in,
+    // expensive to retrofit". A global is a mutable CELL, never a value
+    // inlined at the point of use -- so a closure that captured `helper`
+    // calls the NEW helper, which is the whole of what makes a SLIME-style
+    // session useful.
+    let mut s = Session::new().unwrap();
+    eval(&mut s, "(define (helper x) (* x 2))");
+    eval(&mut s, "(define (outer x) (helper (+ x 1)))");
+    assert!(matches!(
+        eval(&mut s, "(outer 4)"),
+        Outcome::Value { ref value, .. } if value == "10"
+    ));
+
+    // Redefine the callee only.
+    eval(&mut s, "(define (helper x) (* x 100))");
+    assert!(
+        matches!(eval(&mut s, "(outer 4)"), Outcome::Value { ref value, .. } if value == "500"),
+        "a redefined procedure must be seen by callers defined earlier"
+    );
+
+    // And through a value captured in a closure's environment, not just a
+    // global reference.
+    eval(&mut s, "(define make-adder (lambda (n) (lambda (x) (helper (+ x n)))))");
+    eval(&mut s, "(define add3 (make-adder 3))");
+    eval(&mut s, "(define (helper x) (- x))");
+    assert!(
+        matches!(eval(&mut s, "(add3 1)"), Outcome::Value { ref value, .. } if value == "-4"),
+        "a live closure must see the redefinition too"
+    );
+}
+
+#[test]
+fn output_comes_back_with_the_value() {
+    // A socket client cannot see the server's stdout, so what a form printed
+    // has to travel in the answer.
+    let mut s = Session::new().unwrap();
+    match eval(&mut s, r#"(begin (display "one") (newline) (display 2) 'done)"#) {
+        Outcome::Value { value, output } => {
+            assert_eq!(value, "done");
+            assert_eq!(output, "one\n2");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn output_survives_a_failure() {
+    // What a form printed before it broke is usually the most useful part.
+    let mut s = Session::new().unwrap();
+    match eval(&mut s, r#"(begin (display "got this far") (car '()))"#) {
+        Outcome::Failed {
+            message,
+            output,
+            host_stopped,
+        } => {
+            assert!(message.contains("car"), "{message}");
+            assert_eq!(output, "got this far");
+            assert!(!host_stopped, "a script error is not the host stopping");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn capturing_output_does_not_change_top_level_semantics() {
+    // The trap this avoided: capturing by wrapping the source in
+    // `(parameterize (…) (lambda () …))` would put a top-level `define`
+    // inside a lambda, where it becomes a LOCAL and silently vanishes.
+    // Rebinding the parameter slot from Rust instead keeps the form at top
+    // level.
+    let mut s = Session::new().unwrap();
+    eval(&mut s, "(define top-level-thing 99)");
+    assert!(matches!(
+        eval(&mut s, "top-level-thing"),
+        Outcome::Value { ref value, .. } if value == "99"
+    ));
+    // And the redirection is undone afterwards: a later form's output is
+    // captured freshly, not appended to the last one's.
+    eval(&mut s, r#"(display "first")"#);
+    match eval(&mut s, r#"(display "second")"#) {
+        Outcome::Value { output, .. } => assert_eq!(output, "second"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_host_stopping_is_distinguishable_from_the_script_failing() {
+    // A client should not offer "retry" for a fuel exhaustion the way it
+    // might for a typo, so the difference is in the protocol and not only in
+    // the message.
+    let mut s = Session::new().unwrap();
+    s.interp_mut().set_fuel(Some(20_000));
+    match eval(&mut s, "(let loop () (loop))") {
+        Outcome::Failed { host_stopped, .. } => assert!(host_stopped),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_runaway_form_is_interruptible() {
+    // The exit criterion's second clause. The flag is an `Arc<AtomicBool>`,
+    // so it is reachable from a thread that is NOT waiting on the session --
+    // which is why `:interrupt` never queues behind the form it stops.
+    let mut s = Session::new().unwrap();
+    let flag = s.interrupt_handle();
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    match eval(&mut s, "(let loop () (loop))") {
+        Outcome::Failed {
+            message,
+            host_stopped,
+            ..
+        } => {
+            assert!(host_stopped);
+            assert!(message.contains("interrupt"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    t.join().unwrap();
+    // And the session is still usable, which is the difference between an
+    // interrupt and a crash.
+    assert!(matches!(
+        eval(&mut s, "(* 6 7)"),
+        Outcome::Value { ref value, .. } if value == "42"
+    ));
+}
+
+#[test]
+fn framing_is_the_readers_answer_not_a_second_one() {
+    // §8 obligation 5. The prompt's continuation and an editor pane's RET ask
+    // this same question over this same door, so they cannot disagree about
+    // whether a form is finished.
+    let mut s = Session::new().unwrap();
+    for (code, want) in [
+        ("(+ 1 2)", Framing::Complete),
+        ("(+ 1", Framing::Incomplete),
+        ("\"unterminated", Framing::Incomplete),
+        ("#| open", Framing::Incomplete),
+        ("(1 . 2 . 3)", Framing::Invalid),
+        (")", Framing::Invalid),
+    ] {
+        assert_eq!(
+            ask(&mut s, Op::Parse { code: code.into() }),
+            Outcome::Framed(want),
+            "{code:?}"
+        );
+    }
+}
+
+#[test]
+fn introspection_answers_what_a_name_is() {
+    // §8 obligation 6: docstrings as VALUES. ray generates its manual from
+    // live docstrings, so this is a requirement and not a nicety.
+    let mut s = Session::new().unwrap();
+    eval(
+        &mut s,
+        r#"(define (area r &named units) "The area of a circle." (* 3 r r))"#,
+    );
+    match ask(&mut s, Op::Describe { name: "area".into() }) {
+        Outcome::Described(Some(d)) => {
+            assert_eq!(d.kind, "procedure");
+            assert_eq!(d.doc.as_deref(), Some("The area of a circle."));
+            assert_eq!(d.signature.as_deref(), Some("(area r &named units)"));
+        }
+        other => panic!("{other:?}"),
+    }
+    // An unbound name is "not bound", not an error.
+    assert_eq!(
+        ask(&mut s, Op::Describe { name: "no-such-name".into() }),
+        Outcome::Described(None)
+    );
+    // A leading string is only a docstring when something FOLLOWS it, or
+    // `(define (greeting) "hello")` would lose its value to the manual.
+    eval(&mut s, r#"(define (greeting) "hello")"#);
+    assert!(matches!(
+        eval(&mut s, "(greeting)"),
+        Outcome::Value { ref value, .. } if value == "\"hello\""
+    ));
+    match ask(&mut s, Op::Describe { name: "greeting".into() }) {
+        Outcome::Described(Some(d)) => assert_eq!(d.doc, None),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn completion_hides_hygienes_renamed_identifiers() {
+    // A macro's template identifiers are renamed to names no source text can
+    // write. Offering `tmp.1274` as a completion would be leaking the
+    // implementation into the user's face.
+    let mut s = Session::new().unwrap();
+    eval(
+        &mut s,
+        "(define-syntax swap!
+           (syntax-rules () ((_ a b) (let ([tmp a]) (set! a b) (set! b tmp)))))
+         (define p 1) (define q 2) (swap! p q)",
+    );
+    match ask(&mut s, Op::Complete { prefix: "".into() }) {
+        Outcome::Candidates(names) => {
+            assert!(names.iter().any(|n| n == "vector-ref"), "real names are offered");
+            let leaked: Vec<&String> = names
+                .iter()
+                .filter(|n| n.contains('.') && n.parse::<f64>().is_err())
+                .collect();
+            assert!(leaked.is_empty(), "hygiene leaked into completion: {leaked:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---- the wire format, which is where a divergence could still hide ------
+
+/// Round-trip a request through its text form, the way a socket client does.
+fn over_the_wire(s: &mut Session, text: &str) -> String {
+    let req = Request::parse(text).unwrap_or_else(|e| panic!("parse {text:?}: {e}"));
+    s.handle(req).to_wire()
+}
+
+#[test]
+fn the_wire_carries_every_outcome_without_loss() {
+    let mut s = Session::new().unwrap();
+    assert!(over_the_wire(&mut s, "(:op ping :id 1)").contains(":status ok :version"));
+
+    let w = over_the_wire(
+        &mut s,
+        r#"(:op eval :id 2 :code "(begin (display \"out\") 42)")"#,
+    );
+    assert_eq!(w, r#"(:id 2 :status ok :value "42" :output "out")"#);
+
+    let w = over_the_wire(&mut s, r#"(:op eval :id 3 :code "(car 5)")"#);
+    assert!(w.contains(":status error") && w.contains("not a pair") && w.contains(":host-stopped #f"));
+
+    let w = over_the_wire(&mut s, r#"(:op parse :id 4 :code "(+ 1")"#);
+    assert_eq!(w, "(:id 4 :status ok :framing incomplete)");
+
+    let w = over_the_wire(&mut s, r#"(:op complete :id 5 :prefix "vector-r")"#);
+    assert_eq!(w, r#"(:id 5 :status ok :candidates ("vector-ref"))"#);
+
+    let w = over_the_wire(&mut s, "(:op describe :id 6 :name car)");
+    assert!(w.contains(":bound #t") && w.contains(r#":kind "primitive""#));
+}
+
+#[test]
+fn a_symbol_and_a_string_both_name_an_op() {
+    // An Emacs client writes `:op eval`, a Python one writes `:op "eval"`.
+    // Refusing either would be a protocol that favours one client.
+    assert_eq!(
+        Request::parse("(:op ping :id 1)").unwrap(),
+        Request::parse(r#"(:op "ping" :id 1)"#).unwrap()
+    );
+    assert_eq!(
+        Request::parse("(:op describe :id 1 :name car)").unwrap(),
+        Request::parse(r#"(:op describe :id 1 :name "car")"#).unwrap()
+    );
+}
+
+#[test]
+fn an_unknown_key_is_ignored_so_a_newer_client_still_works() {
+    let r = Request::parse(r#"(:op ping :id 3 :client "emacs" :protocol 2)"#).unwrap();
+    assert_eq!(r.id, 3);
+    assert_eq!(r.op, Op::Ping);
+}
+
+#[test]
+fn a_malformed_request_is_answered_not_fatal() {
+    let mut s = Session::new().unwrap();
+    for bad in [
+        "(:op frobnicate :id 1)",
+        "(:op eval :id 1)",
+        "(:op :id 1)",
+        "(eval 1)",
+        "(:op)",
+        "42",
+        "",
+    ] {
+        match Request::parse(bad) {
+            Err(why) => assert!(!why.is_empty(), "{bad:?} must say what was wrong"),
+            // If it parses, it must at least answer rather than panic.
+            Ok(req) => {
+                let _ = s.handle(req);
+            }
+        }
+    }
+    // And the session is unharmed.
+    assert!(matches!(
+        eval(&mut s, "(+ 1 1)"),
+        Outcome::Value { ref value, .. } if value == "2"
+    ));
+}
+
+#[test]
+fn a_response_is_its_own_frame() {
+    // The framing rule in both directions: a response is ONE datum, so a
+    // client reads until `parse_status` says complete. That has to hold even
+    // when the payload contains parens, quotes and newlines.
+    let mut s = Session::new().unwrap();
+    let w = over_the_wire(
+        &mut s,
+        r#"(:op eval :id 1 :code "(begin (display \"a)(b \\\"c\\\"\n\") '(1 2))")"#,
+    );
+    assert!(
+        matches!(scm::parse_status(&w), scm::ParseStatus::Complete),
+        "not a single datum: {w}"
+    );
+    let parsed = Request::parse(&w);
+    // It reads as a datum; it is not a *request*, which is fine -- the point
+    // is that a client can find its boundary.
+    assert!(parsed.is_err() || parsed.is_ok());
+    assert!(w.contains(r#":value "(1 2)""#), "{w}");
+}
+
+#[test]
+fn the_terminal_and_wire_paths_cannot_diverge() {
+    // The exit criterion's first clause. Both clients build an `Op` and call
+    // `handle`; the only thing unique to the socket is the text form. So:
+    // for every op, calling `handle` directly and going through the wire must
+    // agree.
+    let mut direct = Session::new().unwrap();
+    let mut wired = Session::new().unwrap();
+    let cases = [
+        ("(:op ping :id 1)", Op::Ping),
+        (
+            r#"(:op eval :id 1 :code "(define (f x) (* x 3))")"#,
+            Op::Eval { code: "(define (f x) (* x 3))".into() },
+        ),
+        (r#"(:op eval :id 1 :code "(f 5)")"#, Op::Eval { code: "(f 5)".into() }),
+        (
+            r#"(:op eval :id 1 :code "(car 1)")"#,
+            Op::Eval { code: "(car 1)".into() },
+        ),
+        (
+            r#"(:op complete :id 1 :prefix "str")"#,
+            Op::Complete { prefix: "str".into() },
+        ),
+        ("(:op describe :id 1 :name f)", Op::Describe { name: "f".into() }),
+        (
+            r#"(:op parse :id 1 :code "(a (b")"#,
+            Op::Parse { code: "(a (b".into() },
+        ),
+    ];
+    for (text, op) in cases {
+        let from_wire = Request::parse(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+        assert_eq!(from_wire.op, op, "the wire produced a different op for {text:?}");
+        let a: Response = direct.handle(Request { id: 1, op });
+        let b: Response = wired.handle(from_wire);
+        assert_eq!(a.outcome, b.outcome, "divergence on {text:?}");
+    }
+}

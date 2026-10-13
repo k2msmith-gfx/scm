@@ -315,6 +315,18 @@ pub struct Vm {
     ///   stops `eval` of generated forms from leaking an entry per form. The
     ///   cost is a cold cache after each GC; the benefit holds between them.
     expansion_cache: HashMap<ObjRef, Value>,
+    /// Docstrings, by the name they were defined under.
+    ///
+    /// Plan §8 obligation 6: docstrings are **values**, not a comment
+    /// convention an external tool scrapes. ray generates its API manual from
+    /// live docstrings, and the ray-steel work found Steel had none at all --
+    /// so a REPL that cannot answer "what is this" is missing the half of
+    /// introspection that matters.
+    ///
+    /// A side table rather than a field on `Obj::Closure`, because a
+    /// docstring is a property of the *definition* and most closures have
+    /// none: putting it in the object would cost every lambda a word.
+    docs: HashMap<SymId, String>,
     /// Host functions, indexed by `PrimId` alongside `prims` and `vm_prims`.
     host_fns: Vec<Option<HostFn>>,
     /// Guards against a macro that expands into itself. Requirement 8: a
@@ -429,6 +441,7 @@ impl Vm {
             expansions: 0,
             expansion_cache: HashMap::new(),
             host_fns: Vec::new(),
+            docs: HashMap::new(),
             fuel: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             syms,
@@ -556,6 +569,74 @@ impl Vm {
     }
 
     /// How many globals are bound. For the boot measurement.
+    /// Every bound global name. The source for completion (§8 obligation 6).
+    pub fn global_names(&self) -> Vec<&str> {
+        self.globals
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_some())
+            .map(|(i, _)| self.engine.interner.sym_name(SymId(i as u32)))
+            .collect()
+    }
+
+    /// The docstring recorded for a name, if it has one.
+    pub fn doc_of(&self, sym: SymId) -> Option<&str> {
+        self.docs.get(&sym).map(String::as_str)
+    }
+
+    /// How a procedure may be called, for `describe`. `None` for anything
+    /// that is not a procedure.
+    pub fn signature_of(&self, sym: SymId) -> Option<String> {
+        let v = self.global(sym)?;
+        match v {
+            Value::Primitive(id) => Some(format!("({} …)", self.engine.prim_name(id))),
+            Value::Obj(r) => {
+                let Obj::Closure {
+                    params,
+                    opt,
+                    named,
+                    keys,
+                    rest,
+                    ..
+                } = self.engine.obj(r)
+                else {
+                    return None;
+                };
+                let mut out = String::from("(");
+                out.push_str(self.engine.interner.sym_name(sym));
+                for p in params.iter() {
+                    out.push(' ');
+                    out.push_str(self.engine.interner.sym_name(*p));
+                }
+                if !opt.is_empty() {
+                    out.push_str(" &opt");
+                    for p in opt.iter() {
+                        out.push(' ');
+                        out.push_str(self.engine.interner.sym_name(p.name));
+                    }
+                }
+                if !named.is_empty() {
+                    out.push_str(" &named");
+                    for p in named.iter() {
+                        out.push(' ');
+                        out.push_str(self.engine.interner.sym_name(p.name));
+                    }
+                }
+                if let Some(k) = keys {
+                    out.push_str(" &keys ");
+                    out.push_str(self.engine.interner.sym_name(*k));
+                }
+                if let Some(r) = rest {
+                    out.push_str(" . ");
+                    out.push_str(self.engine.interner.sym_name(*r));
+                }
+                out.push(')');
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
     pub fn global_count(&self) -> usize {
         self.globals.iter().flatten().count()
     }
@@ -1049,6 +1130,19 @@ impl Vm {
                         return Err(self.err("define: procedure name must be a symbol"));
                     };
                     let f = self.make_closure(Some(name_sym), formals, body, env)?;
+                    // `(define (f x) "what f does" body …)`. R7RS makes a
+                    // leading string an ordinary body expression with no
+                    // effect, so recording it changes no semantics -- but it
+                    // only counts when something FOLLOWS it, or
+                    // `(define (greeting) "hello")` would lose its value to
+                    // the manual.
+                    if body.len() > 1
+                        && let Value::Obj(r0) = body[0]
+                        && let Obj::Str(chars) = self.engine.obj(r0)
+                    {
+                        let doc: String = chars.iter().collect();
+                        self.docs.insert(self.engine.resolve(name_sym), doc);
+                    }
                     self.bind(name_sym, f, define, env)?;
                     Ok(Some(Step::Return(Value::Unspecified)))
                 }
