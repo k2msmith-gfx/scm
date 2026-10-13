@@ -1,0 +1,22 @@
+[package]
+name = "scm-llvm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The leaf compiler: a pure numeric subset of scm, compiled to thread-safe native code through LLVM"
+
+# This crate ALWAYS needs LLVM 21 -- that is the whole feature gate (plan
+# §5): `scm` never depends on it, and it is not a default workspace member,
+# so a root `cargo build` needs no toolchain and `cargo build -p scm-llvm`
+# without one fails loudly in llvm-sys.
+#
+#   LLVM=$(nix build --no-link --print-out-paths 'nixpkgs#llvmPackages_21.llvm.dev')
+#   LLVM_SYS_211_PREFIX=$LLVM cargo test -p scm-llvm --release
+
+[dependencies]
+scm = { path = "../scm" }
+inkwell = { version = "0.10", features = ["llvm21-1"] }
+llvm-sys = "211"
+
+[dev-dependencies]
+rayon = "1"

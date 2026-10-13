@@ -4,9 +4,10 @@ An R7RS-small Scheme in Rust: embeddable as a crate, runnable standalone, with
 an LLVM-backed JIT and native AOT compilation on x86-64 Linux and aarch64
 macOS — and ray's scripting language.
 
-**Status: S0–S10 done** on aarch64 macOS — reader, interpreter, GC, the
+**Status: S0–S11 done** on aarch64 macOS — reader, interpreter, GC, the
 lambda list, `syntax-rules`, the embedding API, the REPL protocol, the rest
-of R7RS-small, and the boot budget. Next is S11, the leaf compiler.
+of R7RS-small, the boot budget, and the leaf compiler. Next is S11a, live
+recompilation, then S12, the bytecode VM.
 Development targets **aarch64 macOS first**; x86-64 Linux is sequenced
 later, not dropped (plan §2.5). The plan is in [docs/plan.md](docs/plan.md);
 the LLVM feasibility results are in [docs/s0-findings.md](docs/s0-findings.md).
@@ -37,6 +38,20 @@ scm> (seq (i 0 5) (* i i))
 An unclosed paren continues the entry rather than reporting an error, which
 is what S1's *incomplete* vs *invalid* distinction was for. The terminal and
 the socket are two clients of one protocol, [docs/repl.md](docs/repl.md).
+
+## The leaf compiler
+
+    LLVM=$(nix build --no-link --print-out-paths 'nixpkgs#llvmPackages_21.llvm.dev')
+    LLVM_SYS_211_PREFIX=$LLVM cargo test -p scm-llvm
+    LLVM_SYS_211_PREFIX=$LLVM cargo run --release -p scm-llvm --example texel_cost
+
+`scm-llvm` compiles a pure numeric procedure — a texture, a field, a noise
+function — to native code that is VM-free, allocation-free and `Send +
+Sync`, and refuses anything else with a message naming the call. It is not
+a default workspace member: a root `cargo build` needs no LLVM, and
+`-p scm-llvm` without one fails loudly. A 4-octave `fbm` texture costs
+**77 ns/texel** compiled against 69 µs interpreted; see
+[docs/s11-leaf.md](docs/s11-leaf.md).
 
 ## Conformance
 
