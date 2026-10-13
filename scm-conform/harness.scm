@@ -103,3 +103,11 @@
 
 (define (report)
   (list *passed* *failed* (reverse *failures*)))
+
+;; One line per failure, because a 200-entry nested list is not a report that
+;; anyone reads -- and §10's rule is that each failure is individually
+;; explained, which needs it to be legible.
+(define (failure-lines)
+  (map (lambda (f)
+         (format "~a | ~s | ~a" (car f) (cadr f) (caddr f)))
+       (reverse *failures*)))

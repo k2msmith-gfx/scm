@@ -1357,16 +1357,20 @@ impl Vm {
         if let Value::Primitive(id) = callee
             && Some(id) == self.apply_prim
         {
-            if args.is_empty() {
-                return Err(self.err("apply: expects a procedure"));
+            // R7RS's signature is `(apply proc arg1 ... args)`: the final
+            // list is not optional, so `(apply +)` is an arity error and not
+            // a roundabout way of writing `(+)`.
+            if args.len() < 2 {
+                return Err(self.err(
+                    "apply: expects a procedure and a list of arguments",
+                ));
             }
             let f = args.remove(0);
-            let spread = match args.pop() {
-                Some(last) => self.list_to_vec(last).map_err(|_| {
+            let spread = self
+                .list_to_vec(args.pop().expect("checked above"))
+                .map_err(|_| {
                     VmError::Error("apply: the last argument must be a list".into())
-                })?,
-                None => Vec::new(),
-            };
+                })?;
             args.extend(spread);
             return self.apply(f, args);
         }

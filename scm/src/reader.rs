@@ -237,6 +237,15 @@ impl Reader {
                     self.abbrev(e, "unquote")
                 }
             }
+            // A lone `.` is only ever a list's tail marker, which `list`
+            // handles before it ever gets here. Reaching it as a *datum*
+            // means something asked for a datum and found a dot -- which is
+            // exactly what `(a #;. b)` and `(#; #;x . z)` do, and R7RS makes
+            // all three of those read errors rather than silently dropping
+            // the dot.
+            '.' if self.dot_is_tail_marker() => {
+                self.invalid(start, "`.` where a datum was expected")
+            }
             '#' => self.hash(e),
             '|' => self.pipe_symbol(e),
             _ => self.token(e),
@@ -561,6 +570,12 @@ impl Reader {
     }
 }
 
+/// Would this token read as a number? The writer asks, so that a symbol
+/// spelled like one gets `|…|` rather than coming back as a number.
+pub fn reads_as_number(tok: &str) -> bool {
+    matches!(parse_number(tok), Ok(Some(_)))
+}
+
 /// `Ok(None)` means "not a number, try something else". `Err` means "meant to
 /// be a number and is wrong", which must not silently become a symbol.
 fn parse_number(tok: &str) -> Result<Option<Value>, String> {
@@ -604,7 +619,9 @@ fn parse_number(tok: &str) -> Result<Option<Value>, String> {
         ));
     }
 
-    match rest {
+    // R7RS spells these in lower case but says nothing about matching case,
+    // and the suite writes `+InF.0`.
+    match rest.to_ascii_lowercase().as_str() {
         "+inf.0" => return Ok(Some(Value::Flonum(f64::INFINITY))),
         "-inf.0" => return Ok(Some(Value::Flonum(f64::NEG_INFINITY))),
         "+nan.0" | "-nan.0" => return Ok(Some(Value::Flonum(f64::NAN))),
@@ -665,6 +682,26 @@ fn parse_number(tok: &str) -> Result<Option<Value>, String> {
     if !looks_numeric {
         return Ok(None);
     }
+    // `s`, `f`, `d` and `l` as exponent markers. R7RS says support for them
+    // is no longer *required*, and they cost three lines -- so a model or an
+    // older file that writes `1d2` gets 100.0 rather than a symbol.
+    let rest: String = {
+        let mut out = String::with_capacity(rest.len());
+        let mut marked = false;
+        for c in rest.chars() {
+            if !marked
+                && matches!(c, 's' | 'S' | 'f' | 'F' | 'd' | 'D' | 'l' | 'L')
+                && out.chars().any(|p| p.is_ascii_digit())
+            {
+                out.push('e');
+                marked = true;
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    let rest = rest.as_str();
     match rest.parse::<f64>() {
         Ok(x) => {
             if exact == Some(true) {

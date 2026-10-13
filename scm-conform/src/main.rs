@@ -18,7 +18,7 @@
 
 use std::process::ExitCode;
 
-use scm::{ParseStatus, Vm, write_str};
+use scm::{ParseStatus, Vm};
 
 const HARNESS: &str = include_str!("../harness.scm");
 
@@ -64,9 +64,9 @@ fn main() -> ExitCode {
         }
     }
 
-    // Ask the harness for its tally.
-    let report = match vm.eval_str("(report)") {
-        Ok(v) => write_str(&vm.engine, v),
+    // Ask the harness for its tally, one failure per line.
+    let report = match vm.eval_str("(failure-lines)") {
+        Ok(v) => lines_of(&vm, v),
         Err(e) => {
             eprintln!("scm-conform: could not read the report: {e}");
             return ExitCode::from(2);
@@ -102,8 +102,11 @@ fn main() -> ExitCode {
             text.push_str(&format!("- line {line}: {msg}\n"));
         }
         text.push_str("\n## failing assertions\n\n");
-        text.push_str(&report);
-        text.push('\n');
+        for line in &report {
+            text.push_str("- ");
+            text.push_str(line);
+            text.push('\n');
+        }
         if let Err(e) = std::fs::write(&path, text) {
             eprintln!("scm-conform: could not write {path}: {e}");
             return ExitCode::from(2);
@@ -113,6 +116,20 @@ fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// A Scheme list of strings, as Rust strings.
+fn lines_of(vm: &Vm, v: scm::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = v;
+    while let scm::Value::Obj(r) = cur {
+        let scm::Obj::Pair(car, cdr) = vm.engine.obj(r) else {
+            break;
+        };
+        out.push(scm::display_str(&vm.engine, *car));
+        cur = *cdr;
+    }
+    out
 }
 
 fn counts(vm: &mut Vm) -> (i64, i64) {

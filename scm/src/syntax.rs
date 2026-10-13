@@ -203,7 +203,14 @@ impl SyntaxRules {
                     // A literal matches only the same identifier.
                     return matches!(input, Value::Symbol(i) if e.resolve(i) == r);
                 }
-                b.insert(r, Binding::One(input));
+                // Keyed by the RAW identifier, not the resolved one. A
+                // macro-defining macro produces an inner pattern whose
+                // variable is already renamed (`x.37`), and the inner
+                // template may mention the *user's* `x`; resolving the key
+                // collapsed the two onto `x`, so the template's `x`
+                // substituted the pattern's match. `(foo bar x)` then made
+                // `(bar 1)` give 1 instead of x.
+                b.insert(s, Binding::One(input));
                 true
             }
             Value::Null => matches!(input, Value::Null),
@@ -301,7 +308,8 @@ impl SyntaxRules {
                 let r = e.resolve(s);
                 let name = e.interner.sym_name(r);
                 if name != "_" && r != self.ellipsis && !self.literals.contains(&r) {
-                    out.push(r);
+                    // Raw, to match how `match_one` keys them.
+                    out.push(s);
                 }
             }
             Value::Obj(_) => {
@@ -330,7 +338,7 @@ impl SyntaxRules {
         match tmpl {
             Value::Symbol(s) => {
                 let r = e.resolve(s);
-                if let Some(binding) = b.get(&r) {
+                if let Some(binding) = b.get(&s).or_else(|| b.get(&r)) {
                     return match binding {
                         Binding::One(v) => Ok(*v),
                         Binding::Many(_) => Err(format!(
@@ -356,9 +364,12 @@ impl SyntaxRules {
                     }
                     return Ok(tmpl);
                 };
-                // `(... template)` escapes a literal ellipsis.
+                // `(... template)` escapes a literal ellipsis: inside it an
+                // ellipsis has no special meaning, but PATTERN VARIABLES are
+                // still substituted. Returning the template untouched -- which
+                // the first version did -- left `x` as the symbol `x`.
                 if items.len() == 2 && self.is_ellipsis(e, items[0]) {
-                    return Ok(items[1]);
+                    return self.instantiate_no_ellipsis(e, items[1], b, renames);
                 }
                 let bracket = matches!(tmpl, Value::Obj(r)
                     if matches!(e.obj(r), Obj::Vector { bracket: true, .. }));
@@ -391,6 +402,54 @@ impl SyntaxRules {
                 if bracket && matches!(tail, Value::Null) {
                     return Ok(e.vector(out, true));
                 }
+                let mut acc = tail;
+                for v in out.into_iter().rev() {
+                    acc = e.cons(v, acc);
+                }
+                Ok(acc)
+            }
+            _ => Ok(tmpl),
+        }
+    }
+
+    /// Substitute pattern variables but treat `...` as an ordinary datum,
+    /// which is what `(... template)` means.
+    fn instantiate_no_ellipsis(
+        &self,
+        e: &mut Engine,
+        tmpl: Value,
+        b: &Bindings,
+        renames: &mut HashMap<SymId, SymId>,
+    ) -> SynResult<Value> {
+        match tmpl {
+            Value::Symbol(s) => {
+                let r = e.resolve(s);
+                if let Some(Binding::One(v)) = b.get(&s).or_else(|| b.get(&r)) {
+                    return Ok(*v);
+                }
+                if r == self.ellipsis {
+                    return Ok(tmpl);
+                }
+                Ok(Value::Symbol(self.rename(e, r, renames)))
+            }
+            Value::Obj(_) => {
+                let Some((items, tail)) = as_list(e, tmpl) else {
+                    return Ok(tmpl);
+                };
+                let bracket = matches!(tmpl, Value::Obj(r)
+                    if matches!(e.obj(r), Obj::Vector { bracket: true, .. }));
+                let mut out = Vec::with_capacity(items.len());
+                for i in items {
+                    out.push(self.instantiate_no_ellipsis(e, i, b, renames)?);
+                }
+                if bracket && matches!(tail, Value::Null) {
+                    return Ok(e.vector(out, true));
+                }
+                let tail = if matches!(tail, Value::Null) {
+                    Value::Null
+                } else {
+                    self.instantiate_no_ellipsis(e, tail, b, renames)?
+                };
                 let mut acc = tail;
                 for v in out.into_iter().rev() {
                     acc = e.cons(v, acc);

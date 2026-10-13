@@ -12,11 +12,11 @@ number.
 ```
 forms:          1191
 unreadable:       19
-forms aborted:    37
+forms aborted:    29
 
-tests passed:    934
-tests failed:    219
-conformance:    81.0% of 1153 assertions reached
+tests passed:   1022
+tests failed:    142
+conformance:    87.8% of 1164 assertions reached
 ```
 
 Note the denominator moved. Ports did not only make assertions *pass*, they
@@ -34,6 +34,7 @@ used to take all of its tests with it, and aborted forms went 150 → 37. So
 | after multiple values | 675 | 59.1% |
 | after the cheap tail | 899 | 78.0% |
 | after range arguments | **934** | **81.0%** |
+| after the wrong-answer pass | **1022** | **87.8%** |
 
 `quasiquote` gained exactly the 7 assertions the table below predicted, which
 is a useful calibration: the priority list can be trusted to be roughly
@@ -130,3 +131,115 @@ test.
 
 This is S9's machinery arriving early for the same reason the REPL did: it
 unblocks a measurement. `guard` and `raise` will be built on it.
+
+## The wrong-answer pass: 65 → 11, all of them declines
+
+Everything above was bought by *filling absences*. This pass did the opposite:
+it took the failures where something existed and gave the **wrong answer**,
+because those are the only ones that say the implementation is incorrect
+rather than incomplete. Absence is a work item; a wrong answer is a bug.
+
+Finding them needed a change to the harness first. The report counted
+failures but did not say what they were, so `failure-lines` now emits one
+legible line per failure — section, expression, expected and got. That is the
+whole reason this pass was possible at all, and it is worth saying plainly
+that six passes had gone by without it.
+
+**65 wrong answers → 11, and all 11 are deliberate absences** — four
+`full-unicode`, six `(scheme complex)`, one `call/cc`. There is no remaining
+failure in 1,164 assertions where this implementation has the feature and
+gets the answer wrong. That is the claim the pass was for, and it is a
+stronger one than the percentage.
+
+### Two hygiene bugs, both of which only a stranger's suite would find
+
+1. **A macro-defining macro collapsed its pattern variables.** When an outer
+   expansion has already renamed an identifier, the inner `syntax-rules`
+   pattern variable arrives renamed — and resolving it before matching
+   collapsed it onto the *user's* identifier of the same spelling. So
+
+   ```scheme
+   (define-syntax foo
+     (syntax-rules ()
+       ((foo bar y) (define-syntax bar (syntax-rules () ((bar x) 'y))))))
+   (foo bar x)
+   (bar 1)
+   ```
+
+   gave `1` where it must give `x`. The fix is that pattern variables are
+   keyed on the **raw** `SymId`, never the resolved one: a pattern variable is
+   a position in a pattern, not a reference to a binding. Every unit test I
+   had written passed throughout, because I had never written a macro that
+   writes a macro.
+
+2. **`(... template)` must still substitute.** The ellipsis escape says the
+   ellipses *inside* have no special meaning; it does not say the template is
+   inert. Returning it untouched left pattern variables as literal symbols.
+   `instantiate_no_ellipsis` substitutes without expanding.
+
+### A regression I introduced and then had to find
+
+Scheme wants a point in a flonum's mantissa and a sign on its exponent, so I
+made the writer force both — and Rust's `Display` never chooses exponent form,
+so `5e-324` began printing as 324 decimal digits. The printer now picks `{:e}`
+outside `(1e-7 .. 1e21)` and positional form inside. The round-trip test
+caught it, which is the argument for the round-trip test.
+
+### The rest, in one line each
+
+- `looks_like_number` now *asks the reader* (`reads_as_number`) instead of
+  guessing, so a symbol that would read back as a number is barred. Guessing
+  had missed `+i`, `+inf`, `.` and a leading backslash.
+- Alternate exponent markers `s/f/d/l` and case-insensitive `inf.0`/`nan.0`.
+- `string->number` must consume the **whole** string: `"1 2"` is `#f`.
+- `=` on mixed exact/inexact compares mathematically, through `i128` rather
+  than through `f64` — `(= 9007199254740992.0 9007199254740993)` is `#f`.
+- `modulo`-style range arguments on `utf8->string`, `string->utf8` and
+  `write-string`; `read-char` refuses a closed port.
+- `bytevector-copy!` copies through a temporary, so an overlapping range
+  behaves as if buffered.
+- `(scheme process-context)` and `(scheme time)` arrived whole:
+  `get-environment-variable`, `command-line`, `exit`, `current-second`,
+  `current-jiffy`, `jiffies-per-second`.
+- `(scheme file)`: `file-exists?`, `delete-file`, `open-input-file` — raising
+  real **file** errors, so `file-error?` distinguishes them. Stubbing that
+  would have been a lie dressed as a pass.
+- **`features` is honest.** It reports what `cfg!` can prove and claims
+  neither `exact-closed`, `ratios`, `full-unicode` nor `exact-complex`. The
+  absences are the point: §2.3 does not implement the numeric tower, so
+  `(features)` must not say it does. There is a test asserting each of the
+  four is *missing*.
+
+### Three reader bugs the suite found by being pedantic
+
+`#;` comments out the next **datum**, and a lone `.` is not a datum — it is a
+list's tail marker. Reading it as one made
+
+```scheme
+(a #;. b)        ; read as (a b)     -- must be a read error
+(#; #;x #;y . z) ; read as (z)       -- must be a read error
+(#; #;x . z)     ; read as (z)       -- must be a read error
+```
+
+all succeed, each by silently dropping a dot. The fix is one arm in `datum`:
+reaching a tail-marker dot where a datum was asked for is invalid. The
+neighbours the suite also tests — `(a . #;b c)` → `(a . c)` and
+`(a #; #;b c d)` → `(a d)` — still read, which is what makes this a
+distinction rather than a blanket refusal.
+
+And one arity bug: `(apply proc arg1 … args)` has the final list in its
+signature, so `(apply +)` is an error. It was returning `0`.
+
+### The 11 that remain, and why they are not a work list
+
+| | what |
+|---|---|
+| 6 | `(scheme complex)` — `+i`, `+inf.0+inf.0i` and friends, which the reader deliberately cannot read. §2.3 declines the tower and `(features)` does not claim `exact-complex`. |
+| 4 | `full-unicode` — `digit-value` of an Arabic-Indic or Gujarati digit, and `string-foldcase` of `ß`/`ſ`, which needs the full case-folding tables. `(features)` does not claim `full-unicode`. |
+| 1 | `call/cc` — `with-exception-handler` escaping through a continuation. The §3.1 rung we committed to and have not built. |
+
+The 131 remaining failures are absences with names: `(scheme complex)` (27),
+`define-record-type` (5), `let-syntax`/`letrec-syntax` (4), `define-values`
+(2), bignums in `exact-integer-sqrt` (3), and a tail of hygiene corners
+including a `cond` whose `=>` is shadowed by a local binding — the one entry
+on that list that is a genuine bug rather than a decline.

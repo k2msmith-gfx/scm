@@ -165,8 +165,30 @@ fn compare(who: &'static str, e: &Engine, args: &[Value], ok: fn(f64, f64) -> bo
     Ok(Value::Bool(true))
 }
 
+/// `=` on a mixed pair must be mathematically correct, which comparing two
+/// f64s is not: 9007199254740993 is not representable, so converting it
+/// makes it equal to 9007199254740992.0. Compare in i128 when one side is
+/// exact and the other is an integral flonum.
 fn num_eq(e: &mut Engine, a: &[Value]) -> PResult {
-    compare("=", e, a, |x, y| x == y)
+    if a.len() < 2 {
+        return Err(err("=: needs at least two arguments"));
+    }
+    for &x in a {
+        want_number("=", x, e)?;
+    }
+    for w in a.windows(2) {
+        let same = match (w[0], w[1]) {
+            (Value::Fixnum(x), Value::Fixnum(y)) => x == y,
+            (Value::Fixnum(n), Value::Flonum(f)) | (Value::Flonum(f), Value::Fixnum(n)) => {
+                f.fract() == 0.0 && f.is_finite() && (f as i128) == (n as i128)
+            }
+            _ => as_f64(w[0]) == as_f64(w[1]),
+        };
+        if !same {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(true))
 }
 fn lt(e: &mut Engine, a: &[Value]) -> PResult {
     compare("<", e, a, |x, y| x < y)
@@ -614,8 +636,10 @@ fn write_string(vm: &mut Vm, a: &[Value]) -> PResult {
         Some(v) => *v,
         None => return Err(err("write-string: expects a string")),
     };
-    let text: String = chars_of("write-string", &vm.engine, v)?.into_iter().collect();
+    let cs = chars_of("write-string", &vm.engine, v)?;
     let port = out_port(vm, a, 1)?;
+    let (start, end) = range_of("write-string", a, 2, cs.len())?;
+    let text: String = cs[start..end].iter().collect();
     emit(&mut vm.engine, port, &text)?;
     Ok(Value::Unspecified)
 }
@@ -1094,9 +1118,16 @@ fn string_to_number(e: &mut Engine, a: &[Value]) -> PResult {
         Some(Value::Fixnum(10)) | None => text,
         _ => return Err(err("string->number: radix must be 2, 8, 10 or 16")),
     };
+    let trimmed = s.trim();
     let mut scratch = Engine::new();
-    match crate::reader::Reader::new(s.trim()).read(&mut scratch) {
-        Ok(Some(n @ (Value::Fixnum(_) | Value::Flonum(_)))) => Ok(n),
+    let mut reader = crate::reader::Reader::new(trimmed);
+    match reader.read(&mut scratch) {
+        // The whole string has to be a number: `"1 2"` is #f, not 1.
+        Ok(Some(n @ (Value::Fixnum(_) | Value::Flonum(_))))
+            if reader.consumed() == trimmed.chars().count() =>
+        {
+            Ok(n)
+        }
         _ => Ok(Value::Bool(false)),
     }
 }
@@ -1712,6 +1743,7 @@ fn read_char(e: &mut Engine, a: &[Value], peek: bool) -> PResult {
     let v = one(if peek { "peek-char" } else { "read-char" }, a)?;
     let r = port_ref("read-char", e, v)?;
     match e.obj_mut(r) {
+        Obj::Port { open: false, .. } => Err(err("read-char: the port is closed")),
         Obj::Port {
             kind: PortKind::StringIn { chars, pos },
             ..
@@ -2479,7 +2511,8 @@ fn utf8_to_string(e: &mut Engine, a: &[Value]) -> PResult {
         None => return Err(err("utf8->string: expects a bytevector")),
     };
     let b = bytes_of("utf8->string", e, v)?;
-    match String::from_utf8(b) {
+    let (start, end) = range_of("utf8->string", a, 1, b.len())?;
+    match String::from_utf8(b[start..end].to_vec()) {
         Ok(text) => Ok(e.string(&text)),
         Err(_) => Err(err("utf8->string: not valid UTF-8")),
     }
@@ -2490,8 +2523,141 @@ fn string_to_utf8(e: &mut Engine, a: &[Value]) -> PResult {
         Some(v) => *v,
         None => return Err(err("string->utf8: expects a string")),
     };
-    let text: String = chars_of("string->utf8", e, v)?.into_iter().collect();
+    let cs = chars_of("string->utf8", e, v)?;
+    // The range is in CHARACTERS, and the result in bytes.
+    let (start, end) = range_of("string->utf8", a, 1, cs.len())?;
+    let text: String = cs[start..end].iter().collect();
     Ok(e.bytevector(text.into_bytes()))
+}
+
+// ── the system interface, and `features` ────────────────────────────────
+//
+// §2.3 committed to `(features)` being HONEST -- that is the whole obligation
+// taken on by not implementing the numeric tower -- and until now it did not
+// exist at all, which is worse than answering wrongly.
+
+fn p_features(e: &mut Engine, _a: &[Value]) -> PResult {
+    let mut names: Vec<&str> = vec!["r7rs", "ieee-float", "scm"];
+    // NOT claimed, and each absence is a decision recorded in the plan:
+    //   exact-closed  -- exact arithmetic raises on overflow (no bignums)
+    //   ratios        -- no exact rationals (§2.3)
+    //   full-unicode  -- no case folding or Unicode digit values (§2.3)
+    //   exact-complex -- no complex numbers at all
+    if cfg!(unix) {
+        names.push("posix");
+        names.push("unix");
+    }
+    if cfg!(target_os = "macos") {
+        names.push("darwin");
+    }
+    if cfg!(target_os = "linux") {
+        names.push("gnu-linux");
+    }
+    if cfg!(target_arch = "aarch64") {
+        names.push("aarch64");
+    }
+    if cfg!(target_arch = "x86_64") {
+        names.push("x86-64");
+    }
+    if cfg!(target_pointer_width = "64") {
+        names.push("lp64");
+    }
+    let syms: Vec<Value> = names.iter().map(|n| e.sym(n)).collect();
+    Ok(e.list(&syms))
+}
+
+fn p_get_env(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("get-environment-variable", a)?;
+    let name: String = chars_of("get-environment-variable", e, v)?.into_iter().collect();
+    match std::env::var(&name) {
+        Ok(val) => Ok(e.string(&val)),
+        Err(_) => Ok(Value::Bool(false)),
+    }
+}
+
+fn p_get_envs(e: &mut Engine, _a: &[Value]) -> PResult {
+    let pairs: Vec<Value> = std::env::vars()
+        .map(|(k, v)| {
+            let k = e.string(&k);
+            let v = e.string(&v);
+            e.cons(k, v)
+        })
+        .collect();
+    Ok(e.list(&pairs))
+}
+
+fn p_command_line(e: &mut Engine, _a: &[Value]) -> PResult {
+    let args: Vec<Value> = std::env::args().map(|a| e.string(&a)).collect();
+    Ok(e.list(&args))
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn p_current_second(_e: &mut Engine, _a: &[Value]) -> PResult {
+    Ok(Value::Flonum(now_secs()))
+}
+
+/// Jiffies are microseconds here, which `jiffies-per-second` reports.
+fn p_current_jiffy(_e: &mut Engine, _a: &[Value]) -> PResult {
+    Ok(Value::Fixnum((now_secs() * 1e6) as i64))
+}
+
+fn p_jiffies_per_second(_e: &mut Engine, _a: &[Value]) -> PResult {
+    Ok(Value::Fixnum(1_000_000))
+}
+
+fn p_exit(_e: &mut Engine, a: &[Value]) -> PResult {
+    let code = match a.first() {
+        Some(Value::Fixnum(n)) => *n as i32,
+        Some(Value::Bool(false)) => 1,
+        _ => 0,
+    };
+    std::process::exit(code);
+}
+
+// ── files ───────────────────────────────────────────────────────────────
+//
+// Enough of `(scheme file)` to be truthful: a missing file raises a FILE
+// error, which `file-error?` can then identify -- the suite tests exactly
+// that, and stubbing it would have been a lie dressed as a pass.
+
+fn file_err(e: &mut Engine, msg: &str) -> VmError {
+    let m = e.string(msg);
+    let obj = e.error_obj(m, Value::Null, ErrorKind::File);
+    let text = write_str(e, obj);
+    VmError::Raised(obj, text)
+}
+
+fn p_file_exists(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("file-exists?", a)?;
+    let path: String = chars_of("file-exists?", e, v)?.into_iter().collect();
+    Ok(Value::Bool(std::path::Path::new(&path).exists()))
+}
+
+fn p_delete_file(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("delete-file", a)?;
+    let path: String = chars_of("delete-file", e, v)?.into_iter().collect();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(Value::Unspecified),
+        Err(err_io) => Err(file_err(e, &format!("delete-file: {path}: {err_io}"))),
+    }
+}
+
+fn p_open_input_file(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("open-input-file", a)?;
+    let path: String = chars_of("open-input-file", e, v)?.into_iter().collect();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(e.port(PortKind::StringIn {
+            chars: text.chars().collect(),
+            pos: 0,
+        })),
+        Err(err_io) => Err(file_err(e, &format!("open-input-file: {path}: {err_io}"))),
+    }
 }
 
 pub fn install(vm: &mut Vm) {
@@ -2721,4 +2887,18 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("bytevector-append", bv_append);
     vm.define_prim("utf8->string", utf8_to_string);
     vm.define_prim("string->utf8", string_to_utf8);
+    // the system interface
+    vm.define_prim("features", p_features);
+    vm.define_prim("get-environment-variable", p_get_env);
+    vm.define_prim("get-environment-variables", p_get_envs);
+    vm.define_prim("command-line", p_command_line);
+    vm.define_prim("current-second", p_current_second);
+    vm.define_prim("current-jiffy", p_current_jiffy);
+    vm.define_prim("jiffies-per-second", p_jiffies_per_second);
+    vm.define_prim("exit", p_exit);
+    vm.define_prim("emergency-exit", p_exit);
+    // files
+    vm.define_prim("file-exists?", p_file_exists);
+    vm.define_prim("delete-file", p_delete_file);
+    vm.define_prim("open-input-file", p_open_input_file);
 }

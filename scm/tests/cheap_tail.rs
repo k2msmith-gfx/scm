@@ -208,3 +208,178 @@ fn the_batch_survives_gc_stress() {
         .expect("the batch under gc stress");
     assert_eq!(write_str(&vm.engine, v), "19");
 }
+
+// ---- the wrong answers the suite reported, one test each --------------
+
+#[test]
+fn an_ellipsis_escape_still_substitutes_pattern_variables() {
+    // `(... template)` means an ellipsis inside has no special meaning -- but
+    // the pattern variables are still substituted. Returning the template
+    // untouched left `x` as the symbol `x`.
+    let m = "(define-syntax esc (syntax-rules () ((_ x) (quote (... (x ...))))))";
+    assert_eq!(eval(&format!("{m} (esc 100)")), "(100 ...)");
+}
+
+#[test]
+fn a_macro_defining_macro_keeps_its_variables_apart() {
+    // The inner pattern's variable is already renamed by the outer expansion,
+    // and the inner template may mention the *user's* identifier of the same
+    // name. Keying pattern variables by the RESOLVED name collapsed the two,
+    // so this gave 1 instead of x.
+    let src = "(define-syntax foo
+                 (syntax-rules ()
+                   ((foo bar y)
+                    (define-syntax bar (syntax-rules () ((bar x) 'y))))))
+               (foo bar x)
+               (bar 1)";
+    assert_eq!(eval(src), "x");
+}
+
+#[test]
+fn mixed_exact_inexact_comparison_is_mathematically_correct() {
+    // 9007199254740993 is not representable as an f64, so comparing through
+    // f64 made it equal to 9007199254740992.0.
+    assert_eq!(eval("(= 9007199254740992.0 9007199254740993)"), "#f");
+    assert_eq!(eval("(= 2.0 2)"), "#t");
+    assert_eq!(eval("(= 2.5 2)"), "#f");
+}
+
+#[test]
+fn string_to_number_requires_the_whole_string() {
+    assert_eq!(eval(r#"(string->number "1 2")"#), "#f");
+    assert_eq!(eval(r#"(string->number "1x")"#), "#f");
+    assert_eq!(eval(r#"(string->number "  12  ")"#), "12");
+}
+
+#[test]
+fn alternate_exponent_markers_are_accepted() {
+    // R7RS no longer *requires* s/f/d/l, and they cost three lines -- so an
+    // older file or a model that writes `1d2` gets 100.0 and not a symbol.
+    assert_eq!(eval("(list 1e2 1s2 1S2 1f2 1d2 1L2)"), "(100.0 100.0 100.0 100.0 100.0 100.0)");
+    assert_eq!(eval("(list +InF.0 -iNF.0)"), "(+inf.0 -inf.0)");
+}
+
+#[test]
+fn a_symbol_spelled_like_a_number_is_barred() {
+    // Otherwise `write` emits something the reader reads back as a number,
+    // which breaks the round-trip the whole printer is built around.
+    for (src, want) in [
+        (r#"(string->symbol "+inf.0")"#, "|+inf.0|"),
+        (r#"(string->symbol "+i")"#, "|+i|"),
+        (r#"(string->symbol "1")"#, "|1|"),
+        (r#"(string->symbol ".")"#, "|.|"),
+        (r#"(string->symbol "+")"#, "+"),
+        (r#"(string->symbol "...")"#, "..."),
+    ] {
+        assert_eq!(eval(&format!("(write {src})")).trim(), "#<unspecified>");
+        assert_eq!(
+            eval(&format!("(with-output-to-string (lambda () (write {src})))")),
+            format!("\"{}\"", want.replace('\\', "\\\\")),
+            "{src}"
+        );
+    }
+}
+
+#[test]
+fn flonums_print_in_the_scheme_spelling() {
+    // Rust's Display never uses exponent form, so 5e-324 came out as a
+    // 324-digit decimal; and Scheme wants a point in the mantissa and a sign
+    // on the exponent.
+    assert_eq!(eval("5e-324"), "5.0e-324");
+    assert_eq!(eval("1.7976931348623157e308"), "1.7976931348623157e+308");
+    assert_eq!(eval("1e21"), "1.0e+21");
+    // Ordinary magnitudes stay in positional form.
+    assert_eq!(eval("(list 1.5 0.001 1e20 1.0 -0.0)"), "(1.5 0.001 100000000000000000000.0 1.0 -0.0)");
+}
+
+#[test]
+fn ranges_on_the_bytevector_and_string_conversions() {
+    assert_eq!(eval(r#"(string->utf8 "ABC" 1)"#), "#u8(66 67)");
+    assert_eq!(eval(r#"(string->utf8 "ABC" 1 2)"#), "#u8(66)");
+    assert_eq!(eval("(utf8->string (bytevector 0 65 66 67) 1)"), "\"ABC\"");
+    assert_eq!(
+        eval(r#"(let ([o (open-output-string)]) (write-string "abc def" o 4) (get-output-string o))"#),
+        "\"def\""
+    );
+}
+
+#[test]
+fn an_overlapping_bytevector_copy_behaves_as_if_buffered() {
+    // Copying forward in place overwrote a byte before it was read:
+    // #u8(1 1 1 4 5) instead of #u8(1 1 2 4 5).
+    assert_eq!(
+        eval("(let ([bv (bytevector 1 2 3 4 5)]) (bytevector-copy! bv 1 bv 0 2) bv)"),
+        "#u8(1 1 2 4 5)"
+    );
+}
+
+#[test]
+fn reading_from_a_closed_port_refuses() {
+    assert_eq!(
+        eval(r#"(let ([in (open-input-string "abc")])
+                  (close-input-port in)
+                  (guard (e (else 'error)) (read-char in)))"#),
+        "error"
+    );
+}
+
+#[test]
+fn features_is_honest() {
+    // §2.3's whole obligation for not implementing the numeric tower: the
+    // feature list says what is actually true. The absences are the point.
+    let f = eval("(features)");
+    for present in ["r7rs", "ieee-float"] {
+        assert!(f.contains(present), "{present} should be claimed: {f}");
+    }
+    for absent in ["exact-closed", "ratios", "full-unicode", "exact-complex"] {
+        assert!(!f.contains(absent), "{absent} must NOT be claimed: {f}");
+    }
+}
+
+#[test]
+fn the_system_interface() {
+    assert_eq!(eval(r#"(string? (get-environment-variable "PATH"))"#), "#t");
+    assert_eq!(eval(r#"(get-environment-variable "NO_SUCH_VAR_12345")"#), "#f");
+    assert_eq!(eval("(list? (command-line))"), "#t");
+    assert_eq!(eval("(inexact? (current-second))"), "#t");
+    assert_eq!(eval("(exact? (jiffies-per-second))"), "#t");
+    assert_eq!(eval("(file-exists? \".\")"), "#t");
+    assert_eq!(eval("(file-exists? \"/no/such/file\")"), "#f");
+    // A missing file raises a FILE error, which file-error? identifies --
+    // stubbing that would have been a lie dressed as a pass.
+    assert_eq!(
+        eval(r#"(file-error? (guard (e (else e)) (delete-file "/no/such/file")))"#),
+        "#t"
+    );
+    assert_eq!(
+        eval(r#"(file-error? (guard (e (else e)) (open-input-file "/no/such/file")))"#),
+        "#t"
+    );
+}
+
+#[test]
+fn a_datum_comment_cannot_comment_out_the_dot() {
+    // `#;` comments out the next DATUM, and a lone `.` is not one -- it is a
+    // list's tail marker. Treating it as a datum silently dropped the dot and
+    // read `(a #;. b)` as `(a b)` instead of refusing it.
+    for src in ["(a #;. b)", "(#; #;x #;y . z)", "(#; #;x . z)", "."] {
+        assert_eq!(
+            eval(&format!("(guard (e (else 'error)) (read (open-input-string {:?})))", src)),
+            "error",
+            "{src} should not read"
+        );
+    }
+    // The legitimate neighbours still read, which is what makes the above a
+    // distinction rather than a blanket refusal.
+    assert_eq!(eval(r#"(read (open-input-string "(a . #;b c)"))"#), "(a . c)");
+    assert_eq!(eval(r#"(read (open-input-string "(a #; #;b c d)"))"#), "(a d)");
+}
+
+#[test]
+fn applys_final_list_is_not_optional() {
+    // `(apply proc arg1 ... args)` -- the list is part of the signature, so
+    // `(apply +)` is an arity error and not a long way to write `(+)`.
+    assert_eq!(eval("(guard (e (else 'error)) (apply +))"), "error");
+    assert_eq!(eval("(apply + '(1 2))"), "3");
+    assert_eq!(eval("(apply + 1 2 '(3))"), "6");
+}

@@ -340,12 +340,31 @@ fn flonum(x: f64) -> String {
     if x.is_infinite() {
         return if x > 0.0 { "+inf.0".into() } else { "-inf.0".into() };
     }
-    let s = format!("{x}");
-    if s.contains('.') || s.contains('e') || s.contains('E') {
-        s
+    // Rust's `Display` for f64 never uses exponent notation, so 5e-324 comes
+    // out as a 324-digit decimal. Choose the exponent form for extreme
+    // magnitudes, the way every other Scheme does.
+    let abs = x.abs();
+    let s = if abs != 0.0 && !(1e-7..1e21).contains(&abs) {
+        format!("{x:e}")
     } else {
-        format!("{s}.0")
+        format!("{x}")
+    };
+    // Then: Scheme wants a decimal point in the mantissa and a sign on the
+    // exponent, which is how the suite's accepted spellings are written.
+    if let Some((mantissa, exp)) = s.split_once(['e', 'E']) {
+        let mantissa = if mantissa.contains('.') {
+            mantissa.to_string()
+        } else {
+            format!("{mantissa}.0")
+        };
+        let exp = if exp.starts_with('-') || exp.starts_with('+') {
+            exp.to_string()
+        } else {
+            format!("+{exp}")
+        };
+        return format!("{mantissa}e{exp}");
     }
+    if s.contains('.') { s } else { format!("{s}.0") }
 }
 
 fn character(c: char) -> String {
@@ -389,11 +408,30 @@ fn symbol(name: &str) -> String {
     out
 }
 
+/// Would the reader read this spelling back as something other than this
+/// symbol? If so it needs `|…|`.
+///
+/// Asking the number parser directly is the only reliable test: `+i`,
+/// `+inf.0` and `+NaN.0abc` all have to be barred, and a hand-written
+/// first-character check missed every one of them.
 fn looks_like_number(name: &str) -> bool {
-    // `+`, `-` and `...` are ordinary symbols; `1`, `-2.5`, `.5` are not.
     if matches!(name, "+" | "-" | "..." | "->") {
         return false;
     }
-    let body = name.strip_prefix(['+', '-']).unwrap_or(name);
-    body.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '.')
+    // A lone `.` is the dotted-tail marker, so the symbol needs bars.
+    if name == "." {
+        return true;
+    }
+    if crate::reader::reads_as_number(name) {
+        return true;
+    }
+    // The peculiar numeric spellings, which the reader may refuse but which
+    // must still not come back as this symbol.
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "+i" | "-i")
+        || lower.starts_with("+inf")
+        || lower.starts_with("-inf")
+        || lower.starts_with("+nan")
+        || lower.starts_with("-nan")
+        || name.contains('\\')
 }

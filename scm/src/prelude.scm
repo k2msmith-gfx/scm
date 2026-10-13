@@ -577,12 +577,17 @@
          [end (if (or (null? range) (null? (cdr range)))
                   (bytevector-length from)
                   (cadr range))])
-    (let loop ((i start))
-      (if (< i end)
-          (begin
-            (bytevector-u8-set! to (+ at (- i start)) (bytevector-u8-ref from i))
-            (loop (+ i 1)))
-          (if #f #f)))))
+    ;; R7RS: if the source and destination overlap, the result is as if the
+    ;; bytes had gone through a temporary. Copying forward in place corrupts
+    ;; it -- (bytevector-copy! bv 1 bv 0 2) gave #u8(1 1 1 4 5) instead of
+    ;; #u8(1 1 2 4 5), because byte 1 was overwritten before it was read.
+    (let ([tmp (bytevector-copy from start end)])
+      (let loop ((i 0))
+        (if (< i (bytevector-length tmp))
+            (begin
+              (bytevector-u8-set! to (+ at i) (bytevector-u8-ref tmp i))
+              (loop (+ i 1)))
+            (if #f #f))))))
 
 (define (make-list n . fill)
   (let ([v (if (null? fill) #f (car fill))])
