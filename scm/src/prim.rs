@@ -497,9 +497,12 @@ fn p_remainder(_e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Fixnum(x % y))
 }
 
+/// `modulo` takes the sign of the *divisor*, which the first version got
+/// wrong for a negative one -- `(modulo 13 -4)` is -3, not -1. Found by the
+/// R7RS suite; `rem_euclid` is not this operation.
 fn p_modulo(_e: &mut Engine, a: &[Value]) -> PResult {
     let (x, y) = int_pair("modulo", a)?;
-    Ok(Value::Fixnum(x.rem_euclid(y.abs()) * if y < 0 { -1 } else { 1 }))
+    Ok(Value::Fixnum(((x % y) + y) % y))
 }
 
 fn p_min(e: &mut Engine, a: &[Value]) -> PResult {

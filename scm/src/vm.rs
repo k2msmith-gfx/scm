@@ -125,6 +125,13 @@ enum Frame {
     },
     /// The body of a `%parameterize` has returned; put the old values back.
     ParamRestore { count: usize },
+    /// A `%try` is in progress. On a normal return this yields
+    /// `(#t . value)`; on an error the unwind finds this frame and yields
+    /// `(#f . message)` instead.
+    ///
+    /// `param_depth` is recorded because a caught error still has to restore
+    /// whatever `parameterize` installed inside the `%try`.
+    Catch { param_depth: usize },
     /// An element of a `[…]` vector is being evaluated. This is the whole
     /// reason the reader keeps a `bracket` flag: a bracket vector *evaluates*
     /// its elements, where `#(…)` is a constant (plan §4.5).
@@ -173,7 +180,7 @@ impl Frame {
                 }
                 return;
             }
-            Frame::ParamRestore { .. } => return,
+            Frame::ParamRestore { .. } | Frame::Catch { .. } => return,
             Frame::Defaults {
                 todo, body, env, ..
             } => {
@@ -260,6 +267,7 @@ struct SpecialForms {
     begin: SymId,
     define_syntax: SymId,
     parameterize: SymId,
+    try_: SymId,
     /// The lambda-list markers (plan §4). Janet's names, kept because they are
     /// unambiguous and familiar; `&` is an R7RS special initial, so these are
     /// ordinary symbols and only `lambda` treats them specially.
@@ -290,6 +298,7 @@ impl Vm {
             begin: engine.interner.symbol("begin"),
             define_syntax: engine.interner.symbol("define-syntax"),
             parameterize: engine.interner.symbol("%parameterize"),
+            try_: engine.interner.symbol("%try"),
             amp_opt: engine.interner.symbol("&opt"),
             amp_named: engine.interner.symbol("&named"),
             amp_keys: engine.interner.symbol("&keys"),
@@ -446,6 +455,32 @@ impl Vm {
         out
     }
 
+    /// Find the nearest `%try` and hand it the error, or propagate.
+    ///
+    /// **Interrupt, out-of-fuel and out-of-memory are deliberately not
+    /// catchable.** They are the host saying stop, and a script that could
+    /// swallow them would defeat requirement 8 -- `(%try (spin))` must not be
+    /// a way to ignore `C-c`.
+    fn unwind_to_catch(&mut self, base: usize, e: VmError) -> VResult<Option<Step>> {
+        let VmError::Error(ref msg) = e else {
+            return Err(e);
+        };
+        let found = self.stack[base..]
+            .iter()
+            .rposition(|f| matches!(f, Frame::Catch { .. }));
+        let Some(rel) = found else { return Err(e) };
+        let at = base + rel;
+        let Frame::Catch { param_depth } = self.stack[at] else {
+            unreachable!("found a Catch")
+        };
+        let text = msg.clone();
+        self.stack.truncate(at);
+        self.restore_params(param_depth);
+        let m = self.engine.string(&text);
+        let pair = self.engine.cons(Value::Bool(false), m);
+        Ok(Some(Step::Return(pair)))
+    }
+
     fn restore_params(&mut self, depth: usize) {
         while self.param_bindings.len() > depth {
             let (slot, old) = self.param_bindings.pop().expect("len > depth");
@@ -465,15 +500,22 @@ impl Vm {
                 self.safepoint(&step)?;
             }
 
-            step = match step {
-                Step::Eval(expr, env) => self.eval_step(expr, env)?,
+            let outcome = match step {
+                Step::Eval(expr, env) => self.eval_step(expr, env),
                 Step::Return(v) => {
                     if self.stack.len() <= base {
                         return Ok(v);
                     }
                     let frame = self.stack.pop().expect("stack.len() > base");
-                    self.resume(frame, v)?
+                    self.resume(frame, v)
                 }
+            };
+            step = match outcome {
+                Ok(s) => s,
+                Err(e) => match self.unwind_to_catch(base, e)? {
+                    Some(s) => s,
+                    None => unreachable!("unwind_to_catch returns Err when it cannot catch"),
+                },
             };
         }
     }
@@ -685,6 +727,17 @@ impl Vm {
                     let v = self.make_closure(None, *formals, body, env)?;
                     Ok(Some(Step::Return(v)))
                 }
+            };
+        }
+        if head == s.try_ {
+            return match args {
+                [expr] => {
+                    let expr = *expr;
+                    let param_depth = self.param_bindings.len();
+                    self.push(Frame::Catch { param_depth });
+                    Ok(Some(Step::Eval(expr, env)))
+                }
+                _ => Err(self.err("%try: expected one expression")),
             };
         }
         if head == s.parameterize {
@@ -1067,6 +1120,11 @@ impl Vm {
                 self.push(Frame::ParamRestore { count });
                 Ok(self.enter_body(body, env))
             }
+            Frame::Catch { .. } => {
+                let ok = Value::Bool(true);
+                let pair = self.engine.cons(ok, v);
+                Ok(Step::Return(pair))
+            }
             Frame::ParamRestore { count } => {
                 self.restore_params(self.param_bindings.len().saturating_sub(count));
                 Ok(Step::Return(v))
@@ -1400,16 +1458,30 @@ impl Vm {
             }
             cur = parent;
         }
-        // At top level a `define` creates the global and a `set!` requires
-        // one to exist already -- which is the whole difference between them.
-        if !define && self.global(sym).is_none() {
-            return Err(self.err(format!(
-                "set!: unbound variable: {}",
-                self.engine.interner.sym_name(sym)
-            )));
+        // At top level a `define` creates the global and a `set!` requires one
+        // to exist already -- which is the whole difference between them.
+        if define {
+            self.set_global(sym, v);
+            return Ok(());
         }
-        self.set_global(sym, v);
-        Ok(())
+        if self.global(sym).is_some() {
+            self.set_global(sym, v);
+            return Ok(());
+        }
+        // A renamed template identifier means what it meant where the macro
+        // was defined, and that has to hold for `set!` as well as for a read
+        // -- `lookup` resolved aliases and this did not, so a macro expanding
+        // to `(set! x …)` on a definition-site global failed with the renamed
+        // name. Found by the R7RS suite, where it took 42 forms down.
+        let resolved = self.engine.resolve(sym);
+        if resolved != sym && self.global(resolved).is_some() {
+            self.set_global(resolved, v);
+            return Ok(());
+        }
+        Err(self.err(format!(
+            "set!: unbound variable: {}",
+            self.engine.interner.sym_name(resolved)
+        )))
     }
 
     // ---- helpers --------------------------------------------------------

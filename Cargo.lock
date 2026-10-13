@@ -12,3 +12,10 @@ version = "0.0.1"
 dependencies = [
  "scm",
 ]
+
+[[package]]
+name = "scm-conform"
+version = "0.0.1"
+dependencies = [
+ "scm",
+]

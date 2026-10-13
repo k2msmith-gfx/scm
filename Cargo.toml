@@ -1,5 +1,5 @@
 [workspace]
-members = ["scm", "scm-cli"]
+members = ["scm", "scm-cli", "scm-conform"]
 resolver = "2"
 
 [workspace.package]

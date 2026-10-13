@@ -232,3 +232,60 @@ fn parameters_and_sources_survive_gc_stress() {
         .expect("parameters under gc stress");
     assert_eq!(write_str(&vm.engine, v), "(1 30)");
 }
+
+// ---- %try: catchable errors, and what is deliberately not -------------
+
+#[test]
+fn try_catches_an_error_and_yields_the_message() {
+    assert_eq!(eval("(%try (+ 1 2))"), "(#t . 3)");
+    assert_eq!(eval("(%try (car 5))"), "(#f . \"car: not a pair: 5\")");
+    assert_eq!(
+        eval("(%try (undefined-thing))"),
+        "(#f . \"unbound variable: undefined-thing\")"
+    );
+    // And the VM carries on.
+    assert_eq!(eval("(%try (car 5)) (+ 1 1)"), "2");
+}
+
+#[test]
+fn try_does_not_swallow_the_hosts_stop() {
+    // Requirement 8: interrupt, fuel and the heap cap are the host saying
+    // stop, so a script must not be able to ignore them by wrapping the
+    // runaway in `%try`.
+    let mut vm = Vm::new();
+    vm.eval_str("(define (spin i) (spin (+ i 1)))").unwrap();
+    vm.set_fuel(Some(50));
+    let err = vm.eval_str("(%try (spin 0))").expect_err("fuel is not catchable");
+    assert_eq!(err, scm::VmError::OutOfFuel);
+
+    let mut vm = Vm::new();
+    vm.eval_str("(define (grow i acc) (grow (+ i 1) (cons i acc)))")
+        .unwrap();
+    vm.engine.set_min_heap(64);
+    vm.engine.set_heap_cap(Some(50_000));
+    let err = vm
+        .eval_str("(%try (grow 0 '()))")
+        .expect_err("the heap cap is not catchable");
+    assert_eq!(err, scm::VmError::OutOfMemory);
+}
+
+#[test]
+fn a_caught_error_still_restores_parameterize() {
+    // The Catch frame records the dynamic-binding depth, so catching an error
+    // from inside a `parameterize` puts the old value back just as an
+    // uncaught one does.
+    assert_eq!(
+        eval("(define p (make-parameter 'outer))
+              (list (car (%try (parameterize ([p 'inner]) (car 5)))) (p))"),
+        "(#f outer)"
+    );
+}
+
+#[test]
+fn try_nests() {
+    assert_eq!(eval("(%try (%try (car 5)))"), "(#t #f . \"car: not a pair: 5\")");
+    assert_eq!(
+        eval("(car (%try (let ([r (%try (car 5))]) (if (car r) 'no (error \"outer\")))))"),
+        "#f"
+    );
+}

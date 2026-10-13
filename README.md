@@ -33,6 +33,17 @@ An unclosed paren continues the entry rather than reporting an error, which
 is what S1's *incomplete* vs *invalid* distinction was for. This is the thin
 REPL; the protocol with several clients is S8.
 
+## Conformance
+
+    cargo run --release -p scm-conform -- scm-conform/suites/r7rs-tests.scm out.md
+
+Chibi-Scheme's `r7rs-tests.scm` — 989 assertions written by other people
+against the spec — vendored unedited. First baseline: **432 passed, 510
+failed, 45.9%**, and a low number is the right outcome at this stage rather
+than a grade. The finding was not the number: **of 510 failures only 22 were
+wrong answers**, and it found three bugs and reordered the work list. See
+[docs/conformance.md](docs/conformance.md).
+
 ## Requirements
 
 Language-side: R7RS-small (qualified — see plan §3.1), embedding as a crate
