@@ -918,86 +918,125 @@ restart.
 
 ---
 
-## 9. Staging, merged
+## 9. Staging, in two tracks
 
-Sizes in ray's unit (the API plan's T2 = 1.0). Stages marked ◇ are
-language-side and unsized in ray's plan; their numbers are estimates.
+**Clarified 2026-10-12, and it corrects a merge error.** The first version of
+this section interleaved scm's own work with ray's adoption of it. That put the
+verb bridge -- `#[verb]` emitting Scheme, gated on `conformance.py` -- *three
+stages before* the embedding API it depends on, and gave the corpus stage an
+exit criterion, "191 scenes render identically", that scm standalone cannot
+run, because scm has no renderer and is not embedded in ray.
+
+The split is now explicit:
+
+- **Track A, scm.** The language. Nothing in it needs ray to exist and every
+  gate runs in this repo. Built with the scene corpus in view, which is what
+  [scene-language-survey.md](scene-language-survey.md) is for.
+- **Track B, ray adopts scm.** A separate and much larger project: the verb
+  bridge, the corpus rendering identically, the prelude and the modeler. It is
+  gated on Track A's embedding API, and on ray's own API refactor -- making it
+  easier to adopt a second language at all -- on its side.
+
+Sizes in ray's unit (the API plan's T2 = 1.0). Stages marked ◇ were unsized in
+ray's plan; those numbers are estimates.
+
+### Track A — scm
 
 | | stage | size | exit criterion |
 |---|---|---|---|
-| **S0** | **The decisions.** §4's calling convention, §3.1's subset, §3.3's GC, §6's reachability. No code. The LLVM spike is banked evidence (§2.1). | 0.2 | this document, amended; x86-64 Linux half of the spike run |
-| **S1** | Reader, printer, round trip. Datum syntax, `#(…)`, `[x y z]`, the keyword datatype, comment-depth convention (`Line::Banner`), **incomplete-vs-invalid** reporting. | 0.4 | every saved corpus scene printed through `Form::to_scheme()` reads back to an equal datum; a truncated datum reports *incomplete* |
-| **S2** | T0 interpreter: explicit stack, closures, proper tail calls, safepoints. Deliberately before any compiler — it settles semantics cheaply and becomes the oracle. | 0.6 | a 10^8-iteration tail loop is flat in memory (measured); `C-c` interrupts it |
-| **S3** ◇ | GC per §3.3: precise non-moving single-threaded mark-sweep, roots = explicit stack + handle table + global cells, safepoint-driven, heap cap, finalizers. | 0.4 | cyclic structure collected; stress test under a shrunk heap; no leak under `set!` cycles |
-| **S4** | **The verb bridge.** `#[verb]`'s shim generator emits Scheme as it emits Janet. Keywords, `&opt`, `&named`, error strings verbatim. | 0.5 | `pyray/tests/conformance.py`-shaped pass through a real host call; `api/scheme/api.md` generated and byte-compared |
-| **S5** | `syntax-rules`, the library system, `(scheme base)`, the §1(12) macro set, dynamic variables. | 0.6 ◇ | each surviving ray macro demonstrated; the conformance number reported for the first time |
-| **S6** | **The corpus migrates.** ray's §4 script: load with Janet, save through `Form::to_scheme()`. | 0.3 | 191 renderable scenes render identically — compare scene *files*, not image bytes (renders are nondeterministic) |
-| **S7** ◇ | **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. | 0.5 | a sample app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable |
-| **S8** ◇ | **REPL core** — protocol, interactive environment, redefinition, live-frame backtraces, introspection; terminal client. | 0.6 | a socket client and the terminal client share one API with no divergence |
-| **S9** ◇ | The rest of R7RS-small: chars/strings, ports, bytevectors, `eval`, escape continuations, `dynamic-wind`. | 0.6 | conformance ≥ 95% of the declared subset, every failure individually explained |
-| **S10** ◇ | Stdlib image; boot budget. | 0.3 | `scm -e '(values)'` < 10 ms in CI on aarch64 macOS (§2.5) |
-| **S11** | **TL — the leaf compiler.** §6. The capability that justifies the project. | 0.8 | a user-authored SDF and texture, compiled, called concurrently from rayon workers; the restricted subset rejects non-pure calls with a message naming why |
-| **S12** ◇ | T1 bytecode VM. | 0.7 | benchmark suite vs T0; T0/T1 agree on every conformance test and every corpus scene |
-| **S13** | **The prelude and the modeler move.** ~19,000 lines plus the prelude. Divisible by file. | 2.0 | this is where "99.6% mechanical" is true or isn't |
-| **S14** | **T2 — the general JIT**, with assumption tracking and invalidation. May never be worth starting. | 1.5+ | T1/T2 agree on everything; REPL redefinition invalidates compiled callers |
-| **S15** ◇ | T3 AOT + `scm build`. | 0.8 | a hello-world binary runs on aarch64 macOS with no toolchain present; x86-64 Linux owed (§2.5) |
+| **S0** | **The decisions.** §4's calling convention, §3.1's subset, §3.3's GC, §6's reachability. | 0.2 | **done** — this document, plus [s0-findings.md](s0-findings.md) and [leaf-survey.md](leaf-survey.md) |
+| **S1** | Reader, printer, round trip. Datum syntax, `#(…)`, `[x y z]`, the keyword datatype, **incomplete-vs-invalid** reporting. | 0.4 | **done** @c98920e — the round trip holds; 17 truncations report *incomplete*, 11 wrongnesses *invalid* |
+| **S2** | T0 interpreter: explicit stack, closures, proper tail calls, safepoints. | 0.6 | **done** @5283cca — a 10^8 tail loop holds the control stack at depth 2 |
+| **S3** ◇ | GC per §3.3: precise non-moving single-threaded mark-sweep; roots = explicit stack + handle table + global cells; safepoint-driven; heap cap. | 0.4 | **done** @bf638f5 — cycles collected; the same 10^8 loop went 8.9 GB → 2.65 MB |
+| **S4** ◇ | The lambda list: `&opt`, `&named`, `&keys`, defaults that preserve an explicit `#f`. | 0.2 | **done** @56bd978 |
+| **S5** | `syntax-rules`, the library system, `(scheme base)`, and the scene corpus's own vocabulary — `seq`/`for`/`each` by name, a **growable array**, **`format`**, a **seedable RNG as a parameter** ([survey](scene-language-survey.md) §2–§5). `parameterize` for `dyn`/`setdyn`. | 0.8 | the conformance number reported for the first time; the survey's §7 checklist closed down to its one open question |
+| **S6** | **The scene corpus as a language test.** Convert the flat `save-scene` output of the 219 examples; run each in scm against **recording stub verbs**; compare the call sequence against the Janet original ([survey](scene-language-survey.md) §8). | 0.4 | every converted scene runs to completion and its recorded call sequence matches, verb for verb and argument for argument |
+| **S7** ◇ | **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. **The handoff to Track B.** | 0.5 | a sample app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable from the host |
+| **S8** ◇ | **REPL core**: the eval protocol, interactive environment, redefinition, backtraces over live frames, introspection. Terminal client in `scm-cli`. | 0.6 | a socket client and the terminal client share one API with no divergence; a runaway form is interruptible; a backtrace names frames and spans |
+| **S9** ◇ | The rest of R7RS-small: chars/strings/Unicode, ports, bytevectors, `eval`, escape continuations, `dynamic-wind`. | 0.6 | conformance ≥ 95% of the declared subset, every failure individually explained |
+| **S10** ◇ | Precompiled stdlib image; the boot budget. | 0.3 | `scm -e '(values)'` < 10 ms in CI |
+| **S11** | **TL — the leaf compiler** (§6). Testable standalone: compile a pure procedure, call it from N threads, differentially test against T0. | 0.8 | a compiled field and texel function run concurrently from a rayon pool and agree with T0; the restricted subset rejects a non-pure call with a message naming why |
+| **S12** ◇ | T1 bytecode VM. | 0.7 | the benchmark suite against T0; T0/T1 agree on every conformance test and every converted scene |
+| **S13** ◇ | T2 — the general JIT, with assumption tracking and invalidation. May never be worth starting (§3.2). | 1.5+ | T1/T2 agree on everything; redefining a global at the REPL invalidates compiled callers |
+| **S14** ◇ | T3 AOT + `scm build`. | 0.8 | a hello-world binary runs with no toolchain present |
 
-Two ordering notes that are the whole point of the merge:
+### Track B — ray adopts scm (a separate project)
 
-- **S11 (the leaf compiler) is not last.** It is the capability, it needs no GC
-  integration or deopt, and it is what makes the project worth doing at all by
-  ray's own §8. The old plan buried it behind the general JIT; that was wrong.
-- **S14 (the general JIT) may never run,** and that is a legitimate outcome.
-  ray's §8 says it plainly: if S2's interpreter is fast enough, S14 is not
-  worth starting — which is a good thing to discover cheaply, and is why S2
-  comes before any compiler.
+Listed for the dependency, not scheduled here. Each stage needs ray's API
+refactor on its side and Track A's S7 on this one.
 
-The corpus, the verb bridge and the migration (S4/S6) come early because
-requirement (14) means the Janet path must keep working the whole time, and
-nothing proves a replacement is verb-for-verb except running the corpus
-through it.
+| | stage | size |
+|---|---|---|
+| **B1** | **The verb bridge.** `#[verb]`'s shim generator emits Scheme as it emits Janet: keywords, `&opt`, `&named`, error strings verbatim, numeric coercion at the boundary so no `->f` appears in authored code (§4.7). | 0.5 |
+| **B2** | The corpus **renders identically** — a differential test between two ray builds. Compare scene *files*, not image bytes (renders are nondeterministic). | 0.3 |
+| **B3** | Goal (d): compiled texel functions in ray — the measured 15.22 s becoming ~0.09 s ([leaf-survey](leaf-survey.md)). | 0.4 |
+| **B4** | Goal (a): compiled fields callable from rayon workers, plus whatever the thread-local store needs (§6). | 0.8 |
+| **B5** | The prelude and the modeler move: ~19,000 lines plus the prelude, divisible by file. | 2.0 |
+
+Two ordering notes that survive the split:
+
+- **S6 comes before S7**, which looks backwards and is not. Running converted
+  scenes against stub verbs needs no embedding at all — the stubs are Scheme —
+  and it is the cheapest available proof that the language can express the
+  corpus. A gap found there costs far less than the same gap found after ray
+  has been rewired.
+- **S11, the leaf compiler, is not last.** It is the capability that justifies
+  the LLVM dependency (§3.2), it needs no GC integration or deopt, and it can
+  be built and differentially tested with no ray at all. The general JIT at
+  S13 may never run, and that is a legitimate outcome.
 
 ---
 
 ## 10. Gates
 
-Reuse what exists rather than inventing. Every stage gated on:
+Of the seven gates the merged plan listed, four were ray's. Splitting them by
+which repository can run them is the same split as §9.
 
-- `cargo test` (pure) and `nix develop .#janet -c cargo test --features janet,oidn`
+**Track A — every stage, in this repo:**
+
+- `cargo test`, and `cargo clippy` clean
 - `cargo build --no-default-features` **on a machine with no LLVM**, plus
   `--features jit` failing loudly without one — both halves, verified in S0
+- **language conformance as a number** from S5: vendored `r7rs-tests.scm`
+  (Chibi/Larceny) as the primary oracle, written by other people against the
+  spec with no knowledge of this implementation, plus the 44-program R7RS
+  benchmark suite as a second correctness corpus
+- **the converted scene corpus** from S6: every scene runs against recording
+  stub verbs and its call sequence matches the Janet original
+- the boot budget from S10, failing the build on regression
+
+**Track B — on ray's side**, reusing what ray already owns rather than
+inventing:
+
+- `nix develop .#janet -c cargo test --features janet,oidn`
 - `scripts/dev/run_corpus.sh` — the 191 renderable scenes, 0 failures
 - `pyray/tests/conformance.py` — **the one gate that makes a real call through
   a host.** A0's lesson: seventeen Rust unit tests passed while a generated
   shim silently dropped every option, because each test built the argument
-  shape by hand. The Scheme binding needs its own pass of the same shape from
-  day one
-- both generated manuals byte-identical, and `api/scheme/api.md` joining them
-- **language conformance as a number** from S5: vendored `r7rs-tests.scm`
-  (Chibi/Larceny) as the primary oracle, written by other people against the
-  spec with no knowledge of our implementation, plus the 44-program R7RS
-  benchmark suite as a second correctness corpus
+  shape by hand. A new binding needs its own pass of the same shape from day
+  one
+- both generated manuals byte-identical, with `api/scheme/api.md` joining them
 - the 6-language embedding benchmark suite as the performance baseline — ECL
   led shader-math, Janet second. Benchmarks must reflect the real workload: a
   procedural generator loop and a **field evaluation**, not scene loading,
   which is not interpreter-bound
 
-Two rules: **every tier runs every test** — a compiler that passes fewer tests
-than the interpreter is a bug, not a tradeoff — and **a failing test is either
-fixed or individually explained in a file.** A conformance percentage with an
-unexplained remainder is a marketing number.
+Two rules hold across both tracks: **every tier runs every test** — a compiler
+that passes fewer tests than the interpreter is a bug, not a tradeoff — and **a
+failing test is either fixed or individually explained in a file.** A
+conformance percentage with an unexplained remainder is a marketing number.
 
 ---
 
 ## 11. Risks, worst first
 
-1. **Six months before ray can use anything.** ray's §1 states it: the first
-   stages produce nothing ray can run while the Janet path must keep working
-   anyway. Of the three justifications, two are strategic and only (13) is a
-   capability. *Mitigation: S4 and S6 land a working verb bridge and a
-   migrated corpus early, so "nothing usable" ends sooner than S13. And if (13)
-   can be had another way — a Rust-authored field DSL — this plan is worth
-   less than it looks, which is a thing to check in S0, not month five.*
+1. **scm is not usable by ray until Track B runs**, and Track B is a separate
+   project gated on ray's own API refactor. The honest consequence of §9's
+   split: Track A can finish and ray still be on Janet. *Mitigation: S6 proves
+   the language can express the corpus without ray, so the thing Track B
+   inherits is a known quantity rather than a hope; and Track A's own output
+   — a conformant, embeddable, fast-booting Scheme with a leaf compiler — is
+   worth having on the terms in §3.2 whether or not B1 ever starts.*
 2. **The calling convention decision shapes the corpus.** If keywords and
    optionals land in a form ray's own scenes read badly in, the corpus stops
    being an asset and becomes 219 files of friction. *Mitigation: §4 option 1
