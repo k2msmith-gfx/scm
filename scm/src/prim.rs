@@ -20,6 +20,30 @@ fn err(msg: impl Into<String>) -> VmError {
     VmError::Error(msg.into())
 }
 
+/// `n` copies of `fill`, **refusing rather than aborting** on a hostile
+/// length.
+///
+/// `vec![fill; n]` does not panic on a length it cannot allocate -- it
+/// **aborts the process**, because an allocation failure is not an unwinding
+/// panic and so `catch_unwind` cannot contain it. That made
+/// `(make-vector 9223372036854775807)` a way for a script to kill its host,
+/// which is exactly what requirement 8 forbids: found by S7's aimed hostile
+/// programs, where the token-soup fuzzer would never have reached it.
+///
+/// `try_reserve_exact` asks first and hands back an error, so the refusal is
+/// an ordinary Scheme error that `guard` can catch.
+fn filled<T: Clone>(who: &str, n: i64, fill: T) -> Result<Vec<T>, VmError> {
+    if n < 0 {
+        return Err(err(format!("{who}: negative length")));
+    }
+    let n = n as usize;
+    let mut out: Vec<T> = Vec::new();
+    out.try_reserve_exact(n)
+        .map_err(|_| err(format!("{who}: cannot allocate {n} elements")))?;
+    out.resize(n, fill);
+    Ok(out)
+}
+
 /// A number as an `f64`, for when any argument is inexact.
 fn as_f64(v: Value) -> Option<f64> {
     match v {
@@ -292,21 +316,61 @@ fn list(e: &mut Engine, a: &[Value]) -> PResult {
     Ok(e.list(a))
 }
 
+/// `length`, which must **answer** on a circular list rather than spin.
+///
+/// This is a Rust primitive, so its loop contains no safepoint -- which makes
+/// a cycle here worse than a cycle in Scheme: not stoppable by fuel, not by
+/// the interrupt, not by a timeout. A script could hang its host with no way
+/// back, which is requirement 8 broken outright. Found by S7's aimed hostile
+/// programs; `list?` had the same hole and the same fix.
 fn length(e: &mut Engine, a: &[Value]) -> PResult {
-    let mut v = one("length", a)?;
+    let v = one("length", a)?;
     let mut n = 0i64;
+    let mut slow = v;
+    let mut fast = v;
     loop {
-        match v {
-            Value::Null => return Ok(Value::Fixnum(n)),
-            Value::Obj(r) => match e.obj(r) {
-                Obj::Pair(_, cdr) => {
-                    n += 1;
-                    v = *cdr;
+        // `fast` moves two cells per one of `slow`; if they meet, it is a
+        // cycle.
+        match step(e, fast) {
+            Step::End => return Ok(Value::Fixnum(n)),
+            Step::Improper => return Err(err("length: not a proper list")),
+            Step::Next(f1) => {
+                n += 1;
+                match step(e, f1) {
+                    Step::End => return Ok(Value::Fixnum(n)),
+                    Step::Improper => return Err(err("length: not a proper list")),
+                    Step::Next(f2) => {
+                        n += 1;
+                        fast = f2;
+                        slow = match step(e, slow) {
+                            Step::Next(s) => s,
+                            _ => return Err(err("length: not a proper list")),
+                        };
+                        if slow == fast {
+                            return Err(err("length: circular list"));
+                        }
+                    }
                 }
-                _ => return Err(err("length: not a proper list")),
-            },
-            _ => return Err(err("length: not a proper list")),
+            }
         }
+    }
+}
+
+/// One cdr step, for the cycle-safe walks.
+enum Step {
+    Next(Value),
+    End,
+    Improper,
+}
+
+fn step(e: &Engine, v: Value) -> Step {
+    match v {
+        Value::Null => Step::End,
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Pair(_, cdr) => Step::Next(*cdr),
+            _ => Step::Improper,
+        },
+        _ => Step::Improper,
     }
 }
 
@@ -525,9 +589,13 @@ fn p_quotient(_e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Fixnum(x / y))
 }
 
+/// `i64::MIN % -1` **overflows** -- the quotient is not representable, so the
+/// hardware traps and Rust panics in a debug build. Found by S7's aimed
+/// hostile programs. The mathematical answer is 0, and `checked_rem` is how
+/// to say that without a special case for the one input.
 fn p_remainder(_e: &mut Engine, a: &[Value]) -> PResult {
     let (x, y) = int_pair("remainder", a)?;
-    Ok(Value::Fixnum(x % y))
+    Ok(Value::Fixnum(x.checked_rem(y).unwrap_or(0)))
 }
 
 /// `modulo` takes the sign of the *divisor*, which the first version got
@@ -535,7 +603,14 @@ fn p_remainder(_e: &mut Engine, a: &[Value]) -> PResult {
 /// R7RS suite; `rem_euclid` is not this operation.
 fn p_modulo(_e: &mut Engine, a: &[Value]) -> PResult {
     let (x, y) = int_pair("modulo", a)?;
-    Ok(Value::Fixnum(((x % y) + y) % y))
+    // Every step here can overflow on the i64 edges: the remainder itself
+    // for `i64::MIN % -1`, and the `+ y` for a large remainder. Wrapping is
+    // correct for the sign correction because the true result is always
+    // within range even when the intermediate is not.
+    let r = x.checked_rem(y).unwrap_or(0);
+    Ok(Value::Fixnum(
+        r.wrapping_add(y).checked_rem(y).unwrap_or(0),
+    ))
 }
 
 fn p_min(e: &mut Engine, a: &[Value]) -> PResult {
@@ -704,10 +779,7 @@ fn make_vector(e: &mut Engine, a: &[Value]) -> PResult {
         [Value::Fixnum(n), fill] => (*n, *fill),
         _ => return Err(err("make-vector: expects a length and an optional fill")),
     };
-    if n < 0 {
-        return Err(err("make-vector: negative length"));
-    }
-    Ok(e.vector(vec![fill; n as usize], true))
+    Ok(e.vector(filled("make-vector", n, fill)?, true))
 }
 
 fn vector_set(e: &mut Engine, a: &[Value]) -> PResult {
@@ -769,10 +841,17 @@ fn vector_to_list(e: &mut Engine, a: &[Value]) -> PResult {
     Ok(e.list(&items[start..end]))
 }
 
+/// `list->vector`, bounded by the live object count so a cycle refuses
+/// instead of spinning -- see [`crate::vm::Vm::list_to_vec`] for why the
+/// bound is that and not a second pointer.
 fn list_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
     let mut v = one("list->vector", a)?;
     let mut items = Vec::new();
+    let cap = e.obj_count() + 1;
     loop {
+        if items.len() > cap {
+            return Err(err("list->vector: circular list"));
+        }
         match v {
             Value::Null => break,
             Value::Obj(r) => match e.obj(r) {
@@ -906,10 +985,7 @@ fn make_string(e: &mut Engine, a: &[Value]) -> PResult {
         [Value::Fixnum(n), Value::Char(c)] => (*n, *c),
         _ => return Err(err("make-string: expects a length and an optional character")),
     };
-    if n < 0 {
-        return Err(err("make-string: negative length"));
-    }
-    Ok(e.alloc(Obj::Str(vec![fill; n as usize])))
+    Ok(e.alloc(Obj::Str(filled("make-string", n, fill)?)))
 }
 
 /// R7RS `string` builds a string from CHARACTERS.
@@ -2425,10 +2501,7 @@ fn bv_make(e: &mut Engine, a: &[Value]) -> PResult {
         [Value::Fixnum(n), Value::Fixnum(f)] if (0..=255).contains(f) => (*n, *f as u8),
         _ => return Err(err("make-bytevector: expects a length and an optional byte")),
     };
-    if n < 0 {
-        return Err(err("make-bytevector: negative length"));
-    }
-    Ok(e.bytevector(vec![fill; n as usize]))
+    Ok(e.bytevector(filled("make-bytevector", n, fill)?))
 }
 
 fn bv_is(e: &mut Engine, a: &[Value]) -> PResult {

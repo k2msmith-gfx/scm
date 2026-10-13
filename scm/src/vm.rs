@@ -20,6 +20,7 @@
 //! T0 stays forever as the semantic oracle every later tier is differentially
 //! tested against, so it is written for clarity over speed.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -71,6 +72,24 @@ pub type PrimFn = fn(&mut Engine, &[Value]) -> VResult<Value>;
 /// the parameter table, and the random source reads one. Neither applies a
 /// procedure, so neither needs a frame -- they just need more than the heap.
 pub type VmPrimFn = fn(&mut Vm, &[Value]) -> VResult<Value>;
+
+/// A host function the *embedder* registered, which unlike [`PrimFn`] may
+/// **capture state**.
+///
+/// This is the gap S7 found and plan §7a records: `PrimFn` is a bare `fn`
+/// pointer, so a host function could capture nothing -- and every ray verb
+/// needs the scene store, which made Track B's B1 unwritable as it stood.
+///
+/// It is handed [`crate::Val`]s, not `Value`s, and that is a safety property
+/// rather than an inconvenience: a host function never sees a heap reference,
+/// so it cannot hold one across a collection. The cost is that a procedure or
+/// a port arrives as [`crate::Val::Opaque`], which no ray verb needs.
+///
+/// `FnMut`, because the captured state is usually the point. `Rc<RefCell<_>>`
+/// so dispatch can clone the handle out, release its borrow on the `Vm`, and
+/// call it -- a host function that re-entered the VM would need more than
+/// this, and does not get it yet.
+type HostFn = Rc<RefCell<dyn FnMut(&[crate::Val]) -> Result<crate::Val, String>>>;
 
 /// One pending computation.
 #[derive(Clone, Debug)]
@@ -296,6 +315,8 @@ pub struct Vm {
     ///   stops `eval` of generated forms from leaking an entry per form. The
     ///   cost is a cold cache after each GC; the benefit holds between them.
     expansion_cache: HashMap<ObjRef, Value>,
+    /// Host functions, indexed by `PrimId` alongside `prims` and `vm_prims`.
+    host_fns: Vec<Option<HostFn>>,
     /// Guards against a macro that expands into itself. Requirement 8: a
     /// runaway must be an error, not a hang.
     /// **Consecutive** macro expansions, reset whenever a value is returned.
@@ -407,6 +428,7 @@ impl Vm {
             high_water: 0,
             expansions: 0,
             expansion_cache: HashMap::new(),
+            host_fns: Vec::new(),
             fuel: None,
             interrupt: Arc::new(AtomicBool::new(false)),
             syms,
@@ -489,6 +511,39 @@ impl Vm {
     }
 
     /// A primitive that gets the whole VM. See [`VmPrimFn`].
+    /// A placeholder for a `PrimId` slot that only a host function occupies.
+    /// Unreachable through dispatch, because `host_fns` is checked first;
+    /// it exists so the three tables stay the same length.
+    fn unreachable_prim(_: &mut Engine, _: &[Value]) -> VResult<Value> {
+        Err(VmError::Error(
+            "a primitive slot that belongs to a host function was called".into(),
+        ))
+    }
+
+    /// Register a host function that may capture state.
+    ///
+    /// Redefining a name that is already a host function replaces it; a name
+    /// that is a built-in primitive is shadowed by an ordinary global, the
+    /// same as `(define car 1)` would be.
+    pub fn define_host_fn(
+        &mut self,
+        name: &str,
+        f: impl FnMut(&[crate::Val]) -> Result<crate::Val, String> + 'static,
+    ) {
+        let id = self.engine.register_prim_name(name);
+        let slot = id as usize;
+        if self.prims.len() <= slot {
+            self.prims.resize(slot + 1, Self::unreachable_prim);
+            self.vm_prims.resize(slot + 1, None);
+        }
+        if self.host_fns.len() <= slot {
+            self.host_fns.resize_with(slot + 1, || None);
+        }
+        self.host_fns[slot] = Some(Rc::new(RefCell::new(f)));
+        let sym = self.engine.interner.symbol(name);
+        self.set_global(sym, Value::Primitive(PrimId(id)));
+    }
+
     pub fn define_vm_prim(&mut self, name: &str, f: VmPrimFn) {
         let id = self.engine.register_prim_name(name);
         debug_assert_eq!(id as usize, self.prims.len());
@@ -1218,6 +1273,44 @@ impl Vm {
         self.list_to_vec(v)
     }
 
+    /// Convert the arguments to [`crate::Val`], call the host, convert the
+    /// result back.
+    ///
+    /// A panic inside a host function is caught here. Letting one through
+    /// would unwind the VM's explicit stack without restoring the dynamic
+    /// bindings it holds -- and in ray's case the panic could not unwind out
+    /// of `extern "C"` at all and would abort the process, which is the
+    /// @7d8c8a1 bug with a new door (risk 8).
+    fn call_host_fn(
+        &mut self,
+        f: HostFn,
+        id: PrimId,
+        args: &[Value],
+    ) -> VResult<Value> {
+        let name = self.engine.prim_name(id).to_string();
+        let vals: Vec<crate::Val> = args
+            .iter()
+            .map(|&a| crate::embed::read_val(&self.engine, a, 0))
+            .collect();
+        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (f.borrow_mut())(&vals)
+        }));
+        let out = match called {
+            Ok(r) => r,
+            Err(_) => {
+                return Err(self.err(format!("the host function `{name}` panicked")));
+            }
+        };
+        match out {
+            // A host refusal is an ordinary Scheme error, so `guard` can
+            // catch it -- it is the host's *code* failing, not the host
+            // saying stop.
+            Err(msg) => Err(self.err(format!("{name}: {msg}"))),
+            Ok(v) => crate::embed::build_val(&mut self.engine, &v, 0)
+                .map_err(|e| self.err(format!("{name}: {e}"))),
+        }
+    }
+
     fn enter_body(&mut self, body: Rc<Vec<Value>>, env: Option<ObjRef>) -> Step {
         let first = body[0];
         if body.len() > 1 {
@@ -1679,11 +1772,17 @@ impl Vm {
         }
         match callee {
             Value::Primitive(id) => {
-                if let Some(f) = self.vm_prims[id.0 as usize] {
+                let slot = id.0 as usize;
+                // A host function first: it is the only kind that can be
+                // registered over a name after boot.
+                if let Some(f) = self.host_fns.get(slot).and_then(Option::as_ref).cloned() {
+                    return self.call_host_fn(f, id, &args).map(Step::Return);
+                }
+                if let Some(f) = self.vm_prims[slot] {
                     let v = f(self, &args)?;
                     return Ok(Step::Return(v));
                 }
-                let f = self.prims[id.0 as usize];
+                let f = self.prims[slot];
                 let v = f(&mut self.engine, &args)?;
                 Ok(Step::Return(v))
             }
@@ -1948,9 +2047,25 @@ impl Vm {
 
     // ---- helpers --------------------------------------------------------
 
+    /// A proper list as a `Vec`, refusing a **cycle** rather than spinning.
+    ///
+    /// This is Rust, so the loop has no safepoint: a cycle here is not
+    /// stoppable by fuel, by the interrupt, or by a timeout, and `(apply + x)`
+    /// on a circular `x` hung the process with no way back. Requirement 8
+    /// broken outright, found by S7's aimed hostile programs.
+    ///
+    /// The bound is the **live object count**, not a second pointer: a proper
+    /// list of length L needs L distinct pairs, so L can never exceed the
+    /// number of live objects. One comparison per element, on a path every
+    /// form's arguments go through -- tortoise-and-hare would cost a second
+    /// walk here for no extra precision.
     fn list_to_vec(&self, mut v: Value) -> VResult<Vec<Value>> {
         let mut out = Vec::new();
+        let cap = self.engine.obj_count() + 1;
         loop {
+            if out.len() > cap {
+                return Err(VmError::Error("circular list".into()));
+            }
             match v {
                 Value::Null => return Ok(out),
                 Value::Obj(r) => match self.engine.obj(r) {

@@ -123,7 +123,50 @@ fn shared_refs(e: &Engine, root: Value) -> HashSet<ObjRef> {
     twice
 }
 
+/// One thing left to emit.
+///
+/// The writer used to recurse: the *spine* of a list was a loop, but each
+/// `car` was a recursive call, so `(((( … ))))` 20,000 deep **overflowed the
+/// Rust stack and aborted the process**. Found by S7's aimed hostile
+/// programs, and the worst failure mode in the plan -- an abort is not a
+/// panic, so `catch_unwind` cannot contain it and requirement 8 is simply
+/// broken.
+///
+/// This is the same lesson as `write` needing datum labels and `list?`
+/// needing tortoise-and-hare, arriving for the third time: **every recursive
+/// walk over heap structure is a latent abort**, because the heap's depth is
+/// bounded by the heap and the Rust stack is not. The spine of the whole
+/// machine is an explicit stack for exactly this reason (plan §5); the
+/// printer was the last place that had not learned it.
+enum Job {
+    /// Print a value, with datum-label handling. Carries its own `quoted`
+    /// because the two differ within one value: an error object prints its
+    /// message unquoted and its irritants quoted.
+    Val(Value, bool),
+    Text(&'static str),
+}
+
 fn print_ctx(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
+    let mut stack = vec![Job::Val(v, quoted)];
+    // Pushed in reverse of emission order, since this is a stack.
+    while let Some(job) = stack.pop() {
+        match job {
+            Job::Text(t) => out.push_str(t),
+            Job::Val(v, quoted) => emit(e, v, quoted, ctx, out, &mut stack),
+        }
+    }
+}
+
+/// Emit one value, pushing whatever is left onto `stack`.
+fn emit(
+    e: &Engine,
+    v: Value,
+    quoted: bool,
+    ctx: &mut Ctx,
+    out: &mut String,
+    stack: &mut Vec<Job>,
+) {
+    // A labelled value: `#0=` the first time, `#0#` after.
     if let Value::Obj(r) = v
         && ctx.marked.contains(&r)
     {
@@ -136,10 +179,6 @@ fn print_ctx(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String
         ctx.assigned.insert(r, n);
         out.push_str(&format!("#{n}="));
     }
-    print(e, v, quoted, ctx, out);
-}
-
-fn print(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
     match v {
         Value::Fixnum(n) => out.push_str(&n.to_string()),
         Value::Flonum(x) => out.push_str(&flonum(x)),
@@ -189,13 +228,14 @@ fn print(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
                 // and `#(1 2 3)` does not, so printing one as the other would
                 // change the meaning of a saved scene (plan §4.5).
                 out.push_str(if *bracket { "[" } else { "#(" });
-                for (i, &item) in items.iter().enumerate() {
+                let close = if *bracket { "]" } else { ")" };
+                stack.push(Job::Text(close));
+                for (i, &item) in items.iter().enumerate().rev() {
+                    stack.push(Job::Val(item, quoted));
                     if i > 0 {
-                        out.push(' ');
+                        stack.push(Job::Text(" "));
                     }
-                    print_ctx(e, item, quoted, ctx, out);
                 }
-                out.push(if *bracket { ']' } else { ')' });
             }
             Obj::Bytevector(bytes) => {
                 out.push_str("#u8(");
@@ -207,7 +247,7 @@ fn print(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
                 }
                 out.push(')');
             }
-            Obj::Pair(..) => pair(e, v, quoted, ctx, out),
+            Obj::Pair(..) => pair(e, v, quoted, ctx, out, stack),
             // None of these have datum syntax, so none of them round-trips.
             // Printing them at all is for the REPL and for error messages.
             Obj::Closure { name, .. } => match name {
@@ -221,15 +261,13 @@ fn print(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
             Obj::Env { .. } => out.push_str("#<environment>"),
             Obj::Parameter { .. } => out.push_str("#<parameter>"),
             Obj::Rng(_) => out.push_str("#<random-source>"),
-            // Printed as the message it carries, so `(display e)` in a
-            // handler reads the way a person would expect.
             Obj::Values(vs) => {
                 out.push_str("#<values");
-                for &v in vs {
-                    out.push(' ');
-                    print_ctx(e, v, quoted, ctx, out);
+                stack.push(Job::Text(">"));
+                for &v in vs.iter().rev() {
+                    stack.push(Job::Val(v, quoted));
+                    stack.push(Job::Text(" "));
                 }
-                out.push('>');
             }
             Obj::Port { kind, .. } => {
                 out.push_str(match kind {
@@ -239,17 +277,20 @@ fn print(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
                     crate::heap::PortKind::Stderr => "#<output-port stderr>",
                 });
             }
+            // Printed as the message it carries, so `(display e)` in a
+            // handler reads the way a person would expect.
             Obj::ErrorObj {
                 message, irritants, ..
             } => {
-                print_ctx(e, *message, false, ctx, out);
+                let mut jobs = vec![Job::Val(*message, false)];
                 let mut cur = *irritants;
                 while let Value::Obj(r2) = cur {
                     let Obj::Pair(car, cdr) = e.obj(r2) else { break };
-                    out.push(' ');
-                    print_ctx(e, *car, true, ctx, out);
+                    jobs.push(Job::Text(" "));
+                    jobs.push(Job::Val(*car, true));
                     cur = *cdr;
                 }
+                stack.extend(jobs.into_iter().rev());
             }
         },
     }
@@ -258,17 +299,28 @@ fn print(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
 /// Lists, with the four abbreviations printed as abbreviations -- a saved
 /// scene reads better with `'floor` than `(quote floor)`, and it reads back
 /// the same either way.
-fn pair(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
+///
+/// The spine is walked here and the elements are *queued*, so neither a long
+/// list nor a deep one touches the Rust stack.
+fn pair(
+    e: &Engine,
+    v: Value,
+    quoted: bool,
+    ctx: &mut Ctx,
+    out: &mut String,
+    stack: &mut Vec<Job>,
+) {
     // The abbreviation is only safe when neither cell is labelled: `'x` has
     // nowhere to put a `#0=`.
     if let Some((name, inner)) = abbreviation(e, v)
         && !matches!(v, Value::Obj(r) if ctx.marked.contains(&r))
     {
         out.push_str(name);
-        print_ctx(e, inner, quoted, ctx, out);
+        stack.push(Job::Val(inner, quoted));
         return;
     }
     out.push('(');
+    let mut jobs: Vec<Job> = Vec::new();
     let mut cur = v;
     let mut first = true;
     loop {
@@ -276,9 +328,9 @@ fn pair(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
             Value::Obj(r) => match e.obj(r) {
                 Obj::Pair(car, cdr) => {
                     if !first {
-                        out.push(' ');
+                        jobs.push(Job::Text(" "));
                     }
-                    print_ctx(e, *car, quoted, ctx, out);
+                    jobs.push(Job::Val(*car, quoted));
                     first = false;
                     cur = *cdr;
                     // A labelled tail cannot be walked through, or the list
@@ -286,26 +338,27 @@ fn pair(e: &Engine, v: Value, quoted: bool, ctx: &mut Ctx, out: &mut String) {
                     if let Value::Obj(r) = cur
                         && ctx.marked.contains(&r)
                     {
-                        out.push_str(" . ");
-                        print_ctx(e, cur, quoted, ctx, out);
+                        jobs.push(Job::Text(" . "));
+                        jobs.push(Job::Val(cur, quoted));
                         break;
                     }
                 }
                 _ => {
-                    out.push_str(" . ");
-                    print_ctx(e, cur, quoted, ctx, out);
+                    jobs.push(Job::Text(" . "));
+                    jobs.push(Job::Val(cur, quoted));
                     break;
                 }
             },
             Value::Null => break,
             other => {
-                out.push_str(" . ");
-                print_ctx(e, other, quoted, ctx, out);
+                jobs.push(Job::Text(" . "));
+                jobs.push(Job::Val(other, quoted));
                 break;
             }
         }
     }
-    out.push(')');
+    jobs.push(Job::Text(")"));
+    stack.extend(jobs.into_iter().rev());
 }
 
 /// `(quote x)` -> `'x`, but only for exactly two elements: `(quote a b)` is an

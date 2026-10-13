@@ -8,6 +8,7 @@
 //!
 //! There is deliberately no LLVM here and the default feature set is empty.
 
+pub mod embed;
 pub mod heap;
 pub mod prim;
 pub mod reader;
@@ -16,6 +17,7 @@ pub mod value;
 pub mod vm;
 pub mod writer;
 
+pub use embed::{Error as EmbedError, Interp, Rooted, Val};
 pub use heap::{Engine, Interner, Obj};
 pub use reader::{ReadError, Reader, ReaderOptions, Span};
 pub use value::{KwId, ObjRef, SymId, Value};

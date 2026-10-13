@@ -1019,6 +1019,108 @@ modeler session and real across `--batch` sweeps and the demo films.
 
 ---
 
+## 7a. S7: the embedding API, and the three things measured first
+
+Requirement 2 is "easy embedding in a Rust application as a crate", and until
+S7 the embedding API was **every module being `pub`**. That is not an API, it
+is an absence of one, and three specific consequences were measured before
+designing anything.
+
+**1. A host-held value silently becomes a different object.** `eval_str`
+returns a bare `Value`, which is not a root, so:
+
+```text
+held:            (1 2 3)
+after a GC:      #<environment>
+not a pair now:  Env { parent: Some(ObjRef(2779)), slots: [(SymId(318), …)] }
+```
+
+No `unsafe`, no warning, no error — `ObjRef` is a raw slot index with no
+generation, and the slot was reused. S3 built `Engine::root`/`unroot` saying
+they were "what the embedding API (S7) gets built out of"; nothing was built
+out of them, and `eval_str` does not use them.
+
+**2. A host cannot register a closure.** `PrimFn` is `fn(&mut Engine, &[Value])
+-> VResult<Value>` — a bare function pointer, so a host function can capture
+**nothing**. Every ray verb needs the scene store, so as it stands Track B's
+B1 cannot be written at all. This is the gap that would have been found latest
+and hurt most.
+
+**3. 88 panic sites behind 95 public items.** Counted, not estimated. Risk 8
+is written in ray's blood: a panic cannot unwind out of `extern "C"` and
+aborts, and a zero weight killed Kevin's modeler mid-edit (@7d8c8a1). A panic
+crossing *this* API into ray is the same bug with a new door.
+
+### Shape
+
+- **`Interp`** is the only thing a host constructs: one opaque facade, so the
+  internals stop being the interface.
+- **`Rooted`** is an RAII handle over `Engine::root`. `Drop` cannot reach the
+  engine, so a dropped handle pushes itself onto a shared queue the `Interp`
+  drains at every entry point — deferred unrooting, which is conservative in
+  the only direction that is safe (a value lives slightly too long, never too
+  little). It carries an engine id, so a handle from another `Interp` is an
+  error and not silent aliasing.
+- **`Val`** is the host's value type: the cases a host actually passes, with
+  everything else opaque behind a `Rooted`. A host should not have to know
+  what an `ObjRef` is.
+- **Errors are `Result`**, and a caught panic **poisons** the `Interp` the way
+  a `Mutex` does. Catching a panic does not make the VM's state known again,
+  so continuing would be a worse lie than refusing.
+- **The host's controls** — interrupt, fuel, heap cap, wall-clock timeout —
+  are requirement 8, and deliberately not catchable *by the script*.
+
+### What the harness found: four ways a script could kill its host
+
+All four are **aborts, not panics** — and that distinction is the finding.
+`catch_unwind` cannot contain an abort, so no amount of care at the boundary
+would have helped; each had to be fixed where it was.
+
+| | what | why it aborted |
+|---|---|---|
+| 1 | `(make-vector 9223372036854775807)` | `vec![x; n]` does not panic on a length it cannot allocate, it **aborts**. Three sites (`make-vector`, `make-string`, `make-bytevector`), now `try_reserve_exact` |
+| 2 | `(modulo -9223372036854775808 -1)` | `i64::MIN % -1` overflows — the quotient is unrepresentable, so the hardware traps. `checked_rem` in `modulo` and `remainder` |
+| 3 | `(write <20,000-deep list>)` | **the writer recursed.** The spine was a loop but every `car` was a recursive call, so deep nesting overflowed the Rust stack |
+| 4 | `(length <circular list>)`, `(apply + <circular>)`, `(list->vector <circular>)` | an unbounded cdr-walk **in Rust**, so the loop has no safepoint |
+
+(3) is the same lesson as `write` needing datum labels and `list?` needing
+tortoise-and-hare, arriving a third time: **every recursive walk over heap
+structure is a latent abort**, because the heap's depth is bounded by the heap
+and the Rust stack is not. §5 made the spine an explicit stack for exactly
+this reason; the printer was the last place that had not learned it.
+
+(4) sharpened a distinction worth keeping. Probing every list-consuming
+procedure against a cycle found six that hung — but with `--fuel` set, four of
+them stopped:
+
+```text
+(reverse x)        stopped: out of fuel      <- Scheme, in the prelude
+(append x '(9))    stopped: out of fuel
+(list-copy x)      stopped: out of fuel
+(member 9 x)       stopped: out of fuel
+(list->vector x)   *** UNSTOPPABLE ***        <- Rust, no safepoint
+(apply + x)        *** UNSTOPPABLE ***
+```
+
+**A Scheme loop is stoppable and a Rust loop is not.** The four are requirement
+8 working as designed — the host sets a budget. The two were holes, and are
+now bounded by the live object count, which is exact: a proper list of length
+L needs L distinct pairs, so L cannot exceed the number of live objects. One
+comparison per element, on the path every form's arguments take.
+
+### And the fuzzer was the weaker half, measured
+
+```text
+fuzz:  182 ok, 2218 refused, 0 caught panics
+aimed:  13 of 51 evaluated, 38 refused, 0 panicked
+```
+
+The token-soup generator got 182 of 2,400 inputs past the reader and found
+**nothing**. The 51 hand-aimed programs — indexing, allocation sizes, the i64
+edges, recursion depth, cycles, the host boundary — evaluated only 13 and
+found **all four**. Worth remembering before writing another fuzzer: random
+input mostly measures the reader, and the bugs were behind programs that parse.
+
 ## 8. The REPL is a protocol, not a prompt
 
 Requirement (7), with ray as the consumer, means the terminal prompt is **one
@@ -1091,7 +1193,7 @@ ray's plan; those numbers are estimates.
 | **S5** | `syntax-rules`, the library system, `(scheme base)`, and the scene corpus's own vocabulary — `seq`/`for`/`each` by name, a **growable array**, **`format`** (SRFI-28 spelling), a **seedable RNG as a parameter** ([survey](scene-language-survey.md) §2–§5). `parameterize` for `dyn`/`setdyn`. Every binding and clause form accepts bracket bindings (§4.9). | 0.9 | the conformance number reported for the first time; the survey's §7 checklist closed to its one open question; `(let ([x 1]) x)` and `(cond [else 1])` both work |
 | **S5b** | **done** — [s5b-findings.md](s5b-findings.md). **Leaf probe** (§6). No compiler: the purity/reachability analysis over the IR as it exists, plus codegen and a JIT call for the innermost pure functions, to learn what the current representation makes hard before it hardens. | 0.2 | the analysis names the blocking call for an impure function; a compiled function agrees with T0 on a grid; each of the five items is reported free, awkward or blocked, with the reason |
 | **S6** | **DEFERRED 2026-10-12** to Track B — [survey §8a](scene-language-survey.md). ray's store now holds a neutral `Form` and its writer is ungated, so the conversion this stage describes is a **printer**, and a saved-file spelling belongs to the port rather than to a guess made before it. The survey records what was measured. **The scene corpus as a language test.** Convert the flat `save-scene` output of the 219 examples; run each in scm against **recording stub verbs**; compare the call sequence against the Janet original ([survey](scene-language-survey.md) §8). | 0.4 | every converted scene runs to completion and its recorded call sequence matches, verb for verb and argument for argument |
-| **S7** ◇ | **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. **The handoff to Track B.** | 0.5 | a sample app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable from the host |
+| **S7** ◇ | **done 2026-10-12** — §7a, `scm/src/embed.rs`, `scm/examples/host.rs`. **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. **The handoff to Track B.** | 0.5 | **met**: the sample host is **20 body lines**; the fuzzed harness caught **0 panics** and found **4 aborts**, all fixed; fuel, heap cap, interrupt and wall-clock timeout each kill a runaway and none is catchable by the script. *Not* yet: a host function cannot re-enter the VM. |
 | **S8** ◇ | **REPL core**: the eval protocol, interactive environment, redefinition, backtraces over live frames, introspection. Terminal client in `scm-cli`. | 0.6 | a socket client and the terminal client share one API with no divergence; a runaway form is interruptible; a backtrace names frames and spans |
 | **S9** ◇ | The rest of R7RS-small: chars/strings/Unicode, ports, bytevectors, `eval`, escape continuations, `dynamic-wind`. | 0.6 | conformance ≥ 95% of the declared subset, every failure individually explained |
 | **S10** ◇ | Precompiled stdlib image; the boot budget. | 0.3 | `scm -e '(values)'` < 10 ms in CI |
