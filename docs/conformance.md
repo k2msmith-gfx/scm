@@ -14,9 +14,9 @@ forms:          1191
 unreadable:       19
 forms aborted:    37
 
-tests passed:    624
-tests failed:    519
-conformance:    54.6% of 1143 assertions reached
+tests passed:    675
+tests failed:    468
+conformance:    59.1% of 1143 assertions reached
 ```
 
 Note the denominator moved. Ports did not only make assertions *pass*, they
@@ -30,7 +30,8 @@ used to take all of its tests with it, and aborted forms went 150 → 37. So
 | after the three bugs below | 432 | 45.9% |
 | after `quasiquote` | 439 | 46.6% |
 | after `guard`/`raise` | 457 | 48.5% |
-| after ports | **624** | **54.6%** |
+| after ports | 624 | 54.6% |
+| after multiple values | **675** | **59.1%** |
 
 `quasiquote` gained exactly the 7 assertions the table below predicted, which
 is a useful calibration: the priority list can be trusted to be roughly
@@ -83,7 +84,7 @@ Counted by how many assertions each absence costs:
 | 1 | ~~231~~ | ~~**Ports**~~ — **done**, and it was the cheapest block per assertion of any of them: most of what the suite reaches through a port is the reader and writer that already existed, so this mostly *exposed* S1's work. +167 passing, +201 reachable |
 | 2 | 24 | **Bytevectors** — `bytevector`, `bytevector?`, `bytevector-append`, and the rest |
 | 3 | ~~11~~ | ~~**`guard`**~~ — **done**, and it gained 18 rather than the 11 predicted: it also unblocked the error-object tests |
-| 4 | ~20 | **Multiple values** — `call-with-values`, `define-values`, `let*-values`, and the 9 `test-values` entries |
+| 4 | ~~~20~~ | ~~**Multiple values**~~ — **done**, and it gained 51 rather than the ~20 predicted: `call-with-values` is reached by far more of the suite than the obvious entries |
 | 5 | ~~7~~ | ~~**`quasiquote`**~~ — **done**, and it gained exactly the 7 predicted |
 | 6 | 6 | **`call/cc`** — escape continuations are the §3.1 rung we committed to |
 | 7 | ~45 | **A long tail of absent procedures**, each cheap: `vector-copy!`, `vector-append`, `string-copy!`, `string-foldcase`, `string>=?`, `digit-value`, `list-copy`, `boolean=?`, `real?`, `rational?`, `char-ready?`, … |

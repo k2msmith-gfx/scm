@@ -431,3 +431,70 @@
       (if (eof-object? c)
           (list->string (reverse acc))
           (loop (cons c acc))))))
+
+;; ── multiple values ─────────────────────────────────────────────────────
+;;
+;; `call-with-values` is the primitive and everything here derives from it.
+;; `%vals` collects a producer's values as a list, which is what makes the
+;; binding forms expressible as macros.
+
+(define (%vals-of thunk) (call-with-values thunk list))
+
+(define-syntax %vals
+  (syntax-rules ()
+    [(_ expr) (call-with-values (lambda () expr) list)]))
+
+;; `let*-values` is the nesting expansion, and nesting IS its semantics: each
+;; expression may see the bindings of the ones before it.
+(define-syntax let*-values
+  (syntax-rules ()
+    [(_ () body ...) (let () body ...)]
+    [(_ ((formals expr) rest ...) body ...)
+     (call-with-values (lambda () expr)
+       (lambda formals (let*-values (rest ...) body ...)))]))
+
+;; `let-values` is NOT that: all the expressions are evaluated before any of
+;; the formals are bound. So each one's values are collected into a temporary
+;; first, and only then are the formals bound. The temporary is spelled `t` at
+;; every level and that is safe -- each recursive expansion renames it, which
+;; is hygiene doing real work rather than decoration.
+(define-syntax let-values
+  (syntax-rules ()
+    [(_ bindings body ...) (%lv () bindings body ...)]))
+
+(define-syntax %lv
+  (syntax-rules ()
+    [(_ (acc ...) () body ...) (%lv-bind (acc ...) body ...)]
+    [(_ (acc ...) ((formals expr) rest ...) body ...)
+     (let ([t (%vals expr)])
+       (%lv (acc ... (formals t)) (rest ...) body ...))]))
+
+(define-syntax %lv-bind
+  (syntax-rules ()
+    [(_ () body ...) (let () body ...)]
+    [(_ ((formals t) rest ...) body ...)
+     (apply (lambda formals (%lv-bind (rest ...) body ...)) t)]))
+
+;; `define-values` defines at the current level, so it cannot be a `lambda`
+;; binding -- the names are defined first and then assigned.
+(define-syntax define-values
+  (syntax-rules ()
+    [(_ (var ...) expr)
+     (begin
+       (define var #f) ...
+       (%set-each! (var ...) (%vals expr)))]))
+
+(define-syntax %set-each!
+  (syntax-rules ()
+    [(_ () vals) (if #f #f)]
+    [(_ (v rest ...) vals)
+     (let ([vs vals])
+       (set! v (car vs))
+       (%set-each! (rest ...) (cdr vs)))]))
+
+;; SRFI-8, which reads better than let-values for the one-binding case and
+;; which a model will reach for.
+(define-syntax receive
+  (syntax-rules ()
+    [(_ formals expr body ...)
+     (call-with-values (lambda () expr) (lambda formals body ...))]))

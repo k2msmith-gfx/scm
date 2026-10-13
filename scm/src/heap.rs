@@ -97,6 +97,15 @@ pub enum Obj {
         kind: ErrorKind,
     },
     Port { kind: PortKind, open: bool },
+    /// Several values travelling together, as produced by `(values a b)`.
+    ///
+    /// One value is *not* wrapped -- `(values x)` is `x` -- so this object
+    /// only exists for zero or two-or-more, and only `call-with-values`
+    /// unpacks it. R7RS says it is an error for it to reach a continuation
+    /// wanting a single value; here it would arrive as an opaque object
+    /// instead, so the printer makes it visible rather than letting it look
+    /// like something ordinary.
+    Values(Vec<Value>),
     /// A pseudo-random generator's state. Mutable, and reachable only through
     /// a parameter, so `parameterize` can rebind it the way ray's `:ray-rng`
     /// does -- which is what makes a `:seed` replayable.
@@ -410,6 +419,7 @@ impl Engine {
                         work.push(*irritants);
                     }
                     Obj::Port { .. } => {}
+                    Obj::Values(vs) => work.extend(vs.iter().copied()),
                     Obj::Str(_) | Obj::Bytevector(_) | Obj::Rng(_) => {}
                 },
             }

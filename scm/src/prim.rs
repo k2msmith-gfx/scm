@@ -338,6 +338,16 @@ fn is_symbol(_e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Bool(matches!(one("symbol?", a)?, Value::Symbol(_))))
 }
 
+/// `(values obj …)`. One value is not wrapped: `(values x)` IS `x`, so a
+/// procedure that returns normally and one that returns a single value are
+/// indistinguishable, which is what R7RS requires.
+fn values_prim(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [v] => Ok(*v),
+        _ => Ok(e.alloc(Obj::Values(a.to_vec()))),
+    }
+}
+
 #[allow(dead_code)]
 /// A placeholder: `apply` is recognised by the VM before a primitive is ever
 /// called, because a primitive cannot reach the control stack to call
@@ -1810,6 +1820,8 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("keyword?", is_keyword);
     vm.define_prim("symbol?", is_symbol);
     vm.define_prim("apply", apply_placeholder);
+    vm.define_prim("values", values_prim);
+    vm.define_prim("call-with-values", apply_placeholder);
     vm.define_prim("sin", p_sin);
     vm.define_prim("cos", p_cos);
     vm.define_prim("tan", p_tan);

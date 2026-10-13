@@ -129,6 +129,9 @@ enum Frame {
     },
     /// The body of a `%parameterize` has returned; put the old values back.
     ParamRestore { count: usize },
+    /// A `call-with-values` producer has been applied; this is the consumer
+    /// waiting for its values.
+    ConsumeValues { consumer: Value },
     /// A `%try` is in progress. On a normal return this yields
     /// `(#t . value)`; on an error the unwind finds this frame and yields
     /// `(#f . message)` instead.
@@ -185,6 +188,10 @@ impl Frame {
                 return;
             }
             Frame::ParamRestore { .. } | Frame::Catch { .. } => return,
+            Frame::ConsumeValues { consumer } => {
+                out.push(*consumer);
+                return;
+            }
             Frame::Defaults {
                 todo, body, env, ..
             } => {
@@ -260,6 +267,7 @@ pub struct Vm {
     /// its arguments and deliberately cannot reach the control stack, so it
     /// has no way to call anything. It is recognised here instead.
     apply_prim: Option<PrimId>,
+    call_with_values_prim: Option<PrimId>,
 }
 
 struct SpecialForms {
@@ -334,12 +342,17 @@ impl Vm {
             param_values: Vec::new(),
             param_bindings: Vec::new(),
             apply_prim: None,
+            call_with_values_prim: None,
         };
         crate::prim::install(&mut vm);
         {
             let sym = vm.engine.interner.symbol("apply");
             if let Some(Value::Primitive(id)) = vm.global(sym) {
                 vm.apply_prim = Some(id);
+            }
+            let sym = vm.engine.interner.symbol("call-with-values");
+            if let Some(Value::Primitive(id)) = vm.global(sym) {
+                vm.call_with_values_prim = Some(id);
             }
         }
         // The derived forms are Scheme, not Rust. Compiling them at every
@@ -671,7 +684,8 @@ impl Vm {
                 | Obj::Parameter { .. }
                 | Obj::Rng(_)
                 | Obj::ErrorObj { .. }
-                | Obj::Port { .. } => Ok(Step::Return(expr)),
+                | Obj::Port { .. }
+                | Obj::Values(_) => Ok(Step::Return(expr)),
                 Obj::Pair(car, cdr) => {
                     // A macro use is expanded before anything else is decided
                     // about the form, and only when nothing shadows its name.
@@ -1258,6 +1272,19 @@ impl Vm {
                 self.push(Frame::ParamRestore { count });
                 Ok(self.enter_body(body, env))
             }
+            Frame::ConsumeValues { consumer } => {
+                // One value arrives unwrapped, so a producer that returned
+                // normally and one that said `(values x)` are the same thing
+                // -- which is what R7RS requires.
+                let args = match v {
+                    Value::Obj(r) => match self.engine.obj(r) {
+                        Obj::Values(vs) => vs.clone(),
+                        _ => vec![v],
+                    },
+                    _ => vec![v],
+                };
+                self.apply(consumer, args)
+            }
             Frame::Catch { .. } => {
                 let ok = Value::Bool(true);
                 let pair = self.engine.cons(ok, v);
@@ -1336,6 +1363,22 @@ impl Vm {
             };
             args.extend(spread);
             return self.apply(f, args);
+        }
+        // `(call-with-values producer consumer)`: apply the producer with no
+        // arguments, then hand whatever it produced to the consumer. It has
+        // to be recognised here rather than be a primitive for the same
+        // reason `apply` does -- a PrimFn cannot call anything.
+        if let Value::Primitive(id) = callee
+            && Some(id) == self.call_with_values_prim
+        {
+            return match args.as_slice() {
+                [producer, consumer] => {
+                    let (producer, consumer) = (*producer, *consumer);
+                    self.push(Frame::ConsumeValues { consumer });
+                    self.apply(producer, Vec::new())
+                }
+                _ => Err(self.err("call-with-values: expects a producer and a consumer")),
+            };
         }
         // A parameter object is callable: `(p)` reads it, `(p v)` sets the
         // current binding.

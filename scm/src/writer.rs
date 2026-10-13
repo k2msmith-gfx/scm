@@ -106,6 +106,14 @@ fn print(e: &Engine, v: Value, quoted: bool, out: &mut String) {
             Obj::Rng(_) => out.push_str("#<random-source>"),
             // Printed as the message it carries, so `(display e)` in a
             // handler reads the way a person would expect.
+            Obj::Values(vs) => {
+                out.push_str("#<values");
+                for &v in vs {
+                    out.push(' ');
+                    print(e, v, quoted, out);
+                }
+                out.push('>');
+            }
             Obj::Port { kind, .. } => {
                 out.push_str(match kind {
                     crate::heap::PortKind::StringIn { .. } => "#<input-port string>",

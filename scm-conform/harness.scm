@@ -71,12 +71,12 @@
 (define (%test-error label r)
   (if (car r) (%fail! label "expected an error, got a value") (%pass!)))
 
-;; Multiple values do not exist yet, so these record honestly rather than
-;; pretending. That is a real gap and the number should show it.
+;; `test-values` compares the whole value lists, which is what makes a
+;; zero-value or three-value producer distinguishable from a one-value one.
 (define-syntax test-values
   (syntax-rules ()
-    [(_ expected expr) (%fail! 'expr "multiple values are not implemented")]
-    [(_ name expected expr) (%fail! name "multiple values are not implemented")]))
+    [(_ expected expr) (%test-1 'expr (%try (%vals expected)) (%try (%vals expr)))]
+    [(_ name expected expr) (%test-1 name (%try (%vals expected)) (%try (%vals expr)))]))
 
 (define-syntax test-begin
   (syntax-rules ()
