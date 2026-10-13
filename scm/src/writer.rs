@@ -261,6 +261,8 @@ fn emit(
             Obj::Env { .. } => out.push_str("#<environment>"),
             Obj::Parameter { .. } => out.push_str("#<parameter>"),
             Obj::Rng(_) => out.push_str("#<random-source>"),
+            Obj::Continuation { .. } => out.push_str("#<continuation>"),
+            Obj::Macro(_) => out.push_str("#<macro>"),
             Obj::Values(vs) => {
                 out.push_str("#<values");
                 stack.push(Job::Text(">"));

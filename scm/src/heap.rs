@@ -126,6 +126,33 @@ pub enum Obj {
     /// instead, so the printer makes it visible rather than letting it look
     /// like something ordinary.
     Values(Vec<Value>),
+    /// A macro bound by `let-syntax` or `letrec-syntax`.
+    ///
+    /// A *local* macro lives in the ordinary environment chain, as a value,
+    /// which is what gives `let-syntax` correct lexical scoping **for free**:
+    /// a closure made in the body captures the frame holding the macro, so
+    /// the macro is still there when the closure is called later. The
+    /// alternative -- installing into the global table and removing it after
+    /// -- would be dynamic scoping wearing a lexical form's clothes, and
+    /// `(let-syntax ((m …)) (lambda () (m)))` would break the moment it
+    /// escaped.
+    Macro(Rc<crate::syntax::SyntaxRules>),
+    /// An **escape** continuation, as captured by
+    /// `call-with-current-continuation`.
+    ///
+    /// Plan §3.1 settled continuations as a three-rung ladder and committed
+    /// to this rung: escape-only, which is what `call/cc` is used for in
+    /// practice -- early exit from a loop, a non-local return, the
+    /// `with-exception-handler` escape the suite tests. A re-entrant
+    /// continuation would need the control stack copied, and the explicit
+    /// stack (§5) makes that *possible* later without making it necessary
+    /// now.
+    ///
+    /// `id` is what makes "escaped its extent" detectable: the stack depth
+    /// alone would be ambiguous, since an unrelated call can reach the same
+    /// depth later. Invoking a continuation searches the live stack for its
+    /// mark, and not finding one is an error rather than a wild jump.
+    Continuation { id: u64 },
     /// A pseudo-random generator's state. Mutable, and reachable only through
     /// a parameter, so `parameterize` can rebind it the way ray's `:ray-rng`
     /// does -- which is what makes a `:seed` replayable.
@@ -300,7 +327,19 @@ pub struct Engine {
     /// macro was defined. Consulted only when a name is not lexically bound,
     /// which is what gives a template both hygiene and referential
     /// transparency -- see `syntax.rs`.
-    aliases: HashMap<SymId, SymId>,
+    /// A renamed template identifier, and **where it meant something**.
+    ///
+    /// The env is what `let-syntax` needs: a top-level macro's definition
+    /// environment is the globals, so `None` covers every macro there was
+    /// until now -- but a local macro's template may refer to a *local*
+    /// binding, and `(let ((x 'outer)) (let-syntax ((m … x)) (let ((x
+    /// 'inner)) (m))))` must give `outer`. Referential transparency is the
+    /// half of hygiene that this is.
+    ///
+    /// The envs here are GC roots, which keeps a local macro's definition
+    /// frame alive for as long as its alias exists. That is a real cost and
+    /// it is bounded the same way the alias table itself is.
+    aliases: HashMap<SymId, (SymId, Option<ObjRef>)>,
     pub interner: Interner,
     prim_names: Vec<String>,
 }
@@ -422,6 +461,13 @@ impl Engine {
         let mut work: Vec<Value> = Vec::with_capacity(roots.len() + self.handles.len());
         work.extend_from_slice(roots);
         work.extend(self.handles.iter().flatten().copied());
+        // A local macro's definition frame has to outlive its expansion, so
+        // the environments recorded beside the aliases are roots.
+        work.extend(
+            self.aliases
+                .values()
+                .filter_map(|&(_, env)| env.map(Value::Obj)),
+        );
 
         while let Some(v) = work.pop() {
             let Value::Obj(r) = v else { continue };
@@ -474,7 +520,16 @@ impl Engine {
                     }
                     Obj::Port { .. } => {}
                     Obj::Values(vs) => work.extend(vs.iter().copied()),
-                    Obj::Str(_) | Obj::Bytevector(_) | Obj::Rng(_) => {}
+                    // A macro's patterns and templates are heap data, so
+                    // they must be traced -- this is the `macro_roots` bug
+                    // again, and gc stress is what caught it the first time.
+                    Obj::Macro(m) => m.trace(&mut work),
+                    // A continuation holds an id, not a value, so it marks
+                    // nothing.
+                    Obj::Str(_)
+                    | Obj::Bytevector(_)
+                    | Obj::Rng(_)
+                    | Obj::Continuation { .. } => {}
                 },
             }
         }
@@ -560,8 +615,13 @@ impl Engine {
 
     // ---- macro renaming -------------------------------------------------
 
-    pub fn set_alias(&mut self, fresh: SymId, original: SymId) {
-        self.aliases.insert(fresh, original);
+    pub fn set_alias(&mut self, fresh: SymId, original: SymId, def_env: Option<ObjRef>) {
+        self.aliases.insert(fresh, (original, def_env));
+    }
+
+    /// Where a renamed identifier's name meant what it meant.
+    pub fn alias_env(&self, sym: SymId) -> Option<Option<ObjRef>> {
+        self.aliases.get(&sym).map(|&(_, env)| env)
     }
 
     /// Follow a renamed identifier back to what it meant at the macro's
@@ -570,7 +630,7 @@ impl Engine {
         // A chain can form when a macro expands into another macro's output.
         for _ in 0..64 {
             match self.aliases.get(&sym) {
-                Some(&next) if next != sym => sym = next,
+                Some(&(next, _)) if next != sym => sym = next,
                 _ => return sym,
             }
         }

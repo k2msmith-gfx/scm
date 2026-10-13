@@ -206,6 +206,9 @@ enum Frame {
     /// `param_depth` is recorded because a caught error still has to restore
     /// whatever `parameterize` installed inside the `%try`.
     Catch { param_depth: usize },
+    /// Where an escape continuation returns to. Pushed by `call/cc` and
+    /// popped when its argument returns normally.
+    ContMark { id: u64, param_depth: usize },
     /// An element of a `[…]` vector is being evaluated. This is the whole
     /// reason the reader keeps a `bracket` flag: a bracket vector *evaluates*
     /// its elements, where `#(…)` is a constant (plan §4.5).
@@ -266,7 +269,9 @@ impl Frame {
                 }
                 return;
             }
-            Frame::ParamRestore { .. } | Frame::Catch { .. } => return,
+            Frame::ParamRestore { .. } | Frame::Catch { .. } | Frame::ContMark { .. } => {
+                return;
+            }
             Frame::ConsumeValues { consumer } => {
                 out.push(*consumer);
                 return;
@@ -422,6 +427,8 @@ pub struct Vm {
     apply_prim: Option<PrimId>,
     call_with_values_prim: Option<PrimId>,
     eval_prim: Option<PrimId>,
+    callcc_prim: Option<PrimId>,
+    next_cont_id: u64,
 }
 
 struct SpecialForms {
@@ -433,6 +440,8 @@ struct SpecialForms {
     let_: SymId,
     begin: SymId,
     define_syntax: SymId,
+    let_syntax: SymId,
+    letrec_syntax: SymId,
     parameterize: SymId,
     try_: SymId,
     quasiquote: SymId,
@@ -501,6 +510,8 @@ impl Vm {
             let_: engine.interner.symbol("let"),
             begin: engine.interner.symbol("begin"),
             define_syntax: engine.interner.symbol("define-syntax"),
+            let_syntax: engine.interner.symbol("let-syntax"),
+            letrec_syntax: engine.interner.symbol("letrec-syntax"),
             parameterize: engine.interner.symbol("%parameterize"),
             try_: engine.interner.symbol("%try"),
             quasiquote: engine.interner.symbol("quasiquote"),
@@ -536,6 +547,8 @@ impl Vm {
             apply_prim: None,
             call_with_values_prim: None,
             eval_prim: None,
+            callcc_prim: None,
+            next_cont_id: 1,
         };
         crate::prim::install(&mut vm);
         {
@@ -550,6 +563,10 @@ impl Vm {
             let sym = vm.engine.interner.symbol("eval");
             if let Some(Value::Primitive(id)) = vm.global(sym) {
                 vm.eval_prim = Some(id);
+            }
+            let sym = vm.engine.interner.symbol("call-with-current-continuation");
+            if let Some(Value::Primitive(id)) = vm.global(sym) {
+                vm.callcc_prim = Some(id);
             }
         }
         // The derived forms are Scheme, not Rust. Compiling them at every
@@ -887,7 +904,19 @@ impl Vm {
             ticks += 1;
             if ticks >= 1024 {
                 ticks = 0;
-                self.safepoint(&step)?;
+                // `?` here would return WITHOUT capturing a backtrace, so a
+                // client got the *previous* failure's frames -- an interrupt
+                // reported where the last error happened, which is worse
+                // than reporting nothing. Found by driving the REPL protocol
+                // over a socket and reading what came back.
+                //
+                // And a backtrace is exactly what C-c should give you:
+                // "where was it when I stopped it" is the question being
+                // asked.
+                if let Err(e) = self.safepoint(&step) {
+                    self.last_backtrace = self.capture_backtrace(base);
+                    return Err(e);
+                }
             }
 
             let outcome = match step {
@@ -1106,10 +1135,40 @@ impl Vm {
                 | Obj::Env { .. }
                 | Obj::Parameter { .. }
                 | Obj::Rng(_)
+                | Obj::Continuation { .. }
+                | Obj::Macro(_)
                 | Obj::ErrorObj { .. }
                 | Obj::Port { .. }
                 | Obj::Values(_) => Ok(Step::Return(expr)),
                 Obj::Pair(car, cdr) => {
+                    // A LOCAL macro, from `let-syntax`. It lives in the
+                    // ordinary environment chain, so finding it is the same
+                    // lookup that finds a variable -- and a local variable
+                    // still shadows a macro, because whichever is nearer in
+                    // the chain is the one found.
+                    // A local macro is a VALUE in the environment, so the
+                    // ordinary `lookup` finds it -- including *through a
+                    // rename*, which is what lets a `letrec-syntax` macro
+                    // call itself: its template's own name is renamed, and
+                    // resolving that rename in its definition environment
+                    // lands back on the macro.
+                    if let Value::Symbol(head) = car
+                        && let Some(Value::Obj(mr)) = self.lookup(head, env)
+                        && let Obj::Macro(rules) = self.engine.obj(mr)
+                    {
+                        let rules = Rc::clone(rules);
+                        self.expansions += 1;
+                        if self.expansions > 10_000 {
+                            return Err(self.err(format!(
+                                "macro expansion of {} did not terminate (10,000 expansions with no value produced)",
+                                self.engine.interner.sym_name(self.engine.resolve(head))
+                            )));
+                        }
+                        let out = rules
+                            .expand(&mut self.engine, expr)
+                            .map_err(VmError::Error)?;
+                        return Ok(Step::Eval(out, env));
+                    }
                     // A macro use is expanded before anything else is decided
                     // about the form, and only when nothing shadows its name.
                     if let Value::Symbol(head) = car
@@ -1202,6 +1261,49 @@ impl Vm {
                     Ok(Some(Step::Return(v)))
                 }
             };
+        }
+        if head == s.let_syntax || head == s.letrec_syntax {
+            // The two differ in exactly one place, and it is not cosmetic:
+            // a `letrec-syntax` macro's *definition environment* is the new
+            // frame, so a recursive reference in its own template resolves
+            // to itself. `my-or` expanding to `(my-or e2 ...)` is the whole
+            // point of the form, and with `let-syntax`'s enclosing
+            // environment that reference is unbound.
+            let recursive = head == s.letrec_syntax;
+            let who = if recursive { "letrec-syntax" } else { "let-syntax" };
+            let Some((spec, body)) = args.split_first() else {
+                return Err(self.err(format!("{who}: expected a binding list")));
+            };
+            if body.is_empty() {
+                return Err(self.err(format!("{who}: expected a body")));
+            }
+            let bindings = self.binding_items(*spec)?;
+            let mut names: Vec<(SymId, Value)> = Vec::with_capacity(bindings.len());
+            for b in &bindings {
+                let parts = self.binding_items(*b)?;
+                let [Value::Symbol(name), rules] = parts.as_slice() else {
+                    return Err(
+                        self.err(format!("{who}: each binding is (name (syntax-rules …))"))
+                    );
+                };
+                names.push((*name, *rules));
+            }
+            // The frame exists before the rules are parsed, so `recursive`
+            // has something to point at.
+            let slots: Vec<(SymId, Value)> =
+                names.iter().map(|&(n, _)| (n, Value::Unspecified)).collect();
+            let new_env = self.engine.env(env, slots);
+            let def_env = if recursive { Some(new_env) } else { env };
+            for (i, &(name, rules)) in names.iter().enumerate() {
+                let parsed = SyntaxRules::parse(&mut self.engine, name, rules, def_env)
+                    .map_err(VmError::Error)?;
+                let m = self.engine.alloc(Obj::Macro(Rc::new(parsed)));
+                if let Obj::Env { slots, .. } = self.engine.obj_mut(new_env) {
+                    slots[i].1 = m;
+                }
+            }
+            let body = Rc::new(body.to_vec());
+            return Ok(Some(self.enter_body(body, Some(new_env))));
         }
         if head == s.let_ {
             return self.let_form(args, env).map(Some);
@@ -1848,6 +1950,9 @@ impl Vm {
                 }
                 self.finish_let(name, vars, done, body, env)
             }
+            // `call/cc`'s argument returned normally, so the mark is spent
+            // and the value passes straight through.
+            Frame::ContMark { .. } => Ok(Step::Return(v)),
             Frame::Assign { sym, define, env } => {
                 self.bind(sym, v, define, env)?;
                 Ok(Step::Return(Value::Unspecified))
@@ -1998,6 +2103,50 @@ impl Vm {
                 [form] | [form, _] => Ok(Step::Eval(*form, None)),
                 _ => Err(self.err("eval: expects an expression and an optional environment")),
             };
+        }
+        // `(call/cc f)`. Recognised here rather than being a primitive for
+        // the same reason `apply` is: a `PrimFn` cannot call anything.
+        if let Value::Primitive(id) = callee
+            && Some(id) == self.callcc_prim
+        {
+            let [f] = args.as_slice() else {
+                return Err(self.err("call/cc: expects one procedure"));
+            };
+            let f = *f;
+            let id = self.next_cont_id;
+            self.next_cont_id += 1;
+            let param_depth = self.param_bindings.len();
+            self.push(Frame::ContMark { id, param_depth });
+            let k = self.engine.alloc(Obj::Continuation { id });
+            return self.apply(f, vec![k]);
+        }
+        // Invoking an escape continuation: unwind to its mark and return the
+        // value there.
+        if let Value::Obj(r) = callee
+            && let Obj::Continuation { id } = *self.engine.obj(r)
+        {
+            let v = match args.len() {
+                0 => Value::Unspecified,
+                1 => args[0],
+                _ => self.engine.alloc(Obj::Values(args)),
+            };
+            let found = self
+                .stack
+                .iter()
+                .rposition(|f| matches!(f, Frame::ContMark { id: i, .. } if *i == id));
+            let Some(at) = found else {
+                // The extent is gone, so there is nowhere to return to. An
+                // error beats jumping somewhere plausible.
+                return Err(self.err(
+                    "this continuation has escaped its extent (continuations are escape-only, plan §3.1)",
+                ));
+            };
+            let Frame::ContMark { param_depth, .. } = self.stack[at] else {
+                unreachable!("found a ContMark")
+            };
+            self.stack.truncate(at);
+            self.restore_params(param_depth);
+            return Ok(Step::Return(v));
         }
         // `(call-with-values producer consumer)`: apply the producer with no
         // arguments, then hand whatever it produced to the consumer. It has
@@ -2233,6 +2382,15 @@ impl Vm {
         // environment; for a top-level macro the globals are that environment.
         let resolved = self.engine.resolve(sym);
         if resolved != sym {
+            // A `let-syntax` macro's definition environment is *local*, so
+            // the name has to be looked up there before the globals. This is
+            // the case the comment above predicted: "the alias will have to
+            // carry its own environment", and now it does.
+            if let Some(def_env @ Some(_)) = self.engine.alias_env(sym)
+                && let Some(v) = self.lookup_exact(resolved, def_env)
+            {
+                return Some(v);
+            }
             return self.global(resolved);
         }
         None

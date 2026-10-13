@@ -40,6 +40,7 @@ use std::rc::Rc;
 use crate::heap::{Engine, Obj};
 use crate::value::{ObjRef, SymId, Value};
 
+#[derive(Debug)]
 pub struct SyntaxRules {
     pub name: SymId,
     literals: Vec<SymId>,
@@ -548,7 +549,7 @@ impl SyntaxRules {
         }
         let base = e.interner.sym_name(sym).to_string();
         let fresh = e.interner.fresh(&base);
-        e.set_alias(fresh, sym);
+        e.set_alias(fresh, sym, self.def_env);
         renames.insert(sym, fresh);
         fresh
     }

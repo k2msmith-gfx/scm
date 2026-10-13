@@ -3053,6 +3053,11 @@ fn named_arg(who: &str, a: &[Value]) -> Result<Option<SymId>, VmError> {
     }
 }
 
+/// Reached only if `Vm::apply` stopped recognising `call/cc`.
+fn callcc_placeholder(_e: &mut Engine, _a: &[Value]) -> PResult {
+    Err(err("call/cc: not dispatched by the machine"))
+}
+
 pub fn install(vm: &mut Vm) {
     vm.define_prim("+", add);
     vm.define_prim("-", sub);
@@ -3081,6 +3086,9 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("keyword?", is_keyword);
     vm.define_prim("symbol?", is_symbol);
     vm.define_prim("apply", apply_placeholder);
+    // Recognised by `Vm::apply`, which is why the body here is unreachable:
+    // a PrimFn cannot call a procedure, and call/cc's whole job is to.
+    vm.define_prim("call-with-current-continuation", callcc_placeholder);
     vm.define_prim("values", values_prim);
     vm.define_prim("call-with-values", apply_placeholder);
     vm.define_prim("eval", apply_placeholder);

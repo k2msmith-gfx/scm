@@ -1,6 +1,6 @@
 # scm-conform/suites/r7rs-tests.scm
 
-passed 1078, failed 88
+passed 1093, failed 82
 
 ## unreadable forms
 
@@ -27,13 +27,7 @@ passed 1078, failed 88
 ## forms that raised outside a test
 
 - line 231: exact-integer-sqrt: expects a non-negative exact integer
-- line 540: unbound variable: let-syntax
-- line 569: unbound variable: let-syntax
-- line 585: unbound variable: let-syntax
 - line 853: exact: 1.1102230246251565e-15 would need an exact rational (the `ratios` feature is absent)
-- line 1912: unbound variable: call-with-current-continuation
-- line 1917: unbound variable: call-with-current-continuation
-- line 1922: unbound variable: call-with-current-continuation
 - line 2375: read: 0..3: `1/2`: exact rationals are not supported (the `ratios` feature is absent)
 - line 2376: read: 0..5: `1/2`: exact rationals are not supported (the `ratios` feature is absent)
 - line 2377: read: 0..4: `10/2`: exact rationals are not supported (the `ratios` feature is absent)
@@ -59,16 +53,12 @@ passed 1078, failed 88
 - 4.2 Derived expression types | (let*-values (((root rem) (exact-integer-sqrt (expt 2 120)))) (list root rem)) | raised: exact-integer-sqrt: expects a non-negative exact integer
 - 4.2 Derived expression types | (let*-values (((root rem) (exact-integer-sqrt (expt 2 121)))) (list root rem)) | raised: exact-integer-sqrt: expects a non-negative exact integer
 - 4.2 Derived expression types | (dead-clause) | raised: #<procedure> expects 1 required argument, got 0
-- 4.3 Macros | (let-syntax ((when (syntax-rules () ((when test stmt1 stmt2 ...) (if test (begin stmt1 stmt2 ...)))))) (let ((if #t)) (when if (set! if 'now)) if)) | raised: unbound variable: let-syntax
-- 4.3 Macros | (let ((x 'outer)) (let-syntax ((m (syntax-rules () ((m) x)))) (let ((x 'inner)) (m)))) | raised: unbound variable: let-syntax
-- 4.3 Macros | (letrec-syntax ((my-or (syntax-rules () ((my-or) #f) ((my-or e) e) ((my-or e1 e2 ...) (let ((temp e1)) (if temp temp (my-or e2 ...))))))) (let ((x #f) (y 7) (temp 8) (let odd?) (if even?)) (my-or x (let temp) (if y) y))) | raised: unbound variable: letrec-syntax
 - 4.3 Macros | (sequence3 2 3 4 5) | raised: no matching syntax rule for sequence3
 - 4.3 Macros | (list (count-to-2_ _ _) (count-to-2_) (count-to-2_ a b) (count-to-2_ a b c d)) | want (2 0 fail fail), got (2 0 2 fail)
-- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1264
+- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1280
 - 4.3 Macros | (let ((=> #f)) (cond (#t => 'ok))) | raised: not applicable: ok
-- 4.3 Macros | (quux399) | raised: unbound variable: bar399.1300
+- 4.3 Macros | (m k) | want bound-identifier=?, got free-identifier=?
 - 4.3 Macros | (elli-lit-1 100) | raised: elli-lit-1: `...` with no pattern variable to repeat
-- 4.3 Macros | (let-syntax ((m (syntax-rules (b) ((_ b ...) #t) ((_ . r) #f)))) (list (m c) (m b (c)) (m b b) (m))) | raised: unbound variable: let-syntax
 - 6.2 Numbers | (complex? 3+4i) | raised: unbound variable: complex?
 - 6.2 Numbers | (complex? 3) | raised: unbound variable: complex?
 - 6.2 Numbers | (real? -2.5+0i) | raised: unbound variable: -2.5+0i
@@ -103,14 +93,12 @@ passed 1078, failed 88
 - 6.6 Characters | (digit-value #\૦) | want 0, got #f
 - 6.7 Strings | (string-foldcase "Maß") | want "mass", got "maß"
 - 6.7 Strings | (string-foldcase "ſ") | want "s", got "ſ"
-- 6.10 Control Features | (call-with-current-continuation procedure?) | raised: unbound variable: call-with-current-continuation
-- 6.10 Control Features | (call-with-current-continuation (lambda (exit) (for-each (lambda (x) (if (negative? x) (exit x))) '(54 0 37 -3 245 19)) #t)) | raised: unbound variable: call-with-current-continuation
-- 6.10 Control Features | (list-length '(1 2 3 4)) | raised: unbound variable: call-with-current-continuation
-- 6.10 Control Features | (list-length '(a b . c)) | raised: unbound variable: call-with-current-continuation
+- 6.10 Control Features | (call-with-current-continuation procedure?) | want #t, got #f
 - 6.10 Control Features | (let ((path '()) (c #f)) (let ((add (lambda (s) (set! path (cons s path))))) (dynamic-wind (lambda () (add 'connect)) (lambda () (add (call-with-current-continuation (lambda (c0) (set! c c0) 'talk1)))) (lambda () (add 'disconnect))) (if (< (length path) 4) (c 'talk2) (reverse path)))) | raised: unbound variable: dynamic-wind
-- 6.11 Exceptions | (test-exception-handler-1 5) | raised: unbound variable: call-with-current-continuation
-- 6.11 Exceptions | (test-exception-handler-1 -1) | raised: unbound variable: call-with-current-continuation
-- 6.11 Exceptions | something-went-wrong | want ("condition: " an-error), got #f
+- 6.11 Exceptions | (get-output-string out) | want "", got "reraised 1!"
+- 6.11 Exceptions | value | want positive, got zero
+- 6.11 Exceptions | (get-output-string out) | want "", got "reraised -1!"
+- 6.11 Exceptions | value | want negative, got zero
 - 6.12 Environments and evaluation | (eval '(expt 2 10) (environment '(scheme base))) | raised: unbound variable: environment
 - 6.12 Environments and evaluation | (inexact (eval '(sin 0) (environment '(scheme inexact)))) | raised: unbound variable: environment
 - 6.12 Environments and evaluation | (eval '(+ (expt 2 10) (inexact (sin 0))) (environment '(scheme base) '(scheme inexact))) | raised: unbound variable: environment

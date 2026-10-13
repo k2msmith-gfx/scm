@@ -556,3 +556,41 @@ fn locations_do_not_accumulate_forever() {
         "locations are not pruned: peak {peak}, settled {settled}"
     );
 }
+
+#[test]
+fn stopping_a_runaway_says_where_it_was() {
+    // The host stopping a script used to return the PREVIOUS failure's
+    // backtrace, because `safepoint`'s `?` returned before the capture ran.
+    // A client was shown frames from an unrelated error, which is worse than
+    // being shown none. Found by driving the protocol over a socket and
+    // reading the replies rather than by a test.
+    //
+    // And it is the right thing to want: "where was it when I stopped it" is
+    // exactly the question C-c asks.
+    let mut s = Session::new().unwrap();
+
+    // First, an unrelated failure, to leave a backtrace lying around.
+    let (_, stale) = failed(&mut s, "(+ 0 (vector-ref (vector) 9))");
+    assert!(stale[0].contains("vector-ref"), "{stale:#?}");
+
+    // Now a runaway, stopped by the host.
+    s.interp_mut().set_fuel(Some(40_000));
+    let (msg, bt) = failed(
+        &mut s,
+        "(define (inner) (let loop () (loop)))\n\
+         (define (mid) (+ 0 (inner)))\n\
+         (define (outer) (* 1 (mid)))\n\
+         (outer)",
+    );
+    assert!(msg.contains("fuel"), "{msg}");
+    assert!(!bt.is_empty(), "a stopped runaway must say where it was");
+    assert!(
+        !bt.iter().any(|f| f.contains("vector-ref")),
+        "the previous failure's frames leaked: {bt:#?}"
+    );
+    // The innermost line is the loop it was actually spinning in, which a
+    // stack-only trace could not give: every call in that chain is a tail
+    // call.
+    assert!(bt[0].starts_with("(loop)"), "{bt:#?}");
+    assert!(bt.iter().any(|f| f.contains("(+ 0 (inner))")), "{bt:#?}");
+}
