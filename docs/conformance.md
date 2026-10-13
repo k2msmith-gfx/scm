@@ -23,7 +23,8 @@ conformance:    46.6% of 942 assertions reached
 |---|---|---|
 | first run | 419 | 44.5% |
 | after the three bugs below | 432 | 45.9% |
-| after `quasiquote` | **439** | **46.6%** |
+| after `quasiquote` | 439 | 46.6% |
+| after `guard`/`raise` | **457** | **48.5%** |
 
 `quasiquote` gained exactly the 7 assertions the table below predicted, which
 is a useful calibration: the priority list can be trusted to be roughly
@@ -75,7 +76,7 @@ Counted by how many assertions each absence costs:
 |---|---|---|
 | 1 | **231** | **Ports.** `read` (66 assertions, 165 aborted forms), `open-output-string` (16), `open-input-string`, `eof-object?`. This is `(scheme read)` and `(scheme write)` and it is by a wide margin the largest single block |
 | 2 | 24 | **Bytevectors** — `bytevector`, `bytevector?`, `bytevector-append`, and the rest |
-| 3 | 11 | **`guard`** — exceptions. `%try` exists now as the mechanism (see below) but `guard`/`raise`/`with-exception-handler` do not |
+| 3 | ~~11~~ | ~~**`guard`**~~ — **done**, and it gained 18 rather than the 11 predicted: it also unblocked the error-object tests |
 | 4 | ~20 | **Multiple values** — `call-with-values`, `define-values`, `let*-values`, and the 9 `test-values` entries |
 | 5 | ~~7~~ | ~~**`quasiquote`**~~ — **done**, and it gained exactly the 7 predicted |
 | 6 | 6 | **`call/cc`** — escape continuations are the §3.1 rung we committed to |

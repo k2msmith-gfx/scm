@@ -31,8 +31,8 @@
 
 (define (%test-1 label expected actual)
   (cond
-    [(not (car expected)) (%fail! label (string-append "expected-expr raised: " (cdr expected)))]
-    [(not (car actual)) (%fail! label (string-append "raised: " (cdr actual)))]
+    [(not (car expected)) (%fail! label (format "expected-expr raised: ~a" (cdr expected)))]
+    [(not (car actual)) (%fail! label (format "raised: ~a" (cdr actual)))]
     [(%same? (cdr expected) (cdr actual)) (%pass!)]
     [else (%fail! label (format "want ~s, got ~s" (cdr expected) (cdr actual)))]))
 
@@ -56,11 +56,12 @@
     [(_ name expr) (%test-assert name (%try expr))]))
 
 (define (%test-assert label r)
-  (cond [(not (car r)) (%fail! label (string-append "raised: " (cdr r)))]
+  (cond [(not (car r)) (%fail! label (format "raised: ~a" (cdr r)))]
         [(cdr r) (%pass!)]
         [else (%fail! label "expected a true value")]))
 
-;; `test-error` passes when the expression *does* raise.
+;; `test-error` passes when the expression *does* raise. The condition is now
+;; an object rather than a string, so the report formats it with `~a`.
 (define-syntax test-error
   (syntax-rules ()
     [(_ expr) (%test-error 'expr (%try expr))]

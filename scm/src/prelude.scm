@@ -335,3 +335,67 @@
 (define (with-seed seed thunk)
   (parameterize ([current-random-source (make-random-source seed)])
     (thunk)))
+
+;; ── exceptions ──────────────────────────────────────────────────────────
+;;
+;; `guard` is built on `%try`, which catches a condition and hands it back as
+;; `(#f . condition)`. `with-exception-handler` is different in kind: its
+;; handler runs *at the raise point*, before any unwinding, so it cannot be
+;; built on a catch. It works instead by keeping the handler stack in a
+;; parameter and having `raise` call the top of it — which means the whole of
+;; it is ordinary Scheme, and `parameterize`'s unwind behaviour gives the
+;; "handler is removed while it runs" rule for free.
+
+(define %handlers (make-parameter '()))
+
+(define (with-exception-handler handler thunk)
+  (parameterize ([%handlers (cons handler (%handlers))])
+    (thunk)))
+
+;; `raise-continuable`: the handler's value becomes the value of the raise.
+(define (raise-continuable obj)
+  (let ([hs (%handlers)])
+    (if (null? hs)
+        (%raise obj)
+        (parameterize ([%handlers (cdr hs)])
+          ((car hs) obj)))))
+
+;; `raise`: non-continuable, so if the handler returns, that is itself an
+;; error -- R7RS says a secondary exception is raised in the same dynamic
+;; environment as the handler.
+(define (raise obj)
+  (let ([hs (%handlers)])
+    (if (null? hs)
+        (%raise obj)
+        (begin
+          (parameterize ([%handlers (cdr hs)])
+            ((car hs) obj))
+          (%raise obj)))))
+
+(define-syntax guard
+  (syntax-rules ()
+    [(_ (var clause ...) body ...)
+     (let ([r (%try (begin body ...))])
+       (if (car r)
+           (cdr r)
+           (let ([var (cdr r)])
+             (%guard-clauses var clause ...))))]))
+
+;; Like `cond`, except that falling off the end RE-RAISES rather than
+;; returning #f -- a `guard` that matches nothing must not swallow the
+;; condition.
+(define-syntax %guard-clauses
+  (syntax-rules (else =>)
+    [(_ var) (raise var)]
+    [(_ var (else body ...)) (begin body ...)]
+    [(_ var (test => proc) rest ...)
+     (let ([t test]) (if t (proc t) (%guard-clauses var rest ...)))]
+    [(_ var (test) rest ...)
+     (let ([t test]) (if t t (%guard-clauses var rest ...)))]
+    [(_ var (test body ...) rest ...)
+     (if test (begin body ...) (%guard-clauses var rest ...))]))
+
+;; `error-message` is not R7RS; it is what a readout wants, and it works on a
+;; raised object of any kind rather than only on an error object.
+(define (error-message obj)
+  (if (error-object? obj) (error-object-message obj) (format "~a" obj)))

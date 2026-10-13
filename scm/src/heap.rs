@@ -67,6 +67,13 @@ pub enum Obj {
         slot: usize,
         converter: Option<Value>,
     },
+    /// An error object (R7RS `error-object?`). Rust-originated refusals
+    /// become one of these when they are *caught*, so `guard` can ask them
+    /// for a message and irritants rather than being handed a bare string.
+    ErrorObj {
+        message: Value,
+        irritants: Value,
+    },
     /// A pseudo-random generator's state. Mutable, and reachable only through
     /// a parameter, so `parameterize` can rebind it the way ray's `:ray-rng`
     /// does -- which is what makes a `:seed` replayable.
@@ -367,6 +374,10 @@ impl Engine {
                         }
                     }
                     Obj::Parameter { converter, .. } => work.extend(converter.iter().copied()),
+                    Obj::ErrorObj { message, irritants } => {
+                        work.push(*message);
+                        work.push(*irritants);
+                    }
                     Obj::Str(_) | Obj::Bytevector(_) | Obj::Rng(_) => {}
                 },
             }

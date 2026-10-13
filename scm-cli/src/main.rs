@@ -161,6 +161,7 @@ fn describe(e: &VmError) -> String {
         VmError::Interrupted => "interrupted".into(),
         VmError::OutOfFuel => "out of fuel (raise or drop --fuel)".into(),
         VmError::OutOfMemory => "heap cap exceeded".into(),
+        VmError::Raised(_, text) => format!("error: {text}"),
         VmError::Error(msg) => format!("error: {msg}"),
     }
 }

@@ -35,6 +35,9 @@ pub enum VmError {
     /// the feature (requirement 8).
     Interrupted,
     OutOfFuel,
+    /// A Scheme object was raised. `text` is kept alongside it so `Display`
+    /// and the error paths that never see a heap do not need the engine.
+    Raised(Value, String),
     /// The host's heap cap was exceeded. An ordinary error at a safepoint, so
     /// a runaway scene is a failed evaluation and not a dead modeler.
     OutOfMemory,
@@ -47,6 +50,7 @@ impl std::fmt::Display for VmError {
             VmError::Interrupted => write!(f, "interrupted"),
             VmError::OutOfFuel => write!(f, "out of fuel"),
             VmError::OutOfMemory => write!(f, "heap cap exceeded"),
+            VmError::Raised(_, text) => write!(f, "{text}"),
             VmError::Error(m) => write!(f, "{m}"),
         }
     }
@@ -467,16 +471,21 @@ impl Vm {
         out
     }
 
-    /// Find the nearest `%try` and hand it the error, or propagate.
+    /// Find the nearest `%try` and hand it the condition, or propagate.
+    ///
+    /// A raised value is briefly held only in the `VmError`, which is not a
+    /// GC root -- and that is safe because propagation is immediate: no
+    /// safepoint, and therefore no collection, can happen between the raise
+    /// and the catch.
     ///
     /// **Interrupt, out-of-fuel and out-of-memory are deliberately not
     /// catchable.** They are the host saying stop, and a script that could
     /// swallow them would defeat requirement 8 -- `(%try (spin))` must not be
     /// a way to ignore `C-c`.
     fn unwind_to_catch(&mut self, base: usize, e: VmError) -> VResult<Option<Step>> {
-        let VmError::Error(ref msg) = e else {
+        if !matches!(e, VmError::Error(_) | VmError::Raised(..)) {
             return Err(e);
-        };
+        }
         let found = self.stack[base..]
             .iter()
             .rposition(|f| matches!(f, Frame::Catch { .. }));
@@ -485,11 +494,23 @@ impl Vm {
         let Frame::Catch { param_depth } = self.stack[at] else {
             unreachable!("found a Catch")
         };
-        let text = msg.clone();
         self.stack.truncate(at);
         self.restore_params(param_depth);
-        let m = self.engine.string(&text);
-        let pair = self.engine.cons(Value::Bool(false), m);
+        // What the condition *is*: a raised object as itself, and a
+        // Rust-originated refusal as an error object, so a handler can ask it
+        // for a message either way.
+        let condition = match e {
+            VmError::Raised(v, _) => v,
+            VmError::Error(text) => {
+                let message = self.engine.string(&text);
+                self.engine.alloc(Obj::ErrorObj {
+                    message,
+                    irritants: Value::Null,
+                })
+            }
+            _ => unreachable!("guarded above"),
+        };
+        let pair = self.engine.cons(Value::Bool(false), condition);
         Ok(Some(Step::Return(pair)))
     }
 
@@ -650,7 +671,8 @@ impl Vm {
                 Obj::Closure { .. }
                 | Obj::Env { .. }
                 | Obj::Parameter { .. }
-                | Obj::Rng(_) => Ok(Step::Return(expr)),
+                | Obj::Rng(_)
+                | Obj::ErrorObj { .. } => Ok(Step::Return(expr)),
                 Obj::Pair(car, cdr) => {
                     // A macro use is expanded before anything else is decided
                     // about the form, and only when nothing shadows its name.

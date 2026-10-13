@@ -236,12 +236,20 @@ fn parameters_and_sources_survive_gc_stress() {
 // ---- %try: catchable errors, and what is deliberately not -------------
 
 #[test]
-fn try_catches_an_error_and_yields_the_message() {
+fn try_catches_an_error_and_yields_the_condition() {
+    // `%try` yields the *condition object*, not a string -- a Rust refusal
+    // arrives as an error object, which is what lets `guard` ask it for a
+    // message and irritants. An error object prints as its message.
     assert_eq!(eval("(%try (+ 1 2))"), "(#t . 3)");
-    assert_eq!(eval("(%try (car 5))"), "(#f . \"car: not a pair: 5\")");
+    assert_eq!(eval("(%try (car 5))"), "(#f . car: not a pair: 5)");
     assert_eq!(
-        eval("(%try (undefined-thing))"),
-        "(#f . \"unbound variable: undefined-thing\")"
+        eval("(cdr (%try (car 5)))"),
+        "car: not a pair: 5"
+    );
+    assert_eq!(eval("(error-object? (cdr (%try (car 5))))"), "#t");
+    assert_eq!(
+        eval("(error-object-message (cdr (%try (undefined-thing))))"),
+        "\"unbound variable: undefined-thing\""
     );
     // And the VM carries on.
     assert_eq!(eval("(%try (car 5)) (+ 1 1)"), "2");
@@ -283,9 +291,126 @@ fn a_caught_error_still_restores_parameterize() {
 
 #[test]
 fn try_nests() {
-    assert_eq!(eval("(%try (%try (car 5)))"), "(#t #f . \"car: not a pair: 5\")");
+    assert_eq!(eval("(%try (%try (car 5)))"), "(#t #f . car: not a pair: 5)");
     assert_eq!(
         eval("(car (%try (let ([r (%try (car 5))]) (if (car r) 'no (error \"outer\")))))"),
         "#f"
     );
+}
+
+// ---- guard, raise, with-exception-handler ------------------------------
+
+#[test]
+fn guard_catches_and_binds_the_condition() {
+    assert_eq!(
+        eval("(guard (e (#t (list 'caught (error-object-message e)))) (error \"bad\" 1 2))"),
+        "(caught \"bad\")"
+    );
+    assert_eq!(
+        eval("(guard (e (#t (error-object-irritants e))) (error \"bad\" 1 2))"),
+        "(1 2)"
+    );
+    // A body that does not raise returns normally and the clauses never run.
+    assert_eq!(eval("(guard (e (#t 'caught)) 42)"), "42");
+}
+
+#[test]
+fn guard_clauses_behave_like_cond() {
+    assert_eq!(
+        eval("(guard (e ((symbol? e) (list 'sym e)) (else 'other)) (raise 'boom))"),
+        "(sym boom)"
+    );
+    assert_eq!(
+        eval("(guard (e ((symbol? e) 'sym) (else (list 'other e))) (raise 42))"),
+        "(other 42)"
+    );
+    assert_eq!(eval("(guard (e ((assv 1 '((1 . one))) => cdr)) (raise 'x))"), "one");
+}
+
+#[test]
+fn a_guard_that_matches_nothing_re_raises() {
+    // It must not swallow the condition, which a `cond`-shaped fall-through
+    // would otherwise do by returning #f.
+    let e = eval_err("(guard (e ((string? e) 'str)) (raise 42))");
+    assert!(e.contains("42"), "got {e}");
+    // And an outer guard sees it.
+    assert_eq!(
+        eval("(guard (e (#t (list 'outer e)))
+                (guard (e2 ((string? e2) 'inner)) (raise 7)))"),
+        "(outer 7)"
+    );
+}
+
+#[test]
+fn a_rust_refusal_arrives_as_an_error_object() {
+    // So `guard` works uniformly over what the implementation raises and what
+    // a script raises.
+    assert_eq!(eval("(guard (e ((error-object? e) 'yes)) (car 5))"), "yes");
+    assert_eq!(
+        eval("(guard (e (#t (error-object-message e))) (car 5))"),
+        "\"car: not a pair: 5\""
+    );
+    assert_eq!(eval("(guard (e (#t (error-object? e))) (raise 42))"), "#f");
+}
+
+#[test]
+fn with_exception_handler_runs_at_the_raise_point() {
+    // The difference from `guard`: the handler runs BEFORE any unwinding, so
+    // `raise-continuable` can return a value into the middle of an
+    // expression.
+    assert_eq!(
+        eval("(with-exception-handler (lambda (c) 99) (lambda () (+ 1 (raise-continuable 0))))"),
+        "100"
+    );
+    // The handler is removed while it runs, so a raise inside it reaches the
+    // next one out -- which `parameterize`'s unwind gives for free.
+    assert_eq!(
+        eval("(with-exception-handler
+                 (lambda (c) (list 'outer c))
+                 (lambda ()
+                   (with-exception-handler
+                     (lambda (c) (raise-continuable (list 'inner c)))
+                     (lambda () (raise-continuable 1)))))"),
+        "(outer (inner 1))"
+    );
+}
+
+#[test]
+fn a_non_continuable_raise_whose_handler_returns_is_an_error() {
+    // R7RS: if a `raise` handler returns, a secondary exception is raised.
+    let e = eval_err("(with-exception-handler (lambda (c) 'ignored) (lambda () (raise 'x)))");
+    assert!(e.contains('x'), "got {e}");
+}
+
+#[test]
+fn guard_restores_parameters_and_handlers() {
+    assert_eq!(
+        eval("(define p (make-parameter 'outer))
+              (list (guard (e (#t (p))) (parameterize ([p 'inner]) (error \"x\"))) (p))"),
+        "(outer outer)"
+    );
+    // The handler stack is itself a parameter, so it unwinds the same way.
+    assert_eq!(
+        eval("(guard (e (#t (length (%handlers))))
+                (with-exception-handler (lambda (c) c) (lambda () (error \"x\"))))"),
+        "0"
+    );
+}
+
+#[test]
+fn guard_survives_gc_stress() {
+    let mut vm = Vm::new();
+    vm.engine.set_gc_stress(true);
+    let v = vm
+        .eval_str(
+            "(let loop ((i 0) (acc '()))
+               (if (= i 30)
+                   (length acc)
+                   (loop (+ i 1)
+                         (cons (guard (e (#t (error-object-message e)))
+                                 (error (format \"n ~a\" i)))
+                               acc))))",
+        )
+        .expect("guard under gc stress");
+    assert_eq!(write_str(&vm.engine, v), "30");
 }

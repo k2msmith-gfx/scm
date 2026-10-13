@@ -1147,19 +1147,73 @@ fn format(e: &mut Engine, a: &[Value]) -> PResult {
 
 // ── errors and the remaining predicates ─────────────────────────────────
 
-/// `(error message irritant …)`. The message and the irritants are joined the
-/// way R7RS describes, and the result is an ordinary refusal -- the VM stays
+/// `(error message irritant …)` builds an **error object** and raises it, so
+/// a `guard` can ask it for its message and irritants rather than being
+/// handed a flattened string. It is still an ordinary refusal: the VM stays
 /// usable, which is requirement 8.
 fn error_prim(e: &mut Engine, a: &[Value]) -> PResult {
-    let mut text = match a.first() {
-        Some(v) => display_str(e, *v),
-        None => "error".to_string(),
+    let message = match a.first() {
+        Some(v) => *v,
+        None => e.string("error"),
     };
-    for &v in a.iter().skip(1) {
-        text.push(' ');
-        text.push_str(&write_str(e, v));
+    let irritants = e.list(a.get(1..).unwrap_or(&[]));
+    let obj = e.alloc(Obj::ErrorObj { message, irritants });
+    let text = write_str(e, obj);
+    Err(VmError::Raised(obj, text))
+}
+
+/// `(raise obj)` -- the primitive underneath the prelude's `raise`, which
+/// adds the handler-stack behaviour on top.
+fn raise_prim(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("%raise", a)?;
+    let text = format!("raised: {}", write_str(e, v));
+    Err(VmError::Raised(v, text))
+}
+
+fn err_obj<'a>(who: &str, e: &'a Engine, v: Value) -> Result<&'a Obj, VmError> {
+    match v {
+        Value::Obj(r) if matches!(e.obj(r), Obj::ErrorObj { .. }) => Ok(e.obj(r)),
+        _ => Err(err(format!(
+            "{who}: not an error object: {}",
+            write_str(e, v)
+        ))),
     }
-    Err(err(text))
+}
+
+fn is_error_object(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("error-object?", a)?;
+    Ok(Value::Bool(
+        matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::ErrorObj { .. })),
+    ))
+}
+
+fn error_object_message(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("error-object-message", a)?;
+    match err_obj("error-object-message", e, v)? {
+        Obj::ErrorObj { message, .. } => Ok(*message),
+        _ => unreachable!("checked"),
+    }
+}
+
+fn error_object_irritants(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("error-object-irritants", a)?;
+    match err_obj("error-object-irritants", e, v)? {
+        Obj::ErrorObj { irritants, .. } => Ok(*irritants),
+        _ => unreachable!("checked"),
+    }
+}
+
+/// R7RS distinguishes read errors and file errors from other conditions. The
+/// reader does not raise through this path yet and there is no file I/O, so
+/// both answer honestly rather than guessing.
+fn is_read_error(_e: &mut Engine, a: &[Value]) -> PResult {
+    let _ = one("read-error?", a)?;
+    Ok(Value::Bool(false))
+}
+
+fn is_file_error(_e: &mut Engine, a: &[Value]) -> PResult {
+    let _ = one("file-error?", a)?;
+    Ok(Value::Bool(false))
 }
 
 fn is_boolean(_e: &mut Engine, a: &[Value]) -> PResult {
@@ -1520,6 +1574,12 @@ pub fn install(vm: &mut Vm) {
     // format, and errors
     vm.define_prim("format", format);
     vm.define_prim("error", error_prim);
+    vm.define_prim("%raise", raise_prim);
+    vm.define_prim("error-object?", is_error_object);
+    vm.define_prim("error-object-message", error_object_message);
+    vm.define_prim("error-object-irritants", error_object_irritants);
+    vm.define_prim("read-error?", is_read_error);
+    vm.define_prim("file-error?", is_file_error);
     // the remaining predicates
     vm.define_prim("boolean?", is_boolean);
     vm.define_prim("procedure?", is_procedure);

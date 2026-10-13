@@ -104,6 +104,18 @@ fn print(e: &Engine, v: Value, quoted: bool, out: &mut String) {
             Obj::Env { .. } => out.push_str("#<environment>"),
             Obj::Parameter { .. } => out.push_str("#<parameter>"),
             Obj::Rng(_) => out.push_str("#<random-source>"),
+            // Printed as the message it carries, so `(display e)` in a
+            // handler reads the way a person would expect.
+            Obj::ErrorObj { message, irritants } => {
+                print(e, *message, false, out);
+                let mut cur = *irritants;
+                while let Value::Obj(r2) = cur {
+                    let Obj::Pair(car, cdr) = e.obj(r2) else { break };
+                    out.push(' ');
+                    print(e, *car, true, out);
+                    cur = *cdr;
+                }
+            }
         },
     }
 }
