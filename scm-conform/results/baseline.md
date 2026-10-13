@@ -1,6 +1,6 @@
 # scm-conform/suites/r7rs-tests.scm
 
-passed 1048, failed 118
+passed 1078, failed 88
 
 ## unreadable forms
 
@@ -30,7 +30,6 @@ passed 1048, failed 118
 - line 540: unbound variable: let-syntax
 - line 569: unbound variable: let-syntax
 - line 585: unbound variable: let-syntax
-- line 682: unbound variable: define-record-type
 - line 853: exact: 1.1102230246251565e-15 would need an exact rational (the `ratios` feature is absent)
 - line 1912: unbound variable: call-with-current-continuation
 - line 1917: unbound variable: call-with-current-continuation
@@ -64,20 +63,12 @@ passed 1048, failed 118
 - 4.3 Macros | (let ((x 'outer)) (let-syntax ((m (syntax-rules () ((m) x)))) (let ((x 'inner)) (m)))) | raised: unbound variable: let-syntax
 - 4.3 Macros | (letrec-syntax ((my-or (syntax-rules () ((my-or) #f) ((my-or e) e) ((my-or e1 e2 ...) (let ((temp e1)) (if temp temp (my-or e2 ...))))))) (let ((x #f) (y 7) (temp 8) (let odd?) (if even?)) (my-or x (let temp) (if y) y))) | raised: unbound variable: letrec-syntax
 - 4.3 Macros | (sequence3 2 3 4 5) | raised: no matching syntax rule for sequence3
-- 4.3 Macros | (list (count-to-2 a b) (count-to-2) (count-to-2 a b c d)) | raised: no matching syntax rule for count-to-2
-- 4.3 Macros | (list (count-to-2_ _ _) (count-to-2_) (count-to-2_ a b) (count-to-2_ a b c d)) | raised: no matching syntax rule for count-to-2_
-- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1253
+- 4.3 Macros | (list (count-to-2_ _ _) (count-to-2_) (count-to-2_ a b) (count-to-2_ a b c d)) | want (2 0 fail fail), got (2 0 2 fail)
+- 4.3 Macros | (mad-hatter) | raised: unbound variable: march-hare.1264
 - 4.3 Macros | (let ((=> #f)) (cond (#t => 'ok))) | raised: not applicable: ok
-- 4.3 Macros | (quux399) | raised: unbound variable: bar399.1289
+- 4.3 Macros | (quux399) | raised: unbound variable: bar399.1300
 - 4.3 Macros | (elli-lit-1 100) | raised: elli-lit-1: `...` with no pattern variable to repeat
 - 4.3 Macros | (let-syntax ((m (syntax-rules (b) ((_ b ...) #t) ((_ . r) #f)))) (list (m c) (m b (c)) (m b b) (m))) | raised: unbound variable: let-syntax
-- 5 Program structure | (let () (define-values x (values 1 2)) (apply + x)) | raised: no matching syntax rule for define-values
-- 5 Program structure | (let () (define-values (x y . z) (values 1 2 3 4)) (+ x y (car z) (cadr z))) | raised: no matching syntax rule for define-values
-- 5 Program structure | (pare? (kons 1 2)) | raised: unbound variable: pare?
-- 5 Program structure | (pare? (cons 1 2)) | raised: unbound variable: pare?
-- 5 Program structure | (kar (kons 1 2)) | raised: unbound variable: kar
-- 5 Program structure | (kdr (kons 1 2)) | raised: unbound variable: kdr
-- 5 Program structure | (let ((k (kons 1 2))) (set-kar! k 3) (kar k)) | raised: unbound variable: kons
 - 6.2 Numbers | (complex? 3+4i) | raised: unbound variable: complex?
 - 6.2 Numbers | (complex? 3) | raised: unbound variable: complex?
 - 6.2 Numbers | (real? -2.5+0i) | raised: unbound variable: -2.5+0i
@@ -106,7 +97,6 @@ passed 1048, failed 118
 - 6.2 Numbers | (imag-part 1+2i) | raised: unbound variable: imag-part
 - 6.2 Numbers | (magnitude 1+2i) | raised: unbound variable: magnitude
 - 6.2 Numbers | (angle 1+2i) | raised: unbound variable: angle
-- 6.4 Lists | (let ((lst (list 0 '(2 2 2 2) "Anna"))) (list-set! lst 1 '("Sue" "Sue")) lst) | raised: unbound variable: list-set!
 - 6.4 Lists | (member "B" '("a" "b" "c") string-ci=?) | raised: member got 3 arguments, which is more than it takes
 - 6.4 Lists | (assoc 2.0 '((1 1) (2 4) (3 9)) =) | raised: assoc got 3 arguments, which is more than it takes
 - 6.6 Characters | (digit-value #\٤) | want 4, got #f
@@ -114,7 +104,6 @@ passed 1048, failed 118
 - 6.7 Strings | (string-foldcase "Maß") | want "mass", got "maß"
 - 6.7 Strings | (string-foldcase "ſ") | want "s", got "ſ"
 - 6.10 Control Features | (call-with-current-continuation procedure?) | raised: unbound variable: call-with-current-continuation
-- 6.10 Control Features | (let ((v (make-list 5))) (vector-for-each (lambda (i) (list-set! v i (* i i))) '#(0 1 2 3 4)) v) | raised: unbound variable: list-set!
 - 6.10 Control Features | (call-with-current-continuation (lambda (exit) (for-each (lambda (x) (if (negative? x) (exit x))) '(54 0 37 -3 245 19)) #t)) | raised: unbound variable: call-with-current-continuation
 - 6.10 Control Features | (list-length '(1 2 3 4)) | raised: unbound variable: call-with-current-continuation
 - 6.10 Control Features | (list-length '(a b . c)) | raised: unbound variable: call-with-current-continuation
@@ -125,26 +114,6 @@ passed 1048, failed 118
 - 6.12 Environments and evaluation | (eval '(expt 2 10) (environment '(scheme base))) | raised: unbound variable: environment
 - 6.12 Environments and evaluation | (inexact (eval '(sin 0) (environment '(scheme inexact)))) | raised: unbound variable: environment
 - 6.12 Environments and evaluation | (eval '(+ (expt 2 10) (inexact (sin 0))) (environment '(scheme base) '(scheme inexact))) | raised: unbound variable: environment
-- 6.13 Input and output | (binary-port? (open-input-bytevector #u8(0 1 2))) | raised: unbound variable: open-input-bytevector
-- 6.13 Input and output | (binary-port? (open-output-bytevector)) | raised: unbound variable: open-output-bytevector
-- 6.13 Input and output | (let ((out (open-output-string))) (flush-output-port out) (get-output-string out)) | raised: unbound variable: flush-output-port
-- 6.13 Input and output | (eof-object? (read-u8 (open-input-bytevector #u8()))) | raised: unbound variable: read-u8
-- 6.13 Input and output | (read-u8 (open-input-bytevector #u8(1 2 3))) | raised: unbound variable: read-u8
-- 6.13 Input and output | (eof-object? (read-bytevector 3 (open-input-bytevector #u8()))) | raised: unbound variable: read-bytevector
-- 6.13 Input and output | (u8-ready? (open-input-bytevector #u8(1))) | raised: unbound variable: u8-ready?
-- 6.13 Input and output | (read-bytevector 3 (open-input-bytevector #u8(1))) | raised: unbound variable: read-bytevector
-- 6.13 Input and output | (read-bytevector 3 (open-input-bytevector #u8(1 2))) | raised: unbound variable: read-bytevector
-- 6.13 Input and output | (read-bytevector 3 (open-input-bytevector #u8(1 2 3))) | raised: unbound variable: read-bytevector
-- 6.13 Input and output | (read-bytevector 3 (open-input-bytevector #u8(1 2 3 4))) | raised: unbound variable: read-bytevector
-- 6.13 Input and output | (let ((bv (bytevector 1 2 3 4 5))) (eof-object? (read-bytevector! bv (open-input-bytevector #u8())))) | raised: unbound variable: read-bytevector!
-- 6.13 Input and output | (let ((bv (bytevector 1 2 3 4 5))) (read-bytevector! bv (open-input-bytevector #u8(6 7 8 9 10)) 0 5) bv) | raised: unbound variable: read-bytevector!
-- 6.13 Input and output | (let ((bv (bytevector 1 2 3 4 5))) (read-bytevector! bv (open-input-bytevector #u8(6 7 8 9 10)) 0 3) bv) | raised: unbound variable: read-bytevector!
-- 6.13 Input and output | (let ((bv (bytevector 1 2 3 4 5))) (read-bytevector! bv (open-input-bytevector #u8(6 7 8 9 10)) 3 4) bv) | raised: unbound variable: read-bytevector!
-- 6.13 Input and output | (let ((out (open-output-bytevector))) (write-u8 1 out) (write-u8 2 out) (write-u8 3 out) (get-output-bytevector out)) | raised: unbound variable: open-output-bytevector
-- 6.13 Input and output | (let ((out (open-output-bytevector))) (write-bytevector #u8(1 2 3 4 5) out) (get-output-bytevector out)) | raised: unbound variable: open-output-bytevector
-- 6.13 Input and output | (let ((out (open-output-bytevector))) (write-bytevector #u8(1 2 3 4 5) out 2) (get-output-bytevector out)) | raised: unbound variable: open-output-bytevector
-- 6.13 Input and output | (let ((out (open-output-bytevector))) (write-bytevector #u8(1 2 3 4 5) out 2 4) (get-output-bytevector out)) | raised: unbound variable: open-output-bytevector
-- 6.13 Input and output | (let ((out (open-output-bytevector))) (flush-output-port out) (get-output-bytevector out)) | raised: unbound variable: open-output-bytevector
 - Numeric syntax | (values z) | expected-expr raised: unbound variable: make-rectangular
 - Numeric syntax | (values z) | expected-expr raised: unbound variable: make-rectangular
 - Numeric syntax | (values z) | expected-expr raised: unbound variable: make-rectangular

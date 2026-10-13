@@ -51,15 +51,35 @@ pub enum ErrorKind {
     File,
 }
 
-/// A textual port. Binary ports are not implemented; `binary-port?` says so.
+/// A port. Textual ports carry characters, binary ports carry bytes, and
+/// R7RS keeps them apart deliberately -- `read-char` on a binary port is an
+/// error, not a reinterpretation.
 #[derive(Clone, Debug)]
 pub enum PortKind {
     /// An in-memory input port over a string.
     StringIn { chars: Vec<char>, pos: usize },
     /// An in-memory output port, accumulating.
     StringOut(String),
+    /// An in-memory **binary** input port.
+    BytesIn { bytes: Vec<u8>, pos: usize },
+    /// An in-memory **binary** output port.
+    BytesOut(Vec<u8>),
     Stdout,
     Stderr,
+}
+
+impl PortKind {
+    /// Whether this is an input port, which is the question most of the port
+    /// predicates actually ask -- and which was spelled
+    /// `matches!(k, StringIn { .. })` in five places, so adding a second kind
+    /// of input port would have silently made each of them wrong.
+    pub fn is_input(&self) -> bool {
+        matches!(self, PortKind::StringIn { .. } | PortKind::BytesIn { .. })
+    }
+
+    pub fn is_binary(&self) -> bool {
+        matches!(self, PortKind::BytesIn { .. } | PortKind::BytesOut(_))
+    }
 }
 
 #[derive(Clone, Debug)]

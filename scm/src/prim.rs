@@ -1946,30 +1946,23 @@ fn is_port(e: &mut Engine, a: &[Value]) -> PResult {
     port_pred("port?", e, a, |_| true)
 }
 fn is_input_port(e: &mut Engine, a: &[Value]) -> PResult {
-    port_pred("input-port?", e, a, |k| {
-        matches!(k, PortKind::StringIn { .. })
-    })
+    port_pred("input-port?", e, a, PortKind::is_input)
 }
 fn is_output_port(e: &mut Engine, a: &[Value]) -> PResult {
-    port_pred("output-port?", e, a, |k| {
-        !matches!(k, PortKind::StringIn { .. })
-    })
+    port_pred("output-port?", e, a, |k| !k.is_input())
 }
 fn is_textual_port(e: &mut Engine, a: &[Value]) -> PResult {
-    port_pred("textual-port?", e, a, |_| true)
+    port_pred("textual-port?", e, a, |k| !k.is_binary())
 }
-/// There are no binary ports, and saying so is better than implying there are.
 fn is_binary_port(e: &mut Engine, a: &[Value]) -> PResult {
-    port_pred("binary-port?", e, a, |_| false)
+    port_pred("binary-port?", e, a, PortKind::is_binary)
 }
 
 fn port_open(who: &'static str, e: &Engine, a: &[Value], input: bool) -> PResult {
     let v = one(who, a)?;
     Ok(Value::Bool(match v {
         Value::Obj(r) => match e.obj(r) {
-            Obj::Port { kind, open } => {
-                *open && (matches!(kind, PortKind::StringIn { .. }) == input)
-            }
+            Obj::Port { kind, open } => *open && (kind.is_input() == input),
             _ => false,
         },
         _ => false,
@@ -1997,6 +1990,221 @@ fn is_char_ready(e: &mut Engine, a: &[Value]) -> PResult {
     port_pred("char-ready?", e, a, |k| {
         matches!(k, PortKind::StringIn { .. })
     })
+}
+
+/// `u8-ready?`, the binary counterpart: the bytes are already here too.
+fn is_u8_ready(e: &mut Engine, a: &[Value]) -> PResult {
+    port_pred("u8-ready?", e, a, |k| {
+        matches!(k, PortKind::BytesIn { .. })
+    })
+}
+
+// ---- binary ports ------------------------------------------------------
+//
+// R7RS keeps textual and binary ports apart on purpose, so these do not
+// share an implementation with the string ports: `read-char` on a binary
+// port is an error rather than a reinterpretation of the bytes.
+
+fn open_input_bytevector(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("open-input-bytevector", a)?;
+    let bytes = bytes_of("open-input-bytevector", e, v)?;
+    Ok(e.port(PortKind::BytesIn { bytes, pos: 0 }))
+}
+
+fn open_output_bytevector(e: &mut Engine, a: &[Value]) -> PResult {
+    if !a.is_empty() {
+        return Err(err("open-output-bytevector: expects no arguments"));
+    }
+    Ok(e.port(PortKind::BytesOut(Vec::new())))
+}
+
+fn get_output_bytevector(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("get-output-bytevector", a)?;
+    let r = port_ref("get-output-bytevector", e, v)?;
+    match e.obj(r) {
+        Obj::Port {
+            kind: PortKind::BytesOut(bytes),
+            ..
+        } => {
+            let bytes = bytes.clone();
+            Ok(e.bytevector(bytes))
+        }
+        _ => Err(err("get-output-bytevector: not a bytevector output port")),
+    }
+}
+
+/// The byte at the cursor, advancing it unless `peek`.
+fn take_u8(who: &'static str, e: &mut Engine, a: &[Value], peek: bool) -> PResult {
+    let v = match a {
+        [] => return Err(err(format!("{who}: expects a port"))),
+        [p] => *p,
+        _ => return Err(err(format!("{who}: expects one port"))),
+    };
+    let r = port_ref(who, e, v)?;
+    match e.obj_mut(r) {
+        Obj::Port {
+            kind: PortKind::BytesIn { bytes, pos },
+            open,
+        } => {
+            if !*open {
+                return Err(err(format!("{who}: the port is closed")));
+            }
+            match bytes.get(*pos) {
+                None => Ok(Value::Eof),
+                Some(&b) => {
+                    if !peek {
+                        *pos += 1;
+                    }
+                    Ok(Value::Fixnum(b as i64))
+                }
+            }
+        }
+        _ => Err(err(format!("{who}: not a binary input port"))),
+    }
+}
+
+fn read_u8(e: &mut Engine, a: &[Value]) -> PResult {
+    take_u8("read-u8", e, a, false)
+}
+
+fn peek_u8(e: &mut Engine, a: &[Value]) -> PResult {
+    take_u8("peek-u8", e, a, true)
+}
+
+fn write_u8(e: &mut Engine, a: &[Value]) -> PResult {
+    let (byte, port) = match a {
+        [Value::Fixnum(b), p] if (0..=255).contains(b) => (*b as u8, *p),
+        [Value::Fixnum(_), _] => return Err(err("write-u8: a byte is 0..255")),
+        _ => return Err(err("write-u8: expects a byte and a port")),
+    };
+    let r = port_ref("write-u8", e, port)?;
+    match e.obj_mut(r) {
+        Obj::Port {
+            kind: PortKind::BytesOut(bytes),
+            open,
+        } => {
+            if !*open {
+                return Err(err("write-u8: the port is closed"));
+            }
+            bytes.push(byte);
+            Ok(Value::Unspecified)
+        }
+        _ => Err(err("write-u8: not a binary output port")),
+    }
+}
+
+/// `(read-bytevector k port)` -> a bytevector of up to k bytes, or eof.
+///
+/// R7RS: eof **only** when no bytes are available at all. A short read near
+/// the end returns what there was, which is the distinction a caller loops
+/// on.
+fn read_bytevector(e: &mut Engine, a: &[Value]) -> PResult {
+    let (k, port) = match a {
+        [Value::Fixnum(k), p] if *k >= 0 => (*k as usize, *p),
+        _ => return Err(err("read-bytevector: expects a count and a port")),
+    };
+    let r = port_ref("read-bytevector", e, port)?;
+    let got = match e.obj_mut(r) {
+        Obj::Port {
+            kind: PortKind::BytesIn { bytes, pos },
+            open,
+        } => {
+            if !*open {
+                return Err(err("read-bytevector: the port is closed"));
+            }
+            if *pos >= bytes.len() && k > 0 {
+                return Ok(Value::Eof);
+            }
+            let end = (*pos + k).min(bytes.len());
+            let out = bytes[*pos..end].to_vec();
+            *pos = end;
+            out
+        }
+        _ => return Err(err("read-bytevector: not a binary input port")),
+    };
+    Ok(e.bytevector(got))
+}
+
+/// `(read-bytevector! bv port [start [end]])` -> how many bytes landed, or
+/// eof.
+fn read_bytevector_into(e: &mut Engine, a: &[Value]) -> PResult {
+    let (target, port) = match a {
+        [t, p, ..] => (*t, *p),
+        _ => return Err(err("read-bytevector!: expects a bytevector and a port")),
+    };
+    let tr = match target {
+        Value::Obj(r) if matches!(e.obj(r), Obj::Bytevector(_)) => r,
+        _ => return Err(err("read-bytevector!: expects a bytevector")),
+    };
+    let len = match e.obj(tr) {
+        Obj::Bytevector(b) => b.len(),
+        _ => unreachable!("checked"),
+    };
+    let (start, end) = range_of("read-bytevector!", a, 2, len)?;
+    let r = port_ref("read-bytevector!", e, port)?;
+    let got = match e.obj_mut(r) {
+        Obj::Port {
+            kind: PortKind::BytesIn { bytes, pos },
+            open,
+        } => {
+            if !*open {
+                return Err(err("read-bytevector!: the port is closed"));
+            }
+            if *pos >= bytes.len() && end > start {
+                return Ok(Value::Eof);
+            }
+            let take = (end - start).min(bytes.len() - *pos);
+            let out = bytes[*pos..*pos + take].to_vec();
+            *pos += take;
+            out
+        }
+        _ => return Err(err("read-bytevector!: not a binary input port")),
+    };
+    let n = got.len();
+    if let Obj::Bytevector(b) = e.obj_mut(tr) {
+        b[start..start + n].copy_from_slice(&got);
+    }
+    Ok(Value::Fixnum(n as i64))
+}
+
+/// `(write-bytevector bv port [start [end]])`.
+fn write_bytevector(e: &mut Engine, a: &[Value]) -> PResult {
+    let (src, port) = match a {
+        [s, p, ..] => (*s, *p),
+        _ => return Err(err("write-bytevector: expects a bytevector and a port")),
+    };
+    let all = bytes_of("write-bytevector", e, src)?;
+    let (start, end) = range_of("write-bytevector", a, 2, all.len())?;
+    let r = port_ref("write-bytevector", e, port)?;
+    match e.obj_mut(r) {
+        Obj::Port {
+            kind: PortKind::BytesOut(bytes),
+            open,
+        } => {
+            if !*open {
+                return Err(err("write-bytevector: the port is closed"));
+            }
+            bytes.extend_from_slice(&all[start..end]);
+            Ok(Value::Unspecified)
+        }
+        _ => Err(err("write-bytevector: not a binary output port")),
+    }
+}
+
+/// `flush-output-port`. Nothing in memory needs flushing, and stdout is
+/// already line-buffered through Rust, so this is a real no-op rather than a
+/// stub -- but it has to EXIST, because portable code calls it.
+fn flush_output_port(e: &mut Engine, a: &[Value]) -> PResult {
+    match a {
+        [] => {}
+        [p] => {
+            let _ = port_ref("flush-output-port", e, *p)?;
+        }
+        _ => return Err(err("flush-output-port: expects an optional port")),
+    }
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    Ok(Value::Unspecified)
 }
 
 
@@ -2928,6 +3136,17 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("output-port?", is_output_port);
     vm.define_prim("textual-port?", is_textual_port);
     vm.define_prim("binary-port?", is_binary_port);
+    vm.define_prim("u8-ready?", is_u8_ready);
+    vm.define_prim("open-input-bytevector", open_input_bytevector);
+    vm.define_prim("open-output-bytevector", open_output_bytevector);
+    vm.define_prim("get-output-bytevector", get_output_bytevector);
+    vm.define_prim("read-u8", read_u8);
+    vm.define_prim("peek-u8", peek_u8);
+    vm.define_prim("write-u8", write_u8);
+    vm.define_prim("read-bytevector", read_bytevector);
+    vm.define_prim("read-bytevector!", read_bytevector_into);
+    vm.define_prim("write-bytevector", write_bytevector);
+    vm.define_prim("flush-output-port", flush_output_port);
     vm.define_prim("input-port-open?", is_input_port_open);
     vm.define_prim("output-port-open?", is_output_port_open);
     vm.define_prim("close-port", close_port);

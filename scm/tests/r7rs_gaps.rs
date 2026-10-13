@@ -165,3 +165,164 @@ fn the_fold_case_directives_work_and_stop_at_a_bar_symbol() {
     // `#!fold-caseX` from swallowing the `X`.
     assert!(err_of("(read (open-input-string \"#!fold-caseX\"))").contains("unsupported"));
 }
+
+// ---- batch 2: records, multiple values, and binary ports ---------------
+
+#[test]
+fn a_dotted_pattern_matches_a_proper_list_too() {
+    // `(p1 … pn . prest)` matches n OR MORE elements, with `prest` taking the
+    // n-th cdr -- which for a proper list of exactly n elements is `()`. The
+    // matcher demanded an exact length, so a dotted pattern matched an
+    // *improper* input and refused a proper one. That made every dotted
+    // sub-pattern useless, and `define-record-type`'s
+    // `(field accessor . modifier)` is exactly that shape.
+    let m = "(define-syntax d (syntax-rules () [(_ (a . c)) '(a c)]))";
+    assert_eq!(eval(&format!("{m} (d (1 2 3))")), "(1 (2 3))");
+    assert_eq!(eval(&format!("{m} (d (1))")), "(1 ())");
+    assert_eq!(eval(&format!("{m} (d (1 . 2))")), "(1 2)");
+    // At the top level of a pattern, and nested under an ellipsis.
+    let t = "(define-syntax t (syntax-rules () [(_ a . c) '(a c)]))";
+    assert_eq!(eval(&format!("{t} (t 1 2 3)")), "(1 (2 3))");
+    let e2 = "(define-syntax e2 (syntax-rules () [(_ (a b . c) ...) '((a b c) ...)]))";
+    assert_eq!(
+        eval(&format!("{e2} (e2 (1 2 3) (4 5))")),
+        "((1 2 (3)) (4 5 ()))"
+    );
+    // A bracket vector as input has no cdr chain to point into, so the tail
+    // has to be built -- which is why the matcher allocates.
+    let b = "(define-syntax b (syntax-rules () [(_ (a . c)) '(a c)]))";
+    assert_eq!(eval(&format!("{b} (b [1 2 3])")), "(1 (2 3))");
+}
+
+#[test]
+fn define_values_handles_all_three_shapes() {
+    assert_eq!(eval("(let () (define-values () (values)) 'ok)"), "ok");
+    assert_eq!(eval("(let () (define-values (x) (values 1)) x)"), "1");
+    assert_eq!(eval("(let () (define-values (x y) (values 1 2)) (+ x y))"), "3");
+    // A bare symbol takes the LIST of all the values.
+    assert_eq!(eval("(let () (define-values x (values 1 2)) (apply + x))"), "3");
+    // And a dotted formal takes the leftovers.
+    assert_eq!(
+        eval("(let () (define-values (x y . z) (values 1 2 3 4)) (+ x y (car z) (cadr z)))"),
+        "10"
+    );
+    // At top level too, not only inside a body.
+    assert_eq!(eval("(define-values (p q) (values 7 8)) (list p q)"), "(7 8)");
+}
+
+#[test]
+fn records_are_their_own_types() {
+    let pare = "(define-record-type <pare> (kons x y) pare? (x kar set-kar!) (y kdr))";
+    assert_eq!(eval(&format!("{pare} (pare? (kons 1 2))")), "#t");
+    assert_eq!(eval(&format!("{pare} (pare? (cons 1 2))")), "#f");
+    assert_eq!(eval(&format!("{pare} (list (kar (kons 1 2)) (kdr (kons 1 2)))")), "(1 2)");
+    assert_eq!(
+        eval(&format!("{pare} (let ([k (kons 1 2)]) (set-kar! k 3) (kar k))")),
+        "3"
+    );
+    // A field with no modifier gets no setter, which is the point of
+    // declaring it that way.
+    assert!(err_of(&format!("{pare} (set-kdr! (kons 1 2) 9)")).contains("unbound"));
+
+    // Two types with the same field names stay distinct, because the type is
+    // compared by identity and not by name.
+    let two = format!(
+        "{pare} (define-record-type <other> (mk x y) other? (x ox) (y oy))"
+    );
+    assert_eq!(eval(&format!("{two} (list (other? (kons 1 2)) (pare? (mk 1 2)))")), "(#f #f)");
+    assert_eq!(
+        eval(&format!("{two} (guard (e (else 'refused)) (kar (mk 1 2)))")),
+        "refused"
+    );
+
+    // A constructor may name a SUBSET of the fields, in its own order; the
+    // rest are unspecified. That is why the constructor builds an alist
+    // rather than trusting argument position.
+    let p3 = "(define-record-type <p3> (mk3 c a) p3? (a fa) (b fb) (c fc))";
+    assert_eq!(eval(&format!("{p3} (list (fa (mk3 30 10)) (fb (mk3 30 10)) (fc (mk3 30 10)))")), "(10 #f 30)");
+}
+
+#[test]
+fn list_set_mutates_in_place() {
+    assert_eq!(eval("(let ([l (list 1 2 3)]) (list-set! l 1 'two) l)"), "(1 two 3)");
+}
+
+#[test]
+fn binary_ports_carry_bytes() {
+    assert_eq!(
+        eval(
+            "(let ([in (open-input-bytevector (bytevector 1 2 3 4 5))])
+               (list (read-u8 in) (peek-u8 in) (read-u8 in)
+                     (read-bytevector 2 in) (read-u8 in)
+                     (eof-object? (read-u8 in))))"
+        ),
+        "(1 2 2 #u8(3 4) 5 #t)"
+    );
+    assert_eq!(
+        eval(
+            "(let ([out (open-output-bytevector)])
+               (write-u8 9 out)
+               (write-bytevector (bytevector 7 8) out)
+               (write-bytevector (bytevector 1 2 3) out 1 2)
+               (get-output-bytevector out))"
+        ),
+        "#u8(9 7 8 2)"
+    );
+    // `read-bytevector!` fills a range and answers how many landed.
+    assert_eq!(
+        eval(
+            "(let ([tgt (make-bytevector 5 0)]
+                   [in (open-input-bytevector (bytevector 10 20 30))])
+               (let ([n (read-bytevector! tgt in 1 4)])
+                 (list n tgt (eof-object? (read-bytevector! tgt in)))))"
+        ),
+        "(3 #u8(0 10 20 30 0) #t)"
+    );
+    // A short read near the end returns what there was; eof means NOTHING
+    // was available, which is the distinction a caller loops on.
+    assert_eq!(
+        eval(
+            "(let ([in (open-input-bytevector (bytevector 1 2))])
+               (list (read-bytevector 10 in) (eof-object? (read-bytevector 10 in))))"
+        ),
+        "(#u8(1 2) #t)"
+    );
+}
+
+#[test]
+fn a_binary_port_is_not_a_textual_one() {
+    // R7RS keeps them apart on purpose: `read-char` on a binary port is an
+    // error, not a reinterpretation of the bytes.
+    assert_eq!(
+        eval(
+            "(let ([b (open-input-bytevector (bytevector 65))]
+                   [t (open-input-string \"A\")])
+               (list (binary-port? b) (textual-port? b) (input-port? b) (u8-ready? b)
+                     (binary-port? t) (textual-port? t)))"
+        ),
+        "(#t #f #t #t #f #t)"
+    );
+    assert!(
+        err_of("(read-char (open-input-bytevector (bytevector 65)))").contains("port"),
+    );
+    assert!(
+        err_of("(read-u8 (open-input-string \"A\"))").contains("binary input port"),
+    );
+    // And an output port is an output port whichever bytes it carries.
+    assert_eq!(
+        eval("(let ([o (open-output-bytevector)]) (list (output-port? o) (input-port? o)))"),
+        "(#t #f)"
+    );
+}
+
+#[test]
+fn flush_output_port_exists_even_though_it_does_nothing() {
+    // Nothing in memory needs flushing and stdout is already buffered by
+    // Rust, so this is a genuine no-op -- but portable code calls it, so it
+    // has to be there.
+    assert_eq!(eval("(flush-output-port)"), "#<unspecified>");
+    assert_eq!(
+        eval("(let ([o (open-output-string)]) (flush-output-port o) 'ok)"),
+        "ok"
+    );
+}

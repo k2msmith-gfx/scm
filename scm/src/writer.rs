@@ -273,6 +273,8 @@ fn emit(
                 out.push_str(match kind {
                     crate::heap::PortKind::StringIn { .. } => "#<input-port string>",
                     crate::heap::PortKind::StringOut(_) => "#<output-port string>",
+                    crate::heap::PortKind::BytesIn { .. } => "#<input-port bytevector>",
+                    crate::heap::PortKind::BytesOut(_) => "#<output-port bytevector>",
                     crate::heap::PortKind::Stdout => "#<output-port stdout>",
                     crate::heap::PortKind::Stderr => "#<output-port stderr>",
                 });

@@ -60,6 +60,21 @@ type Bindings = HashMap<SymId, Binding>;
 
 pub type SynResult<T> = Result<T, String>;
 
+/// `(items… . tail)`, for binding a pattern's improper tail to whatever the
+/// input had left over.
+///
+/// Allocating is why the matcher takes `&mut Engine`: the leftovers are
+/// usually a suffix of the input's own cdr chain, but a *bracket vector*
+/// input has no chain to point into -- and §4.9 makes brackets paren-ish in
+/// every binding form, so `[x acc set!]` as a field spec has to work.
+fn build_tail(e: &mut Engine, items: &[Value], tail: Value) -> Value {
+    let mut acc = tail;
+    for &item in items.iter().rev() {
+        acc = e.cons(item, acc);
+    }
+    acc
+}
+
 /// Everything in a form that could be a list, as a `Vec` plus an improper
 /// tail. A bracket vector reads as a proper list here; `#(…)` does not.
 fn as_list(e: &Engine, v: Value) -> Option<(Vec<Value>, Value)> {
@@ -191,7 +206,7 @@ impl SyntaxRules {
         matches!(v, Value::Symbol(s) if e.resolve(s) == self.ellipsis)
     }
 
-    fn match_one(&self, e: &Engine, pat: Value, input: Value, b: &mut Bindings) -> bool {
+    fn match_one(&self, e: &mut Engine, pat: Value, input: Value, b: &mut Bindings) -> bool {
         match pat {
             Value::Symbol(s) => {
                 let r = e.resolve(s);
@@ -228,7 +243,7 @@ impl SyntaxRules {
 
     fn match_seq(
         &self,
-        e: &Engine,
+        e: &mut Engine,
         pats: &[Value],
         ptail: Value,
         inputs: &[Value],
@@ -239,7 +254,22 @@ impl SyntaxRules {
         let ell = pats.iter().position(|&p| self.is_ellipsis(e, p));
         match ell {
             None => {
-                if pats.len() != inputs.len() {
+                // `(p1 … pn . prest)` matches n OR MORE elements: `prest` is
+                // matched against the n-th cdr, which for a proper input of
+                // exactly n elements is `()`.
+                //
+                // This used to demand `pats.len() == inputs.len()`, so a
+                // dotted pattern matched an *improper* input and never a
+                // proper one -- `(_ (a . c))` matched `(1 . 2)` and refused
+                // `(1 2 3)`. That made every dotted sub-pattern useless, and
+                // `define-record-type`'s `(field accessor . modifier)` is
+                // exactly that shape.
+                let dotted = !matches!(ptail, Value::Null);
+                if dotted {
+                    if inputs.len() < pats.len() {
+                        return false;
+                    }
+                } else if pats.len() != inputs.len() {
                     return false;
                 }
                 for (p, i) in pats.iter().zip(inputs.iter()) {
@@ -247,10 +277,12 @@ impl SyntaxRules {
                         return false;
                     }
                 }
-                // An improper pattern tail matches the rest.
                 match ptail {
                     Value::Null => matches!(itail, Value::Null),
-                    t => self.match_one(e, t, itail, b),
+                    t => {
+                        let rest = build_tail(e, &inputs[pats.len()..], itail);
+                        self.match_one(e, t, rest, b)
+                    }
                 }
             }
             Some(k) if k >= 1 => {

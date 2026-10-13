@@ -492,12 +492,33 @@
 
 ;; `define-values` defines at the current level, so it cannot be a `lambda`
 ;; binding -- the names are defined first and then assigned.
+;; Three shapes, and the ORDER of the clauses is what tells them apart: a
+;; pattern like `(var ... . rest)` also matches a proper list with `rest`
+;; bound to `()`, so the proper-list clause has to come first or it would
+;; never be reached. The bare-symbol clause comes last for the same reason --
+;; `var` matches anything, including a list.
 (define-syntax define-values
   (syntax-rules ()
     [(_ (var ...) expr)
      (begin
        (define var #f) ...
-       (%set-each! (var ...) (%vals expr)))]))
+       (%set-each! (var ...) (%vals expr)))]
+    ;; `(define-values (x y . z) …)`: z takes whatever is left over.
+    [(_ (var ... . rest) expr)
+     (begin
+       (define var #f) ...
+       (define rest #f)
+       (%set-each-rest! (var ...) rest (%vals expr)))]
+    ;; `(define-values x …)`: x is the list of ALL the values.
+    [(_ var expr) (define var (%vals expr))]))
+
+(define-syntax %set-each-rest!
+  (syntax-rules ()
+    [(_ () r vals) (set! r vals)]
+    [(_ (v more ...) r vals)
+     (let ([vs vals])
+       (set! v (car vs))
+       (%set-each-rest! (more ...) r (cdr vs)))]))
 
 (define-syntax %set-each!
   (syntax-rules ()
@@ -506,6 +527,79 @@
      (let ([vs vals])
        (set! v (car vs))
        (%set-each! (rest ...) (cdr vs)))]))
+
+;; ── records ────────────────────────────────────────────────────────────────
+;;
+;; A record is a vector whose slot 0 is its *type*, and a type is a vector
+;; carrying the field names. Two consequences worth knowing:
+;;
+;;   * The type is compared by `eq?` on the object itself, so two record
+;;     types with the same name are still distinct -- which is what R7RS
+;;     wants and what a name comparison would get wrong.
+;;   * An accessor finds its slot by looking its field name up in the type at
+;;     run time. `syntax-rules` cannot compute "the position of x in (x y)",
+;;     and a few-element `memq` is cheaper than the machinery that could.
+;;
+;; `vector?` is true of a record, which is a leak this representation cannot
+;; close without a heap type of its own. Recorded rather than hidden.
+(define (%make-record-type name fields) (vector '%record-type name fields))
+(define (%rt-fields t) (vector-ref t 2))
+(define (%rt-name t) (vector-ref t 1))
+
+(define (%record-is? o type)
+  (and (vector? o) (> (vector-length o) 0) (eq? (vector-ref o 0) type)))
+
+(define (%record-make type vals)
+  (let* ([fs (%rt-fields type)]
+         [v (make-vector (+ 1 (length fs)) #f)])
+    (vector-set! v 0 type)
+    (let loop ([fs fs] [i 1])
+      (if (null? fs)
+          v
+          (begin
+            (let ([p (assq (car fs) vals)])
+              (if p (vector-set! v i (cdr p))))
+            (loop (cdr fs) (+ i 1)))))))
+
+(define (%record-index type f)
+  (let loop ([fs (%rt-fields type)] [i 1])
+    (cond [(null? fs) (error "no such field" (%rt-name type) f)]
+          [(eq? (car fs) f) i]
+          [else (loop (cdr fs) (+ i 1))])))
+
+(define (%record-get o type f)
+  (if (%record-is? o type)
+      (vector-ref o (%record-index type f))
+      (error "not a record of this type" (%rt-name type) o)))
+
+(define (%record-put! o type f v)
+  (if (%record-is? o type)
+      (vector-set! o (%record-index type f) v)
+      (error "not a record of this type" (%rt-name type) o)))
+
+;; R7RS `define-record-type`. The constructor names a SUBSET of the fields in
+;; whatever order it likes, which is why it builds an alist rather than
+;; relying on argument position.
+(define-syntax define-record-type
+  (syntax-rules ()
+    [(_ tname (ctor cfield ...) pred (field accessor . modifier) ...)
+     (begin
+       (define tname (%make-record-type 'tname (list 'field ...)))
+       (define (ctor cfield ...)
+         (%record-make tname (list (cons 'cfield cfield) ...)))
+       (define (pred o) (%record-is? o tname))
+       (%record-field tname (field accessor . modifier)) ...)]))
+
+(define-syntax %record-field
+  (syntax-rules ()
+    [(_ t (f acc)) (define (acc o) (%record-get o t 'f))]
+    [(_ t (f acc mod))
+     (begin
+       (define (acc o) (%record-get o t 'f))
+       (define (mod o v) (%record-put! o t 'f v)))]))
+
+;; `(list-set! lst k obj)`, which is just `set-car!` on the right pair.
+(define (list-set! lst k obj) (set-car! (list-tail lst k) obj))
 
 ;; SRFI-8, which reads better than let-values for the one-binding case and
 ;; which a model will reach for.
