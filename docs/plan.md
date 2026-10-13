@@ -1090,7 +1090,7 @@ ray's plan; those numbers are estimates.
 | **S4** ◇ | The lambda list: `&opt`, `&named`, `&keys`, defaults that preserve an explicit `#f`. | 0.2 | **done** @56bd978 |
 | **S5** | `syntax-rules`, the library system, `(scheme base)`, and the scene corpus's own vocabulary — `seq`/`for`/`each` by name, a **growable array**, **`format`** (SRFI-28 spelling), a **seedable RNG as a parameter** ([survey](scene-language-survey.md) §2–§5). `parameterize` for `dyn`/`setdyn`. Every binding and clause form accepts bracket bindings (§4.9). | 0.9 | the conformance number reported for the first time; the survey's §7 checklist closed to its one open question; `(let ([x 1]) x)` and `(cond [else 1])` both work |
 | **S5b** | **done** — [s5b-findings.md](s5b-findings.md). **Leaf probe** (§6). No compiler: the purity/reachability analysis over the IR as it exists, plus codegen and a JIT call for the innermost pure functions, to learn what the current representation makes hard before it hardens. | 0.2 | the analysis names the blocking call for an impure function; a compiled function agrees with T0 on a grid; each of the five items is reported free, awkward or blocked, with the reason |
-| **S6** | **The scene corpus as a language test.** Convert the flat `save-scene` output of the 219 examples; run each in scm against **recording stub verbs**; compare the call sequence against the Janet original ([survey](scene-language-survey.md) §8). | 0.4 | every converted scene runs to completion and its recorded call sequence matches, verb for verb and argument for argument |
+| **S6** | **DEFERRED 2026-10-12** to Track B — [survey §8a](scene-language-survey.md). ray's store now holds a neutral `Form` and its writer is ungated, so the conversion this stage describes is a **printer**, and a saved-file spelling belongs to the port rather than to a guess made before it. The survey records what was measured. **The scene corpus as a language test.** Convert the flat `save-scene` output of the 219 examples; run each in scm against **recording stub verbs**; compare the call sequence against the Janet original ([survey](scene-language-survey.md) §8). | 0.4 | every converted scene runs to completion and its recorded call sequence matches, verb for verb and argument for argument |
 | **S7** ◇ | **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. **The handoff to Track B.** | 0.5 | a sample app embeds scm in < 30 lines; **no panic crosses the API** under a fuzzed host-call harness; a runaway script is killable from the host |
 | **S8** ◇ | **REPL core**: the eval protocol, interactive environment, redefinition, backtraces over live frames, introspection. Terminal client in `scm-cli`. | 0.6 | a socket client and the terminal client share one API with no divergence; a runaway form is interruptible; a backtrace names frames and spans |
 | **S9** ◇ | The rest of R7RS-small: chars/strings/Unicode, ports, bytevectors, `eval`, escape continuations, `dynamic-wind`. | 0.6 | conformance ≥ 95% of the declared subset, every failure individually explained |
@@ -1115,11 +1115,16 @@ refactor on its side and Track A's S7 on this one.
 
 Two ordering notes that survive the split:
 
-- **S6 comes before S7**, which looks backwards and is not. Running converted
-  scenes against stub verbs needs no embedding at all — the stubs are Scheme —
-  and it is the cheapest available proof that the language can express the
-  corpus. A gap found there costs far less than the same gap found after ray
-  has been rewired.
+- ~~**S6 comes before S7**~~ — **overtaken by events, 2026-10-12.** The
+  argument was that running converted scenes against stub verbs needs no
+  embedding, so it was the cheapest proof that the language can express the
+  corpus. That still holds, but the *conversion* half moved: ray's store now
+  holds a neutral `Form`, and emitting a dialect from it is a printer ray's
+  own plan wants. Building a textual converter here would be building the
+  wrong thing, and committing to a saved-file spelling before the port can
+  say what it needs. S6 is deferred to Track B and **S7 is next** — which
+  makes the handoff the thing that comes first, a better order than the one
+  this note was defending.
 - **S11, the leaf compiler, is not last.** It is the capability that justifies
   the LLVM dependency (§3.2), it needs no GC integration or deopt, and it can
   be built and differentially tested with no ray at all. The general JIT at

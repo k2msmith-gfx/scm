@@ -152,6 +152,58 @@ What scm owes, for a converted scene to run. Status as of this survey:
 | `error` / `assert` / `guard` | S9 |
 | `eval` and a walkable AST | open question 3 |
 
+## 8a. DEFERRED 2026-10-12: §8's design is superseded, and the decisions belong to the port
+
+§8 below was written when a saved ray scene was **Janet source**, so a
+conversion had to be textual. It is not any more. ray's `tool-refactor` branch
+landed A2 of its `docs/rust-api-plan.md`: the retained store now holds a
+**neutral `Form`** — `{ head, args: Vec<FormVal>, layout, precision }`, the
+call that built an entry as *data* — and `src/snapshot.rs` is an **ungated**
+Rust writer over it. A binding with no Janet VM can save a scene.
+
+Kevin's framing: the point of that design is *to make porting ray to a
+different scene-file format easy, as long as the format is a lisp dialect.*
+ray's §3.6 says the same thing and bounds it — a second printer is "six
+decisions, all local to one function", because `Form` is a call tree and so
+homoiomorphic to an s-expression and to nothing else.
+
+**So the conversion step §8 describes should not be built. The printer is the
+converter**, and it belongs to the port (Track B), not here — a saved-file
+spelling outlives the decision, and the port is what will say what it needs.
+**Deferred until ray/modeler actually move to scm.**
+
+What is worth keeping is the measurement, so the port starts from facts rather
+than from this survey again. Of ray's six decisions, **scm already answers
+four as no-ops** — verified by running them, not by reading:
+
+| `FormVal` | Janet emits | scm | |
+|---|---|---|---|
+| `Key` | `:at` | `:at` | **identical** — and no `#:` prefix, which is the thing Kevin disliked in Steel |
+| `Tuple` | `[0 1 0]` | `[0 1 0]` | **identical**, and scm *prints* it back with brackets (§4.5: a bracket vector is a constructor, and numbers self-evaluate) |
+| `Num` / `NumFull` | `0.10000000000000001`, `1e+21`, `1e+06`, `6.1232339957367574e-17` | every one reads to the correct `f64` | **no-op**. scm re-prints shortest-round-trip (`0.1`), which differs textually and loses nothing, and scm is not the one writing `.janet` |
+| `Str` / `Sym` / `Call` | `"a\"b"`, `lambertian`, `(%tex 0)` | same | **identical** |
+| `Array` | `@[…]` | `[…]` | collapses: one vector type (already in §6's hazards) |
+| `Nil` | `nil` | `#f` | §4 decided it — "there is no nil in this language", and an absent argument binds `#f`. 6 producers in ray |
+| **`Struct` / `Table`** | `{:k v}` / `@{:k v}` | **nothing** | **the one real gap** |
+
+And the gap is small, measured rather than feared: **exactly two producers in
+all of ray** emit a dictionary — the material literal (`src/snapshot.rs:336`)
+and the NURBS net (`:938`) — and both are keyword-keyed.
+
+scm already has the machinery for whatever spelling wins, which is why this is
+safe to defer rather than risky. `&keys` collects keyword arguments into an
+alist, so a dictionary constructor is one line:
+
+```scheme
+(define (%dict &keys kv) kv)
+(%dict :albedo [0.78 0.76 0.72] :shininess 32 :shader :lambertian)
+;=> ((:albedo . [0.78 0.76 0.72]) (:shininess . 32) (:shader . :lambertian))
+```
+
+The three candidate spellings — a constructor call, a bare keyword plist, or a
+quoted assoc list — are written up in this session's transcript and all three
+run today. Nothing in scm has to change first.
+
 ## 8. The gate this makes possible, without ray
 
 A converted scene can be **executed standalone**, which is stronger than
