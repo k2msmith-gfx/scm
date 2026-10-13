@@ -34,7 +34,9 @@ code wins.*
    Linux stays a requirement, not a non-goal; it is sequenced, not dropped.
 4. Leverage LLVM — `inkwell` as the interface for IR.
 5. Run standalone.
-6. Support JIT compilation.
+6. Support JIT compilation. **Met at S11** — the leaf compiler compiles
+   Scheme to native code at run time through LLJIT. S13 adds *generality*,
+   not just-in-time-ness; see §3.2's correction.
 7. Strong REPL support.
 8. **A runtime that cannot abort the host** — a panic cannot unwind out of
    `extern "C"`, and a zero NURBS weight killed a live modeler session
@@ -276,14 +278,149 @@ conflated them.**
   artifacts), field thread-safety third and least load-bearing. Target
   textures first — bigger win, easier target, and no semantic change at all
   since a texture is already a bake.
-- **The general JIT tier** — compile arbitrary Scheme with assumption
-  tracking, invalidation on redefinition, and VM fallback. Big, and by ray's
-  own measurement worth little to ray. **Stays last, and may never be worth
-  starting** — which ray's §8 already says out loud.
+- **The general tier** — compile arbitrary Scheme with assumption tracking,
+  invalidation on redefinition, and VM fallback. Big, and by ray's own
+  measurement worth little to *ray*. **Stays last**, and the decision to
+  start it is gated on a measurement (§3.2a).
 
 This is the most valuable thing the merge produces. It moves the capability
 forward and demotes the expensive half honestly, instead of averaging the two
 plans' orderings into something that serves neither.
+
+### CORRECTED 2026-10-12: requirement (6) is met at S11, not S13
+
+The paragraph above used to end "and may never be worth starting — which
+ray's §8 already says out loud". **That was wrong, and the error is worth
+naming:** ray's §8 says *"if S2's interpreter is fast enough, S5 may never be
+worth starting"* — a statement about **ray's** compiled tier, conditioned on
+ray's needs. Generalising it into a statement about scm let the first
+consumer's cost/benefit override an explicit functional requirement. ray is
+the first consumer, not the justification.
+
+**And the conflation underneath it matters more than the wording.** The plan
+used "the JIT" to mean "the general optimizing tier", which is why
+requirement (6) looked like it might go unmet:
+
+> **The leaf compiler at S11 compiles Scheme to native code at run time,
+> through LLJIT.** That *is* just-in-time compilation — S0 validated ORCv2 /
+> LLJIT specifically for it. What S13 adds is **generality**, not
+> just-in-time-ness.
+
+So requirement (6) lands at **S11**, and S13 is renamed "the general tier".
+
+#### What the risk of S13 actually is
+
+Not feasibility. The three decisions that are expensive to retrofit are all
+already made and in use:
+
+| | state |
+|---|---|
+| **invalidation on redefinition** | **done at S8.** Globals are mutable cells, never inlined values (§8 obligation 2, which called this "cheap to design in, expensive to retrofit"). The redefinition tests pass, including through live closures |
+| **deopt / the tier boundary** | the explicit stack (§5) is what makes it tractable: a compiled frame can push the frames the interpreter already walks, so materialising interpreter state is not a separate mechanism |
+| **GC integration** | precise, non-moving, roots = the explicit stack. If compiled code keeps live values in explicit frames the collector needs **no changes at all** — no LLVM statepoints, no `gc.root`, which is the genuinely awful part of LLVM |
+| **proper tail calls** | **the real technical risk.** R7RS mandates them; LLVM's `musttail` is restricted. Chez solves it with its own stack discipline. Not solved, not blocked — and it needs a spike rather than a sentence |
+| **`call/cc`** | escape continuations landed at S9; a compiled frame must be unwindable by one |
+| **LLVM churn** | risk 4 |
+
+**The honest risk is the payoff, not the feasibility.** S5b measured 26
+ns/texel compiled against T0's 22,513 — but the leaf compiler earns that by
+*dropping everything*: pure, allocation-free, no GC interaction, fixed `f64`
+types, no redefinition, no safepoints. A general tier over dynamically typed,
+allocating, redefinable Scheme must keep roots findable, honour safepoints,
+support tail calls, and bail out for anything polymorphic. Realistically that
+is single-digit multiples over a good bytecode VM for several times the work.
+
+**So: a gate, not a shrug.** At S12, measure T1 against T0 *and* against the
+leaf compiler on one workload. That is the headroom S13 would be competing
+for, and it makes the decision evidence rather than a guess written at S0.
+
+### 3.2a AOT without the general tier, and SLIME under AOT
+
+Two questions Kevin asked on 2026-10-12, recorded because the answers are
+not obvious and one of them adds a stage.
+
+**Does AOT survive without S13?** "AOT" means two things and only one of them
+needs the general tier:
+
+| | needs | without S13 |
+|---|---|---|
+| a **self-contained binary** — the runtime (already native Rust) plus the S10 image plus the program, running with no LLVM toolchain present | S10, ideally S12 | **yes** — that is literally S14's exit criterion |
+| **the program's Scheme as machine code** | a compiler for arbitrary Scheme | **no** — that *is* S13's codegen |
+
+AOT and the JIT are not alternatives: S11 already emits LLVM IR and runs it
+through LLJIT, and emitting an object file is a different *sink*
+(`TargetMachine::write_to_file`), not a different compiler.
+
+**Does AOT allow SLIME-style development?** Yes, and the three things it
+needs are already built: a persistent image (`Session`, S8), evaluating new
+code into it (`:eval` over a socket), and redefinition taking effect (globals
+as cells). An AOT'd binary links the same Rust runtime, so it *contains* its
+own evaluator — which is the whole difference from a C program.
+
+One honest asymmetry: without S13, build-time code is native and anything
+redefined at the REPL runs interpreted, so a redefined hot function would be
+**slower than the one it replaced**. SBCL has no such gap because it compiles
+everything always, with no interpreter tier.
+
+**Except for the case that matters here**, which §8 obligation 2 already
+anticipated: leaf functions are *"explicitly snapshots, recompiled on
+demand"*. So redefining a pure numeric function — a texture, a field, exactly
+what [leaf-survey.md](leaf-survey.md) measured — recompiles to native on the
+spot. S13 extends that from the pure numeric subset to arbitrary code.
+
+### DECIDED 2026-10-12: SLIME with native speed inside ray
+
+Kevin's requirement, sharper than anything the plan had: **redefine a texture
+or field in the modeler's editor pane and have it run at native speed**, in
+the embedded interpreter, without a restart.
+
+That is reachable at **S11, not S13** — ray's hot code is textures and
+fields, which is precisely the leaf subset, and ray's own 2026-09-12
+measurement found no interpreter hot spot and a ~3,200× gap between
+interpreter time and real work, so compiling scene-building code buys nothing
+measurable.
+
+Three consequences, two of which the plan did not have:
+
+1. **ray links LLVM.** Native-speed redefinition means the compiler is in the
+   *host process*; the §5 feature gate exists so a host *need not* take that
+   dependency, and ray opts in. **Kevin: not a problem** (2026-10-12), so
+   this is settled rather than open — but it does mean a ray build that
+   carries `llvm-config`, the flake pin and a multi-GB toolchain, and the
+   one-binary-many-feature-sets trap ray already has lessons about.
+2. **Risk 5 moves onto the critical path.** S0 verified LLJIT on aarch64
+   macOS for an *unsigned CLI binary*. The modeler is not signed today — no
+   plist, no entitlements — so this blocks nothing now. If it ever ships
+   signed with a hardened runtime, in-process JIT needs
+   `com.apple.security.cs.allow-jit`. Standalone `scm` is unaffected: it *is*
+   the case S0 verified.
+3. **Invalidating a compiled function under a live render — the genuinely new
+   design question.** Redefine a texture while a render is running and rayon
+   workers hold a native function pointer. The code cannot be pulled out from
+   under them: LLJIT owns the code memory and dropping it frees it mid-call.
+   So the compiled function needs a handle that outlives any worker which
+   might call it, plus a generation so a pass in flight keeps the old pointer
+   and the *next* pass picks up the new one.
+
+   **ray already has that mechanism**, in `src/live.rs`: *"`generation` — an
+   `AtomicU64` bumped on any change. The render thread snapshots it before a
+   pass and checks it between strips; a bump makes the in-flight pass abandon
+   cheaply and restart against the new state."* The pattern is written,
+   debugged and in production; the new work is binding a compiled-leaf handle
+   to it. **S11a below.**
+
+### Two prerequisites this exposed
+
+- **An ahead-of-time expansion pass is a shared prerequisite for S13 *and*
+  S14.** S5b's finding 3 — expansion is lazy inside the eval loop and no pass
+  has normalised the tree — was recorded as a cost (a measured 3.1× on
+  ordinary code, fixed by a cache). It is more than that: an AOT compiler
+  needs the whole program expanded before codegen, and so does a general
+  tier. The cache fixed the cost, not the shape. It now blocks two stages.
+- **§7 says "the JIT must be lazy"**, on S0's measurement that per-function
+  warm-up is sub-millisecond — cheap on demand, ruinous eagerly at boot. AOT
+  wants the opposite, because build time is free. The two tiers want opposite
+  policies; fine, but written down rather than discovered.
 
 ### 3.3 GC: arena vs. collector
 
@@ -1198,8 +1335,9 @@ ray's plan; those numbers are estimates.
 | **S9** ◇ | The rest of R7RS-small: chars/strings/Unicode, ports, bytevectors, `eval`, escape continuations, `dynamic-wind`. | 0.6 | conformance ≥ 95% of the declared subset, every failure individually explained |
 | **S10** ◇ | Precompiled stdlib image; the boot budget. | 0.3 | `scm -e '(values)'` < 10 ms in CI |
 | **S11** | **TL — the leaf compiler** (§6). Testable standalone: compile a pure procedure, call it from N threads, differentially test against T0. | 0.8 | a compiled field and texel function run concurrently from a rayon pool and agree with T0; the restricted subset rejects a non-pure call with a message naming why |
+| **S11a** | **Live recompilation** (§3.2a). A compiled leaf behind a handle that outlives any render worker calling it, plus a generation so an in-flight pass keeps the old pointer and the next picks up the new — modelled on ray's `live.rs`. This is what makes "redefine a texture at the REPL and get native speed" true rather than nearly true. | 0.2 | redefining a leaf function mid-render does not crash, the running pass finishes with the old code, and the next pass uses the new |
 | **S12** ◇ | T1 bytecode VM. | 0.7 | the benchmark suite against T0; T0/T1 agree on every conformance test and every converted scene |
-| **S13** ◇ | T2 — the general JIT, with assumption tracking and invalidation. May never be worth starting (§3.2). | 1.5+ | T1/T2 agree on everything; redefining a global at the REPL invalidates compiled callers |
+| **S13** ◇ | **T2 — the general tier**, with assumption tracking and invalidation. NOT "the JIT": requirement (6) is met at S11 (§3.2). Gated on S12's measurement rather than assumed either way. | 1.5+ | T1/T2 agree on everything; redefining a global at the REPL invalidates compiled callers |
 | **S14** ◇ | T3 AOT + `scm build`. | 0.8 | a hello-world binary runs with no toolchain present |
 
 ### Track B — ray adopts scm (a separate project)
@@ -1299,10 +1437,13 @@ conformance percentage with an unexplained remainder is a marketing number.
    feature flag per LLVM version, `llvm-config` discovery, a multi-GB
    toolchain. *Mitigation: flake pin; LLVM off by default; the two-sided CI
    gate.*
-5. **macOS arm64 JIT specifics.** S0 found LLJIT handled W^X with no `MAP_JIT`
-   work — for an *unsigned CLI binary*. A signed, hardened-runtime app, which
-   is how the modeler would ship, still needs
-   `com.apple.security.cs.allow-jit`. *Shrunk, not closed.*
+5. **macOS arm64 JIT specifics**, and **this is now on the critical path**
+   (2026-10-12). S0 found LLJIT handled W^X with no `MAP_JIT` work — for an
+   *unsigned CLI binary*. §3.2a's requirement puts the JIT inside ray, and a
+   signed, hardened-runtime app needs `com.apple.security.cs.allow-jit`.
+   *Mitigation: the modeler is not signed today — no plist, no entitlements —
+   so nothing is blocked now; and standalone `scm` is exactly the case S0
+   verified. What changed is that this stopped being hypothetical.*
 6. **R7RS-small is bigger than it reads.** Hygiene, the library system,
    Unicode and ports are each weeks. *Mitigation: the conformance number makes
    progress visible from S5, and §2.3 plus §3.1 legitimately remove three
