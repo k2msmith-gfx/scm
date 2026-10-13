@@ -41,6 +41,27 @@ pub struct NamedParam {
     pub default: Option<Value>,
 }
 
+/// What kind of condition an error object carries. R7RS asks `read-error?`
+/// and `file-error?` to distinguish these, so the distinction has to be
+/// recorded when the object is made rather than guessed at later.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ErrorKind {
+    Plain,
+    Read,
+    File,
+}
+
+/// A textual port. Binary ports are not implemented; `binary-port?` says so.
+#[derive(Clone, Debug)]
+pub enum PortKind {
+    /// An in-memory input port over a string.
+    StringIn { chars: Vec<char>, pos: usize },
+    /// An in-memory output port, accumulating.
+    StringOut(String),
+    Stdout,
+    Stderr,
+}
+
 #[derive(Clone, Debug)]
 pub enum Obj {
     Pair(Value, Value),
@@ -67,13 +88,15 @@ pub enum Obj {
         slot: usize,
         converter: Option<Value>,
     },
-    /// An error object (R7RS `error-object?`). Rust-originated refusals
-    /// become one of these when they are *caught*, so `guard` can ask them
-    /// for a message and irritants rather than being handed a bare string.
+    /// An error object (R7RS `error-object?`). A Rust-originated refusal
+    /// becomes one when it is *caught*, so `guard` can ask it for a message
+    /// and irritants rather than being handed a bare string.
     ErrorObj {
         message: Value,
         irritants: Value,
+        kind: ErrorKind,
     },
+    Port { kind: PortKind, open: bool },
     /// A pseudo-random generator's state. Mutable, and reachable only through
     /// a parameter, so `parameterize` can rebind it the way ray's `:ray-rng`
     /// does -- which is what makes a `:seed` replayable.
@@ -160,6 +183,12 @@ impl Interner {
         let id = self.sym_names.len() as u32;
         self.sym_names.push(format!("{base}.{id}"));
         SymId(id)
+    }
+
+    /// Look a symbol up *without* interning it. `param_now` needs this: asking
+    /// for a name that was never defined must not create it.
+    pub fn lookup(&self, name: &str) -> Option<SymId> {
+        self.sym_ids.get(name).copied().map(SymId)
     }
 
     pub fn sym_name(&self, id: SymId) -> &str {
@@ -374,10 +403,13 @@ impl Engine {
                         }
                     }
                     Obj::Parameter { converter, .. } => work.extend(converter.iter().copied()),
-                    Obj::ErrorObj { message, irritants } => {
+                    Obj::ErrorObj {
+                        message, irritants, ..
+                    } => {
                         work.push(*message);
                         work.push(*irritants);
                     }
+                    Obj::Port { .. } => {}
                     Obj::Str(_) | Obj::Bytevector(_) | Obj::Rng(_) => {}
                 },
             }
@@ -476,6 +508,18 @@ impl Engine {
 
     pub fn vector(&mut self, items: Vec<Value>, bracket: bool) -> Value {
         self.alloc(Obj::Vector { items, bracket })
+    }
+
+    pub fn error_obj(&mut self, message: Value, irritants: Value, kind: ErrorKind) -> Value {
+        self.alloc(Obj::ErrorObj {
+            message,
+            irritants,
+            kind,
+        })
+    }
+
+    pub fn port(&mut self, kind: PortKind) -> Value {
+        self.alloc(Obj::Port { kind, open: true })
     }
 
     pub fn bytevector(&mut self, bytes: Vec<u8>) -> Value {

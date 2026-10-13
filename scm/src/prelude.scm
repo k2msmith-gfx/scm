@@ -399,3 +399,35 @@
 ;; raised object of any kind rather than only on an error object.
 (define (error-message obj)
   (if (error-object? obj) (error-object-message obj) (format "~a" obj)))
+
+;; ── the current ports ───────────────────────────────────────────────────
+;;
+;; Parameters, not globals, so output can be redirected for a dynamic extent:
+;;
+;;   (let ([buf (open-output-string)])
+;;     (parameterize ([current-output-port buf]) (describe-the-scene))
+;;     (get-output-string buf))
+;;
+;; which is what ray writes as `(with-dyns [:out buf] (snapshot))`.
+
+(define current-output-port (make-parameter (%stdout-port)))
+(define current-error-port (make-parameter (%stderr-port)))
+(define current-input-port (make-parameter (open-input-string "")))
+
+(define (call-with-port port proc)
+  (let ([r (proc port)])
+    (close-port port)
+    r))
+
+;; Not R7RS, and the single most useful thing a readout wants.
+(define (with-output-to-string thunk)
+  (let ([buf (open-output-string)])
+    (parameterize ([current-output-port buf]) (thunk))
+    (get-output-string buf)))
+
+(define (read-string-all port)
+  (let loop ((acc '()))
+    (let ([c (read-char port)])
+      (if (eof-object? c)
+          (list->string (reverse acc))
+          (loop (cons c acc))))))

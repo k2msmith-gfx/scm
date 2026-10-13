@@ -503,10 +503,8 @@ impl Vm {
             VmError::Raised(v, _) => v,
             VmError::Error(text) => {
                 let message = self.engine.string(&text);
-                self.engine.alloc(Obj::ErrorObj {
-                    message,
-                    irritants: Value::Null,
-                })
+                self.engine
+                    .error_obj(message, Value::Null, crate::heap::ErrorKind::Plain)
             }
             _ => unreachable!("guarded above"),
         };
@@ -672,7 +670,8 @@ impl Vm {
                 | Obj::Env { .. }
                 | Obj::Parameter { .. }
                 | Obj::Rng(_)
-                | Obj::ErrorObj { .. } => Ok(Step::Return(expr)),
+                | Obj::ErrorObj { .. }
+                | Obj::Port { .. } => Ok(Step::Return(expr)),
                 Obj::Pair(car, cdr) => {
                     // A macro use is expanded before anything else is decided
                     // about the form, and only when nothing shadows its name.

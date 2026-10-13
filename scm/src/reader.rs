@@ -91,6 +91,12 @@ impl Reader {
         Ok(out)
     }
 
+    /// How many characters have been consumed. A port-backed `read` needs
+    /// this to advance its cursor by exactly one datum.
+    pub fn consumed(&self) -> usize {
+        self.pos
+    }
+
     /// The next datum, or `None` at end of input.
     pub fn read(&mut self, e: &mut Engine) -> RResult<Option<Value>> {
         self.skip_atmosphere()?;

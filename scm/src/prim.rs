@@ -8,7 +8,7 @@
 //!   * **`(/ 8 3)` is inexact**, because `ratios` is not claimed -- which is
 //!     the Steel trap avoided by construction rather than by discipline.
 
-use crate::heap::{Engine, Obj};
+use crate::heap::{Engine, ErrorKind, Obj, PortKind};
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
 use crate::value::ObjRef;
@@ -338,6 +338,7 @@ fn is_symbol(_e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Bool(matches!(one("symbol?", a)?, Value::Symbol(_))))
 }
 
+#[allow(dead_code)]
 /// A placeholder: `apply` is recognised by the VM before a primitive is ever
 /// called, because a primitive cannot reach the control stack to call
 /// anything. This body exists so the name has a slot in the table.
@@ -552,16 +553,69 @@ fn p_is_number(_e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Bool(as_f64(one("number?", a)?).is_some()))
 }
 
-fn display(e: &mut Engine, a: &[Value]) -> PResult {
-    for &v in a {
-        print!("{}", display_str(e, v));
+/// The port to write to: the optional argument, or `current-output-port`.
+fn out_port(vm: &Vm, a: &[Value], at: usize) -> Result<Value, VmError> {
+    match a.get(at) {
+        Some(v) => Ok(*v),
+        None => param_now(vm, "current-output-port"),
     }
+}
+
+fn display(vm: &mut Vm, a: &[Value]) -> PResult {
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("display: expects a value")),
+    };
+    let port = out_port(vm, a, 1)?;
+    let text = display_str(&vm.engine, v);
+    emit(&mut vm.engine, port, &text)?;
     Ok(Value::Unspecified)
 }
 
-fn newline(_e: &mut Engine, _a: &[Value]) -> PResult {
-    println!();
+fn write_prim(vm: &mut Vm, a: &[Value]) -> PResult {
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("write: expects a value")),
+    };
+    let port = out_port(vm, a, 1)?;
+    let text = write_str(&vm.engine, v);
+    emit(&mut vm.engine, port, &text)?;
     Ok(Value::Unspecified)
+}
+
+fn newline(vm: &mut Vm, a: &[Value]) -> PResult {
+    let port = out_port(vm, a, 0)?;
+    emit(&mut vm.engine, port, "\n")?;
+    Ok(Value::Unspecified)
+}
+
+fn write_char(vm: &mut Vm, a: &[Value]) -> PResult {
+    let c = match a.first() {
+        Some(Value::Char(c)) => *c,
+        _ => return Err(err("write-char: expects a character")),
+    };
+    let port = out_port(vm, a, 1)?;
+    emit(&mut vm.engine, port, &c.to_string())?;
+    Ok(Value::Unspecified)
+}
+
+fn write_string(vm: &mut Vm, a: &[Value]) -> PResult {
+    let v = match a.first() {
+        Some(v) => *v,
+        None => return Err(err("write-string: expects a string")),
+    };
+    let text: String = chars_of("write-string", &vm.engine, v)?.into_iter().collect();
+    let port = out_port(vm, a, 1)?;
+    emit(&mut vm.engine, port, &text)?;
+    Ok(Value::Unspecified)
+}
+
+fn read_char_prim(e: &mut Engine, a: &[Value]) -> PResult {
+    read_char(e, a, false)
+}
+
+fn peek_char_prim(e: &mut Engine, a: &[Value]) -> PResult {
+    read_char(e, a, true)
 }
 
 
@@ -1157,7 +1211,7 @@ fn error_prim(e: &mut Engine, a: &[Value]) -> PResult {
         None => e.string("error"),
     };
     let irritants = e.list(a.get(1..).unwrap_or(&[]));
-    let obj = e.alloc(Obj::ErrorObj { message, irritants });
+    let obj = e.error_obj(message, irritants, ErrorKind::Plain);
     let text = write_str(e, obj);
     Err(VmError::Raised(obj, text))
 }
@@ -1206,14 +1260,19 @@ fn error_object_irritants(e: &mut Engine, a: &[Value]) -> PResult {
 /// R7RS distinguishes read errors and file errors from other conditions. The
 /// reader does not raise through this path yet and there is no file I/O, so
 /// both answer honestly rather than guessing.
-fn is_read_error(_e: &mut Engine, a: &[Value]) -> PResult {
-    let _ = one("read-error?", a)?;
-    Ok(Value::Bool(false))
+fn error_kind_is(e: &Engine, v: Value, want: ErrorKind) -> bool {
+    matches!(v, Value::Obj(r)
+        if matches!(e.obj(r), Obj::ErrorObj { kind, .. } if *kind == want))
 }
 
-fn is_file_error(_e: &mut Engine, a: &[Value]) -> PResult {
-    let _ = one("file-error?", a)?;
-    Ok(Value::Bool(false))
+fn is_read_error(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("read-error?", a)?;
+    Ok(Value::Bool(error_kind_is(e, v, ErrorKind::Read)))
+}
+
+fn is_file_error(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("file-error?", a)?;
+    Ok(Value::Bool(error_kind_is(e, v, ErrorKind::File)))
 }
 
 fn is_boolean(_e: &mut Engine, a: &[Value]) -> PResult {
@@ -1256,13 +1315,6 @@ fn is_odd(e: &mut Engine, a: &[Value]) -> PResult {
 }
 fn is_nan(e: &mut Engine, a: &[Value]) -> PResult {
     num_pred("nan?", e, a, |x| x.is_nan())
-}
-
-fn write_prim(e: &mut Engine, a: &[Value]) -> PResult {
-    for &v in a {
-        print!("{}", write_str(e, v));
-    }
-    Ok(Value::Unspecified)
 }
 
 // ── parameters ───────────────────────────────────────────────────────────
@@ -1338,23 +1390,34 @@ fn rng_ref(who: &str, vm: &Vm, v: Value) -> Result<ObjRef, VmError> {
     }
 }
 
+/// The current value of a global parameter, by name.
+///
+/// This is how a primitive honours `current-output-port` and
+/// `current-random-source`: the default comes from the parameter, so
+/// `parameterize` redirects it -- which is the same thing ray does with
+/// `(with-dyns [:out buf] (snapshot))`.
+fn param_now(vm: &Vm, name: &str) -> Result<Value, VmError> {
+    let Some(sym) = vm.engine.interner.lookup(name) else {
+        return Err(err(format!("{name} is not bound")));
+    };
+    let Some(param) = vm.global(sym) else {
+        return Err(err(format!("{name} is not bound")));
+    };
+    match param {
+        Value::Obj(r) => match vm.engine.obj(r) {
+            Obj::Parameter { slot, .. } => Ok(vm.param_value(*slot)),
+            _ => Err(err(format!("{name} is not a parameter"))),
+        },
+        _ => Err(err(format!("{name} is not a parameter"))),
+    }
+}
+
 /// The source to use when none is given: the value of `current-random-source`.
 fn current_source(vm: &mut Vm, who: &str, a: &[Value], at: usize) -> Result<ObjRef, VmError> {
     if let Some(v) = a.get(at) {
         return rng_ref(who, vm, *v);
     }
-    let sym = vm.engine.interner.symbol("current-random-source");
-    let Some(param) = vm.global(sym) else {
-        return Err(err(format!("{who}: current-random-source is not bound")));
-    };
-    let slot = match param {
-        Value::Obj(r) => match vm.engine.obj(r) {
-            Obj::Parameter { slot, .. } => *slot,
-            _ => return Err(err("current-random-source is not a parameter")),
-        },
-        _ => return Err(err("current-random-source is not a parameter")),
-    };
-    let v = vm.param_value(slot);
+    let v = param_now(vm, "current-random-source")?;
     rng_ref(who, vm, v)
 }
 
@@ -1469,6 +1532,256 @@ fn qq_list_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
     Ok(e.vector(items, bracket))
 }
 
+
+// ── ports ────────────────────────────────────────────────────────────────
+//
+// Textual ports only. Most of what the R7RS suite exercises through them is
+// the reader and the printer that already existed since S1 -- `read` is this
+// reader pointed at a port, and `(write x out)` plus `get-output-string` is
+// how the suite reaches the writer. So this block mostly *exposes* work
+// already done and tested in Rust.
+//
+// `current-output-port` is a parameter, which is what makes
+// `(parameterize ([current-output-port buf]) …)` work -- the same thing ray
+// does with `(with-dyns [:out buf] (snapshot))`.
+
+fn port_ref(who: &str, e: &Engine, v: Value) -> Result<crate::value::ObjRef, VmError> {
+    match v {
+        Value::Obj(r) if matches!(e.obj(r), Obj::Port { .. }) => Ok(r),
+        _ => Err(err(format!("{who}: not a port: {}", write_str(e, v)))),
+    }
+}
+
+fn open_input_string(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("open-input-string", a)?;
+    let chars = chars_of("open-input-string", e, v)?;
+    Ok(e.port(PortKind::StringIn { chars, pos: 0 }))
+}
+
+fn open_output_string(e: &mut Engine, a: &[Value]) -> PResult {
+    if !a.is_empty() {
+        return Err(err("open-output-string: takes no arguments"));
+    }
+    Ok(e.port(PortKind::StringOut(String::new())))
+}
+
+fn get_output_string(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("get-output-string", a)?;
+    let r = port_ref("get-output-string", e, v)?;
+    let text = match e.obj(r) {
+        Obj::Port {
+            kind: PortKind::StringOut(s),
+            ..
+        } => s.clone(),
+        _ => return Err(err("get-output-string: not a string output port")),
+    };
+    Ok(e.string(&text))
+}
+
+/// Write text to a port. The one place output actually leaves the system.
+fn emit(e: &mut Engine, port: Value, text: &str) -> Result<(), VmError> {
+    let r = port_ref("write", e, port)?;
+    match e.obj_mut(r) {
+        Obj::Port { open: false, .. } => Err(err("write: the port is closed")),
+        Obj::Port {
+            kind: PortKind::StringOut(s),
+            ..
+        } => {
+            s.push_str(text);
+            Ok(())
+        }
+        Obj::Port {
+            kind: PortKind::Stdout,
+            ..
+        } => {
+            print!("{text}");
+            Ok(())
+        }
+        Obj::Port {
+            kind: PortKind::Stderr,
+            ..
+        } => {
+            eprint!("{text}");
+            Ok(())
+        }
+        _ => Err(err("write: not an output port")),
+    }
+}
+
+fn read_char(e: &mut Engine, a: &[Value], peek: bool) -> PResult {
+    let v = one(if peek { "peek-char" } else { "read-char" }, a)?;
+    let r = port_ref("read-char", e, v)?;
+    match e.obj_mut(r) {
+        Obj::Port {
+            kind: PortKind::StringIn { chars, pos },
+            ..
+        } => match chars.get(*pos).copied() {
+            Some(c) => {
+                if !peek {
+                    *pos += 1;
+                }
+                Ok(Value::Char(c))
+            }
+            None => Ok(Value::Eof),
+        },
+        _ => Err(err("read-char: not a textual input port")),
+    }
+}
+
+fn read_line(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("read-line", a)?;
+    let r = port_ref("read-line", e, v)?;
+    let line = match e.obj_mut(r) {
+        Obj::Port {
+            kind: PortKind::StringIn { chars, pos },
+            ..
+        } => {
+            if *pos >= chars.len() {
+                None
+            } else {
+                let mut out = String::new();
+                while *pos < chars.len() {
+                    let c = chars[*pos];
+                    *pos += 1;
+                    if c == '\n' {
+                        break;
+                    }
+                    out.push(c);
+                }
+                Some(out)
+            }
+        }
+        _ => return Err(err("read-line: not a textual input port")),
+    };
+    match line {
+        Some(text) => Ok(e.string(&text)),
+        None => Ok(Value::Eof),
+    }
+}
+
+/// `read`: this reader, pointed at a port, advancing its cursor by exactly
+/// one datum. A truncated datum is a **read error**, which `read-error?`
+/// can then identify — the suite tests exactly that.
+fn read_datum(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("read", a)?;
+    let r = port_ref("read", e, v)?;
+    let (text, base) = match e.obj(r) {
+        Obj::Port {
+            kind: PortKind::StringIn { chars, pos },
+            ..
+        } => (chars[*pos..].iter().collect::<String>(), *pos),
+        _ => return Err(err("read: not a textual input port")),
+    };
+    let mut reader = crate::reader::Reader::new(&text);
+    match reader.read(e) {
+        Ok(None) => Ok(Value::Eof),
+        Ok(Some(datum)) => {
+            let consumed = reader.consumed();
+            if let Obj::Port {
+                kind: PortKind::StringIn { pos, .. },
+                ..
+            } = e.obj_mut(r)
+            {
+                *pos = base + consumed;
+            }
+            Ok(datum)
+        }
+        Err(re) => {
+            let msg = e.string(&format!("read: {re}"));
+            let obj = e.error_obj(msg, Value::Null, ErrorKind::Read);
+            let shown = write_str(e, obj);
+            Err(VmError::Raised(obj, shown))
+        }
+    }
+}
+
+fn stdout_port(e: &mut Engine, _a: &[Value]) -> PResult {
+    Ok(e.port(PortKind::Stdout))
+}
+
+fn stderr_port(e: &mut Engine, _a: &[Value]) -> PResult {
+    Ok(e.port(PortKind::Stderr))
+}
+
+fn eof_object(_e: &mut Engine, a: &[Value]) -> PResult {
+    if !a.is_empty() {
+        return Err(err("eof-object: takes no arguments"));
+    }
+    Ok(Value::Eof)
+}
+
+fn is_eof_object(_e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(matches!(one("eof-object?", a)?, Value::Eof)))
+}
+
+fn port_pred(who: &'static str, e: &Engine, a: &[Value], f: fn(&PortKind) -> bool) -> PResult {
+    let v = one(who, a)?;
+    Ok(Value::Bool(match v {
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Port { kind, .. } => f(kind),
+            _ => false,
+        },
+        _ => false,
+    }))
+}
+
+fn is_port(e: &mut Engine, a: &[Value]) -> PResult {
+    port_pred("port?", e, a, |_| true)
+}
+fn is_input_port(e: &mut Engine, a: &[Value]) -> PResult {
+    port_pred("input-port?", e, a, |k| {
+        matches!(k, PortKind::StringIn { .. })
+    })
+}
+fn is_output_port(e: &mut Engine, a: &[Value]) -> PResult {
+    port_pred("output-port?", e, a, |k| {
+        !matches!(k, PortKind::StringIn { .. })
+    })
+}
+fn is_textual_port(e: &mut Engine, a: &[Value]) -> PResult {
+    port_pred("textual-port?", e, a, |_| true)
+}
+/// There are no binary ports, and saying so is better than implying there are.
+fn is_binary_port(e: &mut Engine, a: &[Value]) -> PResult {
+    port_pred("binary-port?", e, a, |_| false)
+}
+
+fn port_open(who: &'static str, e: &Engine, a: &[Value], input: bool) -> PResult {
+    let v = one(who, a)?;
+    Ok(Value::Bool(match v {
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Port { kind, open } => {
+                *open && (matches!(kind, PortKind::StringIn { .. }) == input)
+            }
+            _ => false,
+        },
+        _ => false,
+    }))
+}
+
+fn is_input_port_open(e: &mut Engine, a: &[Value]) -> PResult {
+    port_open("input-port-open?", e, a, true)
+}
+fn is_output_port_open(e: &mut Engine, a: &[Value]) -> PResult {
+    port_open("output-port-open?", e, a, false)
+}
+
+fn close_port(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("close-port", a)?;
+    let r = port_ref("close-port", e, v)?;
+    if let Obj::Port { open, .. } = e.obj_mut(r) {
+        *open = false;
+    }
+    Ok(Value::Unspecified)
+}
+
+/// `char-ready?` is true for a string port: the characters are already here.
+fn is_char_ready(e: &mut Engine, a: &[Value]) -> PResult {
+    port_pred("char-ready?", e, a, |k| {
+        matches!(k, PortKind::StringIn { .. })
+    })
+}
+
 pub fn install(vm: &mut Vm) {
     vm.define_prim("+", add);
     vm.define_prim("-", sub);
@@ -1521,9 +1834,34 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("inexact", p_exact_to_inexact);
     vm.define_prim("exact?", p_is_exact);
     vm.define_prim("number?", p_is_number);
-    vm.define_prim("display", display);
-    vm.define_prim("write", write_prim);
-    vm.define_prim("newline", newline);
+    vm.define_vm_prim("display", display);
+    vm.define_vm_prim("write", write_prim);
+    vm.define_vm_prim("newline", newline);
+    vm.define_vm_prim("write-char", write_char);
+    vm.define_vm_prim("write-string", write_string);
+    // ports
+    vm.define_prim("open-input-string", open_input_string);
+    vm.define_prim("open-output-string", open_output_string);
+    vm.define_prim("get-output-string", get_output_string);
+    vm.define_prim("read", read_datum);
+    vm.define_prim("read-char", read_char_prim);
+    vm.define_prim("peek-char", peek_char_prim);
+    vm.define_prim("read-line", read_line);
+    vm.define_prim("eof-object", eof_object);
+    vm.define_prim("eof-object?", is_eof_object);
+    vm.define_prim("port?", is_port);
+    vm.define_prim("input-port?", is_input_port);
+    vm.define_prim("output-port?", is_output_port);
+    vm.define_prim("textual-port?", is_textual_port);
+    vm.define_prim("binary-port?", is_binary_port);
+    vm.define_prim("input-port-open?", is_input_port_open);
+    vm.define_prim("output-port-open?", is_output_port_open);
+    vm.define_prim("close-port", close_port);
+    vm.define_prim("close-input-port", close_port);
+    vm.define_prim("close-output-port", close_port);
+    vm.define_prim("char-ready?", is_char_ready);
+    vm.define_prim("%stdout-port", stdout_port);
+    vm.define_prim("%stderr-port", stderr_port);
     // vectors, including the growable addition
     vm.define_prim("make-vector", make_vector);
     vm.define_prim("vector-set!", vector_set);
