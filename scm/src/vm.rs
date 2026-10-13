@@ -608,8 +608,9 @@ impl Vm {
             }
         }
         // The derived forms are Scheme, not Rust. Compiling them at every
-        // `Vm::new` is exactly the cost plan §7 budgets a build-time image
-        // against at S10 -- measured there, not guessed at here.
+        // `Vm::new` is the cost plan §7 budgeted a build-time image against;
+        // S10 measured it at 0.37 ms and deferred the image. The gate that
+        // says when that changes is `scm-cli/tests/boot.rs`.
         if let Err(e) = vm.eval_str(PRELUDE) {
             panic!("the prelude failed to load: {e}");
         }

@@ -4,11 +4,12 @@ An R7RS-small Scheme in Rust: embeddable as a crate, runnable standalone, with
 an LLVM-backed JIT and native AOT compilation on x86-64 Linux and aarch64
 macOS — and ray's scripting language.
 
-**Status: planning**, S0 closed on aarch64 macOS. Development targets
-**aarch64 macOS first**; x86-64 Linux is sequenced later, not dropped
-(plan §2.5). The plan is in
-[docs/plan.md](docs/plan.md); the LLVM feasibility results are in
-[docs/s0-findings.md](docs/s0-findings.md).
+**Status: S0–S10 done** on aarch64 macOS — reader, interpreter, GC, the
+lambda list, `syntax-rules`, the embedding API, the REPL protocol, the rest
+of R7RS-small, and the boot budget. Next is S11, the leaf compiler.
+Development targets **aarch64 macOS first**; x86-64 Linux is sequenced
+later, not dropped (plan §2.5). The plan is in [docs/plan.md](docs/plan.md);
+the LLVM feasibility results are in [docs/s0-findings.md](docs/s0-findings.md).
 
 ## Running it
 
@@ -17,6 +18,10 @@ macOS — and ray's scripting language.
     ./target/release/scm -e '(+ 1 2 3)'       # one expression
     ./target/release/scm scene.scm            # a file
     ./target/release/scm --fuel 10000 …       # bound a runaway
+    ./target/release/scm --serve 127.0.0.1:7000   # the REPL protocol over TCP
+
+Boot is budgeted at under 10 ms for the whole process and measured at 1.8 ms;
+`cargo test` fails if it regresses (plan §7).
 
 ```
 scm> (define (fact n)
@@ -30,19 +35,19 @@ scm> (seq (i 0 5) (* i i))
 ```
 
 An unclosed paren continues the entry rather than reporting an error, which
-is what S1's *incomplete* vs *invalid* distinction was for. This is the thin
-REPL; the protocol with several clients is S8.
+is what S1's *incomplete* vs *invalid* distinction was for. The terminal and
+the socket are two clients of one protocol, [docs/repl.md](docs/repl.md).
 
 ## Conformance
 
     cargo run --release -p scm-conform -- scm-conform/suites/r7rs-tests.scm out.md
 
-Chibi-Scheme's `r7rs-tests.scm` — 989 assertions written by other people
-against the spec — vendored unedited. First baseline: **432 passed, 510
-failed, 45.9%**, and a low number is the right outcome at this stage rather
-than a grade. The finding was not the number: **of 510 failures only 22 were
-wrong answers**, and it found three bugs and reordered the work list. See
-[docs/conformance.md](docs/conformance.md).
+Chibi-Scheme's `r7rs-tests.scm` — written by other people against the spec
+— vendored unedited. The first baseline was **45.9%**; after S9 it is
+**1103 of 1114, 99.0% of the declared subset**, and each of the 11 remaining
+failures is explained individually: 4 are declines recorded before they were
+measured, 7 are hygiene corners. A percentage with an unexplained remainder
+is a marketing number. See [docs/conformance.md](docs/conformance.md).
 
 ## Requirements
 

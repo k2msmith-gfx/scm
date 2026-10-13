@@ -1154,6 +1154,26 @@ Design that out rather than discovering it:
 This also matters to ray directly: a 109 ms per-process tax is nothing in a
 modeler session and real across `--batch` sweeps and the demo films.
 
+### MEASURED 2026-10-13: the budget is met without the image
+
+The shape §7 warned about is exactly scm's shape — the prelude is an
+`include_str!` constant compiled at every `Vm::new` — and the outcome is
+different by two orders of magnitude, because the prelude is 748 lines and
+the expander is cheap:
+
+| | release | test profile |
+|---|---|---|
+| `Vm::new`, prelude compiled from source | 0.37 ms | — |
+| `scm --version` — exec and dynamic linking | 1.3 ms | 1.5 ms |
+| `scm -e '(values)'` — the whole process | **1.8 ms** | **5.2 ms** |
+
+The image would save a third of a millisecond out of a 10 ms budget, and
+most of what remains is the process itself. So S10 built the **gate** and not
+the image: `scm-cli/tests/boot.rs` spawns the binary, takes the best of ten
+runs, and fails under 10 ms. The first bullet above stays as the design rule
+it was — the interner is a field of `Engine`, not a static, and that is what
+keeps the image buildable later — and the gate is what says when "later" is.
+
 ---
 
 ## 7a. S7: the embedding API, and the three things measured first
@@ -1333,7 +1353,7 @@ ray's plan; those numbers are estimates.
 | **S7** ◇ | **done 2026-10-12** — §7a, `scm/src/embed.rs`, `scm/examples/host.rs`. **Embedding API.** Safe handles, rooting, host-function registration, errors as `Result`, interrupt/timeout/fuel exposed to the host. **The handoff to Track B.** | 0.5 | **met**: the sample host is **20 body lines**; the fuzzed harness caught **0 panics** and found **4 aborts**, all fixed; fuel, heap cap, interrupt and wall-clock timeout each kill a runaway and none is catchable by the script. *Not* yet: a host function cannot re-enter the VM. |
 | **S8** ◇ | **done 2026-10-12** — [repl.md](repl.md), `scm/src/repl.rs`. **REPL core**: the eval protocol, interactive environment, redefinition, backtraces over live frames, introspection. Terminal client in `scm-cli`. | 0.6 | **met**: one `Session::handle` with a terminal and a socket client that cannot diverge (tested op by op); a runaway interruptible from a second connection with the session alive after; a backtrace naming frames **and** spans, including the innermost call when proper tail calls have left no frame at all. Framing *is* the reader; docstrings are values. **Stretch goal still open**: the break REPL. |
 | **S9** ◇ | **done 2026-10-13** — [conformance.md](conformance.md). The rest of R7RS-small: chars/strings/Unicode, ports, bytevectors, `eval`, escape continuations, `dynamic-wind`. | 0.6 | **met**: **99.0% of the declared subset** (1103/1114), and all 11 remaining failures explained individually — 4 declines recorded before they were measured, 7 hygiene corners left for what they are. `(scheme eval)`'s first-class `environment` is **declined explicitly** rather than left looking like an oversight. |
-| **S10** ◇ | Precompiled stdlib image; the boot budget. | 0.3 | `scm -e '(values)'` < 10 ms in CI |
+| **S10** ◇ | **done 2026-10-13** — the gate is `scm-cli/tests/boot.rs`, the breakdown `scm/examples/boot`. **The boot budget**, and the precompiled stdlib image that §7 expected to reach it. **Measured first, and the image is deferred**: compiling the 748-line prelude from source costs **0.37 ms**; the whole process is **1.8 ms**, of which **1.3 ms is `scm --version`** — exec and dynamic linking, which no image reduces. The budget is met 5× over in release and 2× over in the unoptimized test profile, with nothing built. §7's design constraint survives: the interner lives in `Engine`, there is no global state an image could not reconstruct, so the image stays buildable the day it is due. **The trigger**: the gate takes the *best* of ten whole-process runs, so it fails on a regression in the binary and not on a loaded machine; when it fails because the prelude grew, the image is the next thing to build. | 0.3 | **met**: `scm -e '(values)'` < 10 ms, asserted by `cargo test` in both profiles |
 | **S11** | **TL — the leaf compiler** (§6). Testable standalone: compile a pure procedure, call it from N threads, differentially test against T0. | 0.8 | a compiled field and texel function run concurrently from a rayon pool and agree with T0; the restricted subset rejects a non-pure call with a message naming why |
 | **S11a** | **Live recompilation** (§3.2a). A compiled leaf behind a handle that outlives any render worker calling it, plus a generation so an in-flight pass keeps the old pointer and the next picks up the new — modelled on ray's `live.rs`. This is what makes "redefine a texture at the REPL and get native speed" true rather than nearly true. | 0.2 | redefining a leaf function mid-render does not crash, the running pass finishes with the old code, and the next pass uses the new |
 | **S12** ◇ | T1 bytecode VM. | 0.7 | the benchmark suite against T0; T0/T1 agree on every conformance test and every converted scene |
