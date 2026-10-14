@@ -169,10 +169,61 @@ pub enum Val {
     List(Vec<Val>),
     Vector(Vec<Val>),
     Bytes(Vec<u8>),
-    /// Something with no host representation: a procedure, a port, a
-    /// parameter, an improper list, or a structure deeper than the depth
-    /// limit. Reach it with [`Rooted`] and Scheme.
+    /// A procedure, rooted while any clone of this exists. Call it with
+    /// [`Host::call`] from inside a host function, or [`Interp::call`]
+    /// from outside; store it and call it later, since it stays rooted.
+    Proc(Proc),
+    /// Something with no host representation: a port, a parameter, an
+    /// improper list, or a structure deeper than the depth limit. Reach it
+    /// with [`Rooted`] and Scheme.
     Opaque,
+}
+
+/// A Scheme procedure in the host's hands. Clones share one root, released
+/// when the last clone is dropped.
+#[derive(Clone, Debug)]
+pub struct Proc(Rc<Rooted>);
+
+impl PartialEq for Proc {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.handle == other.0.handle
+    }
+}
+
+impl Proc {
+    pub fn rooted(&self) -> &Rooted {
+        &self.0
+    }
+}
+
+/// What a re-entrant host function gets besides its arguments: the machine
+/// behind a small door. Nested evaluation leaves the caller's frames where
+/// they are, so a host function that calls back into Scheme is ordinary.
+pub struct Host<'a> {
+    vm: &'a mut Vm,
+    id: u64,
+    pending: Pending,
+}
+
+impl Host<'_> {
+    /// Apply a Scheme procedure to host values and wait for its result. A
+    /// Scheme error comes back as the message, which the host function may
+    /// pass on or handle.
+    pub fn call(&mut self, f: &Proc, args: &[Val]) -> Result<Val, String> {
+        let fv = self.vm.engine.handle_value(f.0.handle).ok_or("a dropped procedure")?;
+        let mut vals = Vec::with_capacity(args.len());
+        for a in args {
+            vals.push(build_val(&mut self.vm.engine, a, 0).map_err(|e| format!("{e}"))?);
+        }
+        let out = self.vm.call_procedure(fv, vals).map_err(|e| format!("{e}"))?;
+        Ok(read_val_rooting(&mut self.vm.engine, out, 0, self.id, &self.pending))
+    }
+
+    /// Evaluate source at top level.
+    pub fn eval(&mut self, src: &str) -> Result<Val, String> {
+        let out = self.vm.eval_str(src).map_err(|e| format!("{e}"))?;
+        Ok(read_val_rooting(&mut self.vm.engine, out, 0, self.id, &self.pending))
+    }
 }
 
 /// An embedded Scheme interpreter.
@@ -356,6 +407,60 @@ impl Interp {
         let vm = &mut self.vm;
         match guard(|| vm.define_host_fn(name, f)) {
             Ok(()) => Ok(()),
+            Err(e) => {
+                self.poisoned = Some(format!("{e}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Register a host function that can call back into Scheme: it gets a
+    /// [`Host`] and its arguments, with procedures among them as
+    /// [`Val::Proc`]. A panic inside is caught, the machine's stacks are put
+    /// back, and the call fails as an ordinary Scheme error.
+    pub fn define_fn_with(
+        &mut self,
+        name: &str,
+        mut f: impl FnMut(&mut Host, &[Val]) -> Result<Val, String> + 'static,
+    ) -> Result<(), Error> {
+        self.enter()?;
+        let (id, pending, who) = (self.id, Rc::clone(&self.pending), name.to_string());
+        let closure: crate::vm::HostClosure = Rc::new(RefCell::new(move |vm: &mut Vm, args: &[Value]| {
+            let vals: Vec<Val> = args.iter().map(|&a| read_val_rooting(&mut vm.engine, a, 0, id, &pending)).collect();
+            let mut host = Host { vm, id, pending: Rc::clone(&pending) };
+            let out = f(&mut host, &vals);
+            match out {
+                Err(msg) => Err(vm.err(format!("{who}: {msg}"))),
+                Ok(v) => build_val(&mut vm.engine, &v, 0).map_err(|e| vm.err(format!("{who}: {e}"))),
+            }
+        }));
+        let vm = &mut self.vm;
+        match guard(|| vm.define_host_closure(name, closure)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.poisoned = Some(format!("{e}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Apply a procedure the host holds -- a callback a script registered
+    /// earlier, say -- and get its result.
+    pub fn call(&mut self, f: &Proc, args: &[Val]) -> Result<Val, Error> {
+        self.enter()?;
+        if f.0.owner != self.id {
+            return Err(Error::ForeignHandle);
+        }
+        let fv = self.vm.engine.handle_value(f.0.handle).ok_or(Error::ForeignHandle)?;
+        let mut vals = Vec::with_capacity(args.len());
+        for a in args {
+            vals.push(self.build(a, 0)?);
+        }
+        let (id, pending) = (self.id, Rc::clone(&self.pending));
+        let vm = &mut self.vm;
+        match guard(|| vm.call_procedure(fv, vals)) {
+            Ok(Ok(v)) => Ok(read_val_rooting(&mut self.vm.engine, v, 0, id, &pending)),
+            Ok(Err(e)) => Err(self.convert(e)),
             Err(e) => {
                 self.poisoned = Some(format!("{e}"));
                 Err(e)
@@ -610,8 +715,9 @@ impl Interp {
         }
     }
 
-    fn read(&self, v: Value, depth: usize) -> Val {
-        read_val(&self.vm.engine, v, depth)
+    fn read(&mut self, v: Value, depth: usize) -> Val {
+        let (id, pending) = (self.id, Rc::clone(&self.pending));
+        read_val_rooting(&mut self.vm.engine, v, depth, id, &pending)
     }
 
     fn build(&mut self, v: &Val, depth: usize) -> Result<Value, Error> {
@@ -623,6 +729,55 @@ impl Interp {
 ///
 /// A free function rather than a method because the host-function dispatch in
 /// [`crate::vm`] needs it too, and it only ever needs the heap.
+/// As [`read_val`], but a procedure becomes a rooted [`Val::Proc`] owned by
+/// the interpreter `id`.
+pub(crate) fn read_val_rooting(engine: &mut crate::heap::Engine, v: Value, depth: usize, id: u64, pending: &Pending) -> Val {
+    let is_proc = match v {
+        Value::Primitive(_) => true,
+        Value::Obj(r) => matches!(engine.obj(r), Obj::Closure { .. } | Obj::Parameter { .. } | Obj::Continuation { .. }),
+        _ => false,
+    };
+    if is_proc {
+        return Val::Proc(Proc(Rc::new(Rooted { handle: engine.root(v), owner: id, pending: Rc::clone(pending) })));
+    }
+    if depth >= MAX_DEPTH {
+        return Val::Opaque;
+    }
+    // Containers are read element by element so a procedure inside one is
+    // rooted too.
+    if let Value::Obj(r) = v {
+        match engine.obj(r).clone() {
+            Obj::Vector { items, .. } => {
+                return Val::Vector(items.iter().map(|&x| read_val_rooting(engine, x, depth + 1, id, pending)).collect());
+            }
+            Obj::Pair(..) => {
+                let mut out = Vec::new();
+                let mut cur = v;
+                let cap = engine.obj_count() + 1;
+                loop {
+                    match cur {
+                        Value::Null => return Val::List(out),
+                        Value::Obj(p) => match engine.obj(p) {
+                            Obj::Pair(car, cdr) => {
+                                let (car, cdr) = (*car, *cdr);
+                                out.push(read_val_rooting(engine, car, depth + 1, id, pending));
+                                cur = cdr;
+                                if out.len() > cap {
+                                    return Val::Opaque;
+                                }
+                            }
+                            _ => return Val::Opaque,
+                        },
+                        _ => return Val::Opaque,
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    read_val(engine, v, depth)
+}
+
 pub(crate) fn read_val(engine: &crate::heap::Engine, v: Value, depth: usize) -> Val {
     if depth > MAX_DEPTH {
         return Val::Opaque;
@@ -708,6 +863,7 @@ pub(crate) fn build_val(
             }
             // A host cannot manufacture a procedure or a port, and silently
             // substituting something would be worse than refusing.
+            Val::Proc(p) => engine.handle_value(p.0.handle).ok_or(Error::ForeignHandle)?,
             Val::Opaque => {
                 return Err(Error::Script(
                     "Val::Opaque cannot be turned back into a value".into(),

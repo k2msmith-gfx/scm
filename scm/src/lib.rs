@@ -19,7 +19,7 @@ pub mod value;
 pub mod vm;
 pub mod writer;
 
-pub use embed::{Description, Error as EmbedError, Interp, Rooted, Val};
+pub use embed::{Description, Error as EmbedError, Host, Interp, Proc, Rooted, Val};
 pub use repl::{Framing, Op, Outcome, Request, Response, Session};
 pub use heap::{Engine, Interner, Obj};
 pub use reader::{ReadError, Reader, ReaderOptions, Span};

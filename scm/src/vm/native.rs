@@ -361,11 +361,8 @@ pub unsafe extern "C" fn rt_push_env(st: *mut NativeState, names: u32, ninit: u3
         let vm = vm!(st);
         let names = &(&*(*st).code).names[names as usize];
         let vals = std::slice::from_raw_parts(vals, ninit as usize);
-        let slots: Vec<(crate::value::SymId, Value)> = names
-            .iter()
-            .enumerate()
-            .map(|(i, &n)| (n, vals.get(i).copied().unwrap_or(Value::Unspecified)))
-            .collect();
+        let mut slots = vm.engine.slots(names.len());
+        slots.extend(names.iter().enumerate().map(|(i, &n)| (n, vals.get(i).copied().unwrap_or(Value::Unspecified))));
         let new_env = vm.engine.env(env_of((*st).env), slots);
         (*st).env = bits_of(Some(new_env));
         refresh(&mut *st);

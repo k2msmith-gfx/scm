@@ -8,7 +8,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use scm::{Interp, Val};
+use scm::{Interp, Proc, Val};
 use scm::embed::Error;
 
 #[test]
@@ -346,4 +346,82 @@ fn a_host_function_cannot_hold_a_heap_reference_across_a_collection() {
         )
         .unwrap();
     assert_eq!(it.write(&v).unwrap(), "12000");
+}
+
+// ── host re-entrancy ─────────────────────────────────────────────────────
+//
+// S7 left one thing open: "a host function cannot re-enter the VM". Ray's
+// verbs take callbacks, so it has to.
+
+#[test]
+fn a_host_function_can_call_a_scheme_procedure() {
+    let mut i = Interp::new().unwrap();
+    // `(each-twice f x)`: the host calls f twice and sums.
+    i.define_fn_with("each-twice", |host, args| {
+        let [Val::Proc(f), x] = args else { return Err("expects a procedure and a value".into()) };
+        let a = host.call(f, std::slice::from_ref(x))?;
+        let b = host.call(f, std::slice::from_ref(x))?;
+        match (a, b) {
+            (Val::Int(a), Val::Int(b)) => Ok(Val::Int(a + b)),
+            _ => Err("not integers".into()),
+        }
+    })
+    .unwrap();
+    let v = i.eval("(each-twice (lambda (n) (* n 10)) 4)").unwrap();
+    assert_eq!(i.value(&v).unwrap(), Val::Int(80));
+    // Nested both ways: Scheme -> host -> Scheme -> host -> Scheme.
+    let v = i.eval("(each-twice (lambda (n) (each-twice (lambda (m) (+ m 1)) n)) 1)").unwrap();
+    assert_eq!(i.value(&v).unwrap(), Val::Int(8));
+    // A Scheme error inside the callback reaches the host as a message, and
+    // the host function's own failure is an ordinary catchable error.
+    let v = i.eval("(guard (e (#t (error-object-message e))) (each-twice (lambda (n) (car n)) 4))").unwrap();
+    assert!(matches!(i.value(&v).unwrap(), Val::Str(s) if s.contains("not a pair")));
+    // And the session is intact: the stacks came back.
+    let v = i.eval("(+ 1 2)").unwrap();
+    assert_eq!(i.value(&v).unwrap(), Val::Int(3));
+}
+
+#[test]
+fn a_callback_survives_collection_and_can_be_called_later_from_outside() {
+    let mut i = Interp::new().unwrap();
+    let kept: std::rc::Rc<std::cell::RefCell<Option<Proc>>> = Default::default();
+    let slot = kept.clone();
+    i.define_fn_with("on-change", move |_host, args| {
+        let [Val::Proc(f)] = args else { return Err("expects a procedure".into()) };
+        *slot.borrow_mut() = Some(f.clone());
+        Ok(Val::Unspecified)
+    })
+    .unwrap();
+    i.eval("(let ([count 0]) (on-change (lambda (x) (set! count (+ count x)) count)))").unwrap();
+    // Churn the heap: the stored procedure must stay rooted.
+    i.eval("(let loop ([i 0] [acc '()]) (if (= i 20000) (length acc) (loop (+ i 1) (cons (make-vector 3 i) acc))))").unwrap();
+    let f = kept.borrow().clone().unwrap();
+    assert_eq!(i.call(&f, &[Val::Int(5)]).unwrap(), Val::Int(5));
+    assert_eq!(i.call(&f, &[Val::Int(7)]).unwrap(), Val::Int(12), "its closed-over state persists");
+    // A procedure inside a list argument is rooted too.
+    i.define_fn_with("first-proc", |host, args| {
+        let [Val::List(items)] = args else { return Err("expects a list".into()) };
+        let Some(Val::Proc(f)) = items.first() else { return Err("no procedure".into()) };
+        host.call(f, &[])
+    })
+    .unwrap();
+    let v = i.eval("(first-proc (list (lambda () 'called) 2 3))").unwrap();
+    assert_eq!(i.value(&v).unwrap(), Val::Sym("called".into()));
+}
+
+#[test]
+fn a_panic_in_a_reentrant_host_function_leaves_the_machine_usable() {
+    let mut i = Interp::new().unwrap();
+    i.define_fn_with("boom", |host, args| {
+        let [Val::Proc(f)] = args else { return Err("expects a procedure".into()) };
+        // Enter Scheme, then panic with that call's frames behind us.
+        let _ = host.call(f, &[]);
+        panic!("host bug");
+    })
+    .unwrap();
+    let r = i.eval("(boom (lambda () (+ 1 1)))");
+    let msg = format!("{}", r.unwrap_err());
+    assert!(msg.contains("panicked"), "{msg}");
+    let v = i.eval("(* 6 7)").unwrap();
+    assert_eq!(i.value(&v).unwrap(), Val::Int(42));
 }

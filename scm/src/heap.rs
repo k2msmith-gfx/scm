@@ -317,6 +317,10 @@ pub struct Engine {
     /// nondeterministic, and it is an S3 exit criterion rather than a debug
     /// nicety.
     stress: bool,
+    /// Slot vectors of swept environment frames, kept for the next frames.
+    /// A call allocates one frame; without this that was one `malloc` and
+    /// one `free` per call in both tiers, and the profile said so.
+    env_pool: Vec<Vec<(SymId, Value)>>,
     collections: u64,
     /// Values rooted from outside the VM -- the host's, and the VM's own
     /// source forms while it holds them across an evaluation.
@@ -371,6 +375,7 @@ impl Engine {
             min_heap: 4096,
             heap_cap: None,
             stress: false,
+            env_pool: Vec::new(),
             collections: 0,
             handles: Vec::new(),
             locs: HashMap::new(),
@@ -557,6 +562,15 @@ impl Engine {
             if self.marks[i] || matches!(self.slots[i], Slot::Free { .. }) {
                 continue;
             }
+            // A dead frame's vector goes back to the pool, bounded so a
+            // one-off deep recursion does not pin its memory forever.
+            if self.env_pool.len() < 4096
+                && let Slot::Used(Obj::Env { slots, .. }) = &mut self.slots[i]
+            {
+                let mut v = std::mem::take(slots);
+                v.clear();
+                self.env_pool.push(v);
+            }
             self.slots[i] = Slot::Free {
                 next: self.free_head,
             };
@@ -690,6 +704,18 @@ impl Engine {
 
     pub fn bytevector(&mut self, bytes: Vec<u8>) -> Value {
         self.alloc(Obj::Bytevector(bytes))
+    }
+
+    /// An empty slot vector with room for `cap`, from the pool when it has
+    /// one. Hand it to [`Engine::env`] filled.
+    pub fn slots(&mut self, cap: usize) -> Vec<(SymId, Value)> {
+        match self.env_pool.pop() {
+            Some(mut v) => {
+                v.reserve(cap);
+                v
+            }
+            None => Vec::with_capacity(cap),
+        }
     }
 
     pub fn env(&mut self, parent: Option<ObjRef>, slots: Vec<(SymId, Value)>) -> ObjRef {

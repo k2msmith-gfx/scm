@@ -115,7 +115,12 @@ impl std::fmt::Display for FrameInfo {
 /// so dispatch can clone the handle out, release its borrow on the `Vm`, and
 /// call it -- a host function that re-entered the VM would need more than
 /// this, and does not get it yet.
-type HostFn = Rc<RefCell<dyn FnMut(&[crate::Val]) -> Result<crate::Val, String>>>;
+/// A host function as the machine sees it: it gets the machine, so it can
+/// call back into Scheme (S7's "a host function cannot re-enter the VM" is
+/// closed by this), and the embedding layer builds the value-converting
+/// forms on top.
+pub type HostClosure = Rc<RefCell<dyn FnMut(&mut Vm, &[Value]) -> VResult<Value>>>;
+type HostFn = HostClosure;
 
 /// One pending computation.
 #[derive(Clone, Debug)]
@@ -837,8 +842,23 @@ impl Vm {
     pub fn define_host_fn(
         &mut self,
         name: &str,
-        f: impl FnMut(&[crate::Val]) -> Result<crate::Val, String> + 'static,
+        mut f: impl FnMut(&[crate::Val]) -> Result<crate::Val, String> + 'static,
     ) {
+        let who = name.to_string();
+        self.define_host_closure(name, Rc::new(RefCell::new(move |vm: &mut Vm, args: &[Value]| {
+            let vals: Vec<crate::Val> = args.iter().map(|&a| crate::embed::read_val(&vm.engine, a, 0)).collect();
+            match f(&vals) {
+                // A host refusal is an ordinary Scheme error, so `guard` can
+                // catch it -- it is the host's *code* failing, not the host
+                // saying stop.
+                Err(msg) => Err(vm.err(format!("{who}: {msg}"))),
+                Ok(v) => crate::embed::build_val(&mut vm.engine, &v, 0).map_err(|e| vm.err(format!("{who}: {e}"))),
+            }
+        })));
+    }
+
+    /// The raw form: a closure over the machine and the argument values.
+    pub fn define_host_closure(&mut self, name: &str, f: HostClosure) {
         let id = self.engine.register_prim_name(name);
         let slot = id as usize;
         if self.prims.len() <= slot {
@@ -848,7 +868,7 @@ impl Vm {
         if self.host_fns.len() <= slot {
             self.host_fns.resize_with(slot + 1, || None);
         }
-        self.host_fns[slot] = Some(Rc::new(RefCell::new(f)));
+        self.host_fns[slot] = Some(f);
         let sym = self.engine.interner.symbol(name);
         self.set_global(sym, Value::Primitive(PrimId(id)));
     }
@@ -2032,7 +2052,8 @@ impl Vm {
     ) -> VResult<Step> {
         match name {
             None => {
-                let slots = vars.iter().copied().zip(done).collect();
+                let mut slots = self.engine.slots(vars.len());
+                slots.extend(vars.iter().copied().zip(done));
                 let new_env = self.engine.env(env, slots);
                 Ok(self.enter_body(body, Some(new_env)))
             }
@@ -2093,27 +2114,35 @@ impl Vm {
         args: &[Value],
     ) -> VResult<Value> {
         let name = self.engine.prim_name(id).to_string();
-        let vals: Vec<crate::Val> = args
-            .iter()
-            .map(|&a| crate::embed::read_val(&self.engine, a, 0))
-            .collect();
-        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (f.borrow_mut())(&vals)
-        }));
-        let out = match called {
+        // Whatever the host does with the machine -- including a nested
+        // evaluation that fails halfway -- the stacks come back to here.
+        let (base, vbase, pbase) = (self.stack.len(), self.vstack.len(), self.param_bindings.len());
+        let call = self.current_call;
+        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (f.borrow_mut())(self, args)));
+        self.restore_params(pbase);
+        self.stack.truncate(base);
+        self.vstack.truncate(vbase);
+        self.current_call = call;
+        match called {
             Ok(r) => r,
-            Err(_) => {
-                return Err(self.err(format!("the host function `{name}` panicked")));
-            }
-        };
-        match out {
-            // A host refusal is an ordinary Scheme error, so `guard` can
-            // catch it -- it is the host's *code* failing, not the host
-            // saying stop.
-            Err(msg) => Err(self.err(format!("{name}: {msg}"))),
-            Ok(v) => crate::embed::build_val(&mut self.engine, &v, 0)
-                .map_err(|e| self.err(format!("{name}: {e}"))),
+            Err(_) => Err(self.err(format!("the host function `{name}` panicked"))),
         }
+    }
+
+    /// Apply a procedure and run it to completion: the re-entry a host
+    /// function or an embedder uses. Nested evaluation on the explicit
+    /// stack: the frames below stay where they are.
+    pub fn call_procedure(&mut self, f: Value, args: Vec<Value>) -> VResult<Value> {
+        let base = self.stack.len();
+        let (vbase, pbase) = (self.vstack.len(), self.param_bindings.len());
+        self.expansions = 0;
+        let out = self.apply(f, args).and_then(|step| self.eval_inner(step, base));
+        if out.is_err() {
+            self.restore_params(pbase);
+            self.stack.truncate(base);
+            self.vstack.truncate(vbase);
+        }
+        out
     }
 
     fn enter_body(&mut self, body: Rc<Vec<Value>>, env: Option<ObjRef>) -> Step {
@@ -2785,7 +2814,7 @@ impl Vm {
                 };
 
                 let mut slots: Vec<(SymId, Value)> =
-                    Vec::with_capacity(params.len() + opt.len() + named.len() + 2);
+                    self.engine.slots(params.len() + opt.len() + named.len() + 2);
                 let mut todo: Vec<(SymId, Value)> = Vec::new();
                 let mut i = 0usize;
 
@@ -3076,7 +3105,7 @@ impl Vm {
 
     /// Errors unwind the explicit stack, which is just truncating it. A later
     /// stage turns this into a condition with the frames still live (§8).
-    fn err(&mut self, msg: impl Into<String>) -> VmError {
+    pub fn err(&mut self, msg: impl Into<String>) -> VmError {
         VmError::Error(msg.into())
     }
 }

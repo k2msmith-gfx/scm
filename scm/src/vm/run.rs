@@ -123,7 +123,7 @@ impl Vm {
             && c.macro_gen == self.macro_gen
         {
             let (params, cenv, c) = (Rc::clone(params), *cenv, Rc::clone(c));
-            let mut slots: Vec<(crate::value::SymId, Value)> = Vec::with_capacity(params.len() + c.defines.len());
+            let mut slots: Vec<(crate::value::SymId, Value)> = self.engine.slots(params.len() + c.defines.len());
             slots.extend(params.iter().copied().zip(self.vstack[start + 1..].iter().copied()));
             slots.extend(c.defines.iter().map(|&d| (d, Value::Unspecified)));
             if tail {
@@ -263,12 +263,12 @@ impl Vm {
                 }
                 Op::PushEnv { names, ninit } => {
                     let names = &code.names[names as usize];
-                    let values = self.vstack.split_off(self.vstack.len() - ninit as usize);
-                    let slots: Vec<(crate::value::SymId, Value)> = names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &n)| (n, values.get(i).copied().unwrap_or(Value::Unspecified)))
-                        .collect();
+                    let start = self.vstack.len() - ninit as usize;
+                    let mut slots = self.engine.slots(names.len());
+                    slots.extend(names.iter().enumerate().map(|(i, &n)| {
+                        (n, self.vstack.get(start + i).copied().unwrap_or(Value::Unspecified))
+                    }));
+                    self.vstack.truncate(start);
                     env = Some(self.engine.env(env, slots));
                 }
                 Op::PopEnv => {
