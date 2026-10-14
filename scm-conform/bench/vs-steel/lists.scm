@@ -1,0 +1,8 @@
+(define (my-map f xs) (if (null? xs) '() (cons (f (car xs)) (my-map f (cdr xs)))))
+(define (iota-list n) (let loop ((i (- n 1)) (acc '())) (if (< i 0) acc (loop (- i 1) (cons i acc)))))
+(define xs (iota-list 100000))
+(define (sum xs) (let loop ((xs xs) (s 0)) (if (null? xs) s (loop (cdr xs) (+ s (car xs))))))
+(define (run k) (let loop ((i 0) (t 0)) (if (= i k) t (loop (+ i 1) (+ t (sum (my-map (lambda (x) (* x 2)) xs)))))))
+(display (run 20)) (newline)
+(define al (let loop ((i 0) (acc '())) (if (= i 200) acc (loop (+ i 1) (cons (cons i (* i i)) acc)))))
+(display (let loop ((i 0) (s 0)) (if (= i 200000) s (loop (+ i 1) (+ s (cdr (assv (modulo i 200) al))))))) (newline)

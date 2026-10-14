@@ -51,6 +51,14 @@ The terminal and the socket are two clients of one protocol,
 [docs/repl.md](docs/repl.md); the third is [emacs/](emacs/README.md), a
 SLIME-style mode with a REPL window, completion and a break-free `C-c C-b`.
 
+## Against Steel
+
+    scm-conform/bench/vs-steel/run.py        # needs `steel` on PATH
+
+Ten programs in the subset both run: T1 is 0.91× Steel's speed, T2 is
+1.06×, startup is 7× faster, escape continuations 2.6×. The reading is in
+[docs/vs-steel.md](docs/vs-steel.md).
+
 ## Standalone
 
     ./target/release/scm build hello.scm        # -> ./hello, runs wherever scm runs

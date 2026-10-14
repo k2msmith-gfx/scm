@@ -1,0 +1,5 @@
+(define (build n) (let loop ((i 0) (s "")) (if (= i n) s (loop (+ i 1) (string-append s (number->string (modulo i 10)))))))
+(define (count-sevens s) (let loop ((i 0) (c 0)) (if (= i (string-length s)) c (loop (+ i 1) (if (char=? (string-ref s i) #\7) (+ c 1) c)))))
+(define s (build 20000))
+(display (count-sevens s)) (newline)
+(display (string-length (substring s 100 2000))) (newline)

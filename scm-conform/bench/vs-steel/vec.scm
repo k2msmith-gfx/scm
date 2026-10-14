@@ -1,0 +1,5 @@
+(define n 1000000)
+(define v (make-vector n 0))
+(let loop ((i 0)) (if (< i n) (begin (vector-set! v i (* i 2)) (loop (+ i 1)))))
+(define (sum) (let loop ((i 0) (s 0)) (if (= i n) s (loop (+ i 1) (+ s (vector-ref v i))))))
+(display (sum)) (newline)
