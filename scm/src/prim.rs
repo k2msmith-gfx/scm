@@ -3087,6 +3087,10 @@ fn p_exit(_e: &mut Engine, a: &[Value]) -> PResult {
         Some(Value::Bool(false)) => 1,
         _ => 0,
     };
+    // `process::exit` does not flush Rust's stdout buffer; a script's last
+    // line would vanish.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
     std::process::exit(code);
 }
 

@@ -55,8 +55,139 @@ extern "C" fn on_sigint(_: i32) {
     }
 }
 
+/// The trailer `scm build` appends: the program, then its length, then
+/// this magic. A binary looks at its own last 16 bytes at startup; a
+/// plain `scm` finds something else there and goes on to be a REPL.
+const BUNDLE_MAGIC: &[u8; 8] = b"SCMBUNDL";
+
+/// The program embedded in this executable, if it is a built bundle.
+fn embedded_program() -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    let exe = std::env::current_exe().ok()?;
+    let mut f = std::fs::File::open(exe).ok()?;
+    let size = f.metadata().ok()?.len();
+    if size < 16 {
+        return None;
+    }
+    f.seek(SeekFrom::End(-16)).ok()?;
+    let mut trailer = [0u8; 16];
+    f.read_exact(&mut trailer).ok()?;
+    if &trailer[8..] != BUNDLE_MAGIC {
+        return None;
+    }
+    let len = u64::from_le_bytes(trailer[..8].try_into().unwrap());
+    if len + 16 > size {
+        return None;
+    }
+    f.seek(SeekFrom::End(-16 - len as i64)).ok()?;
+    let mut src = vec![0u8; len as usize];
+    f.read_exact(&mut src).ok()?;
+    String::from_utf8(src).ok()
+}
+
+/// `scm build FILE [-o OUT]`: this very runtime with FILE appended, so the
+/// result runs anywhere this binary does and needs no toolchain to make.
+/// The program's source is embedded as written; it is read and compiled at
+/// startup, which the boot budget already pays for a REPL.
+fn build(file: &str, out: Option<&str>) -> ExitCode {
+    let src = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("scm build: {file}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(e) = std::str::from_utf8(&src) {
+        eprintln!("scm build: {file} is not UTF-8: {e}");
+        return ExitCode::from(2);
+    }
+    let out = out
+        .map(String::from)
+        .unwrap_or_else(|| std::path::Path::new(file).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "a.out".into()));
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("scm build: cannot find the running scm: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut runtime = match std::fs::read(&exe) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("scm build: cannot read {}: {e}", exe.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    // Defensive: a bundle never reaches `build`, but if the runtime read
+    // here carried a program, it must not be nested.
+    if runtime.len() >= 16 && &runtime[runtime.len() - 8..] == BUNDLE_MAGIC {
+        let len = u64::from_le_bytes(runtime[runtime.len() - 16..runtime.len() - 8].try_into().unwrap()) as usize;
+        runtime.truncate(runtime.len() - 16 - len);
+    }
+    let runtime_len = runtime.len();
+    runtime.extend_from_slice(&src);
+    runtime.extend_from_slice(&(src.len() as u64).to_le_bytes());
+    runtime.extend_from_slice(BUNDLE_MAGIC);
+    if let Err(e) = std::fs::write(&out, &runtime) {
+        eprintln!("scm build: {out}: {e}");
+        return ExitCode::FAILURE;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755)) {
+            eprintln!("scm build: {out}: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    println!(
+        "{out}: {} bytes of program on a {:.1} MB runtime",
+        src.len(),
+        runtime_len as f64 / 1e6
+    );
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A bundle runs its program and nothing else: its arguments are the
+    // program's, and `(command-line)` sees them.
+    if let Some(program) = embedded_program() {
+        let mut session = match Session::new() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("scm: could not start: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let _ = INTERRUPT.set(session.interrupt_handle());
+        unsafe { signal(SIGINT, on_sigint as *const () as usize) };
+        let name = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "<bundle>".into());
+        return run_once(&mut session, &program, &name);
+    }
+    if args.first().map(String::as_str) == Some("build") {
+        let mut file = None;
+        let mut out = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-o" => {
+                    i += 1;
+                    out = args.get(i).map(String::as_str);
+                }
+                other => file = Some(other),
+            }
+            i += 1;
+        }
+        let Some(file) = file else {
+            eprintln!("usage: scm build FILE [-o OUT]");
+            return ExitCode::from(2);
+        };
+        return build(file, out);
+    }
     let mut fuel: Option<u64> = None;
     let mut serve: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
@@ -138,10 +269,13 @@ fn main() -> ExitCode {
 
 fn usage() {
     println!("usage: scm [--fuel N] [--serve ADDR] [FILE | -e EXPR]");
+    println!("       scm build FILE [-o OUT]");
     println!();
     println!("  no arguments   start the terminal REPL");
     println!("  FILE           run a file");
     println!("  -e EXPR        evaluate one expression and print it");
+    println!("  build FILE     a standalone executable: this runtime with FILE");
+    println!("                 embedded; needs no toolchain, runs where scm runs");
     println!("  --serve ADDR   serve the REPL protocol over TCP (see docs/repl.md)");
     println!("  --fuel N       stop after N safepoints; a runaway is an error,");
     println!("                 not a hang (plan requirement 8)");
@@ -165,33 +299,28 @@ fn connect_stdin(session: &mut Session) {
     let _ = ask(session, 0, Op::Eval { code, source: Some("<stdin>".into()) });
 }
 
+/// A script: its output goes straight to stdout as it is produced, not
+/// captured and printed at the end -- a program that calls `exit` would
+/// otherwise lose everything it displayed. Only the final value is the
+/// runner's to print.
 fn run_once(session: &mut Session, src: &str, source: &str) -> ExitCode {
     connect_stdin(session);
-    let r = ask(session, 1, Op::Eval { code: src.into(), source: Some(source.into()) });
-    match r.outcome {
-        Outcome::Value { value, output } => {
-            print!("{output}");
+    let interp = session.interp_mut();
+    match interp.eval_named(src, source) {
+        Ok(v) => {
+            let value = interp.pretty(&v, 80).unwrap_or_else(|e| format!("#<unprintable: {e}>"));
             // A definition or a `for` returns nothing worth printing.
             if value != "#<unspecified>" {
                 println!("{value}");
             }
             ExitCode::SUCCESS
         }
-        Outcome::Failed {
-            message,
-            output,
-            backtrace,
-            ..
-        } => {
-            print!("{output}");
-            eprintln!("{message}");
-            for f in &backtrace {
+        Err(e) => {
+            let _ = io::stdout().flush();
+            eprintln!("{e}");
+            for f in interp.backtrace() {
                 eprintln!("  in {f}");
             }
-            ExitCode::FAILURE
-        }
-        other => {
-            eprintln!("scm: unexpected outcome {other:?}");
             ExitCode::FAILURE
         }
     }

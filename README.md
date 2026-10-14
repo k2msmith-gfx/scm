@@ -50,6 +50,15 @@ inspect locals, evaluate in any frame, and `,return` a value to continue.
 The terminal and the socket are two clients of one protocol,
 [docs/repl.md](docs/repl.md).
 
+## Standalone
+
+    ./target/release/scm build hello.scm        # -> ./hello, runs wherever scm runs
+    ./hello kevin < input.txt
+
+A built binary is the `scm` runtime with the program appended; it needs no
+toolchain to make and none to run. `(command-line)` sees the binary's own
+arguments and the exit status is the program's.
+
 ## The leaf compiler
 
     LLVM=$(nix build --no-link --print-out-paths 'nixpkgs#llvmPackages_21.llvm.dev')
