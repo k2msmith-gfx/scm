@@ -213,6 +213,10 @@ every client has them.
   restart. §8's stretch goal, and now a good deal closer: the frames are
   already walkable and already named. What is missing is suspending at the
   error instead of unwinding past it.
+- ~~**An editor client.**~~ `emacs/scm-mode.el` (2026-10-13): a SLIME-style
+  mode over this protocol, with a REPL buffer whose `RET` asks `:op parse`,
+  completion from `:op complete`, eldoc from `:op describe`, and interrupt on
+  a second connection. Its batch test drives the real server.
 - **Several interpreters over one socket.** One session per server today.
 - **Completion inside a form** — candidates come from the global environment,
   so a local binding is not offered.

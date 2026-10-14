@@ -48,7 +48,8 @@ line editing, history, tab completion, `,help` for its commands, and a
 **break REPL**: an uncaught error stops with the frames live, so you can
 inspect locals, evaluate in any frame, and `,return` a value to continue.
 The terminal and the socket are two clients of one protocol,
-[docs/repl.md](docs/repl.md).
+[docs/repl.md](docs/repl.md); the third is [emacs/](emacs/README.md), a
+SLIME-style mode with a REPL window, completion and a break-free `C-c C-b`.
 
 ## Standalone
 
