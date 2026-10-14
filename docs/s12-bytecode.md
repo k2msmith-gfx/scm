@@ -115,3 +115,58 @@ was reported "in `(%make-parameter init)`", the prelude's last call.
 - An `Obj::Env` is a `Vec` per call frame. A pool would delete the one
   allocation left per call.
 - `eval` of a run-time form runs on T0.
+
+## The published sizes, under T1
+
+Run with the suite's own inputs and a two-minute cap per program, the
+same run that gave T0 **3 finished and 41 timed out**:
+
+| | T0 | T1 |
+|---|---|---|
+| finished within 120 s | 3 | **33** |
+| timed out | 41 | 20 |
+| outside the subset | 4 | 4 |
+
+Against Chibi's published times for the 29 that finished and
+have a Chibi time, the geometric mean of T1 / Chibi is **0.6×**: T1 is
+in Chibi's class, which is where a bytecode interpreter over boxed values
+should be. (T0 measured 13× slower than Chibi on `fib`.)
+
+| program | T1 | Chibi | T1 / Chibi |
+|---|---|---|---|
+| `string` | 0.9 s | 10.8 s | 0.1× |
+| `equal` | 1.6 s | 39.8 s | 0.0× |
+| `read1` | 1.7 s | 213.8 s | 0.0× |
+| `tail` | 2.6 s | 5.6 s | 0.5× |
+| `sum1` | 8.9 s | 94.0 s | 0.1× |
+| `ctak` | 13.2 s | | |
+| `paraffins` | 15.4 s | | |
+| `bv2string` | 17.2 s | 7.2 s | 2.4× |
+| `slatex` | 19.3 s | 96.9 s | 0.2× |
+| `primes` | 24.9 s | 17.1 s | 1.5× |
+| `fft` | 28.5 s | 41.1 s | 0.7× |
+| `fibc` | 29.5 s | 295.8 s | 0.1× |
+| `fibfp` | 31.6 s | 34.4 s | 0.9× |
+| `nucleic` | 46.3 s | 66.9 s | 0.7× |
+| `wc` | 48.0 s | | |
+| `cat` | 49.3 s | 38.6 s | 1.3× |
+| `sumfp` | 50.6 s | 70.1 s | 0.7× |
+| `ray` | 53.6 s | 172.7 s | 0.3× |
+| `maze` | 53.8 s | 66.7 s | 0.8× |
+| `mbrot` | 62.2 s | 158.4 s | 0.4× |
+| `nboyer` | 67.9 s | 28.0 s | 2.4× |
+| `sboyer` | 78.1 s | 26.4 s | 3.0× |
+| `destruc` | 78.2 s | 69.6 s | 1.1× |
+| `deriv` | 80.0 s | 81.1 s | 1.0× |
+| `browse` | 89.2 s | | |
+| `tak` | 89.2 s | 42.5 s | 2.1× |
+| `triangl` | 92.4 s | 66.1 s | 1.4× |
+| `divrec` | 96.9 s | 46.4 s | 2.1× |
+| `diviter` | 98.0 s | 44.5 s | 2.2× |
+| `mazefun` | 98.6 s | 92.3 s | 1.1× |
+| `simplex` | 99.4 s | 137.8 s | 0.7× |
+| `pnpoly` | 99.9 s | 180.1 s | 0.6× |
+| `matrix` | 107.4 s | 171.7 s | 0.6× |
+
+Still timing out at two minutes: `puzzle`, `takl`, `ntakl`, `cpstak`, `fib`, `sum`, `ack`, `array1`, `conform`, `dynamic`, `earley`, `graphs`, `lattice`, `nqueens`, `parsing`, `peval`, `quicksort`, `scheme`, `gcbench`, `mperm`.
+Chibi itself needs 60 s for `fib` and 131 s for `nqueens` at these sizes.
