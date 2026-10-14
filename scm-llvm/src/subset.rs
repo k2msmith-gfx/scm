@@ -35,6 +35,10 @@ pub const PURE_PRIMS: &[&str] = &[
     "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "exp", "log",
     "zero?", "positive?", "negative?", "even?", "odd?", "nan?", "not",
     "vector-ref", "vector-length", "list", "vector", "map",
+    // Reading a numeric vector or an array: the data ray's fields and
+    // textures sample. Writing one is absent on purpose -- a leaf runs on
+    // N render threads at once.
+    "numvector-ref", "numvector-length", "array-ref",
 ];
 
 /// Heads with binding or evaluation structure the walk must respect. `let`
@@ -169,11 +173,19 @@ impl<'a> Analysis<'a> {
         let name = self.sym_name(resolved);
         match self.vm.global(resolved) {
             None => Err(format!("`{name}` is unbound")),
-            Some(Value::Primitive(_)) => {
-                if PURE_PRIMS.contains(&name.as_str()) {
+            // Judged by *which primitive it is*, not by the name it was
+            // reached through: `f64vector-ref` is an alias of
+            // `numvector-ref`, and so are the other nine element types, so
+            // one entry covers them all. It also means `(define my+ +)` is
+            // accepted and `(define out display)` is not, both correctly.
+            Some(Value::Primitive(id)) => {
+                let prim = self.vm.engine.prim_name(id).to_string();
+                if PURE_PRIMS.contains(&prim.as_str()) {
                     Ok(())
-                } else {
+                } else if prim == name {
                     Err(format!("`{name}` is not a pure primitive"))
+                } else {
+                    Err(format!("`{name}` is `{prim}`, which is not a pure primitive"))
                 }
             }
             Some(Value::Obj(r)) => match self.vm.engine.obj(r) {
@@ -190,7 +202,9 @@ impl<'a> Analysis<'a> {
                 }
                 // Item (2): a global holding a table is a snapshot, not a
                 // call. Whether its contents are numbers is codegen's check.
-                Obj::Vector { .. } => {
+                // A numeric vector and an array are the same thing at
+                // larger scale -- an image, a height field, a volume.
+                Obj::Vector { .. } | Obj::NumVector(_) | Obj::Array { .. } => {
                     acc.captured.insert(name);
                     Ok(())
                 }

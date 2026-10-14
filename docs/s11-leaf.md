@@ -139,3 +139,79 @@ checked for self-consistency against its own snapshot, while the main
 thread redefines the texture twenty times and refreshes after each. No
 crash; the pass in flight finishes with the old code; the next pass uses
 the new; the last pass's generation matches the definition it used.
+
+
+## Sampling data: numeric vectors and arrays (2026-10-14)
+
+The S11 number was a *procedural* texture: arithmetic only, no data. The
+other half of ray's texture work is a tap into a loaded image, and until
+now that fell outside the compiled subset -- so `(srfi 4)` and
+`(srfi 63)` paid off in scripting and not in a render. They do now.
+
+| | |
+|---|---|
+| compile a bilinear sampler | 12.5 ms |
+| **native, per bilinear tap** | **3.3 ns** |
+| interpreted on T1, per tap | 934.7 ns |
+| | **280×** |
+
+That is a 512×512 `f64` image, four taps and a blend per call.
+
+### Where the data lives, and why it differs by type
+
+A **plain `vector`** global stays what it was: a private LLVM constant
+array, so a read at a known index folds. That is right for the small
+precomputed lookup tables the corpus has.
+
+A **`numvector`** or **`array`** global becomes a *pointer to a snapshot
+held by the compiled handle*. Baking a megabyte into the IR would cost
+compile time, module size and a full recompile on every change, for
+nothing the optimiser can use. The snapshot is an `Arc<Vec<f64>>` that
+moves into the `Compiled`, so:
+
+- the data outlives every caller, including a rayon worker still calling
+  an older generation after `Live::refresh` installed a newer one;
+- `Compiled` stays `Send + Sync`, because an `Arc<Vec<f64>>` is;
+- the test that drops the `Vm` -- and with it the heap holding the
+  array -- and then renders 65,536 taps from a rayon pool says so.
+
+Both are **snapshots**, which is plan §6 item (2) as written: a leaf reads
+the data as it was when it was compiled. Mutating an element afterwards
+does not reach code already compiled, and there is a test for that too,
+because the alternative is a render whose pixels change under it mid-pass.
+`Live::recompile` is how a leaf catches up with an element write; a
+*rebinding* moves a version and `Live::refresh` catches that by itself.
+
+### An array read is the strides, inline
+
+`(array-ref img y x)` compiles to one bounds check per subscript -- each
+against its own dimension, so an index inside the store but outside the
+shape is still refused -- then a multiply and add per dimension, then the
+load. The shape, strides and offset are read at compile time, so a
+transposed or reversed view costs a sign, not a branch.
+
+### Two things fixed on the way
+
+**A captured table was found by matching its length.** `load` searched the
+table map for an entry whose length matched, with a comment admitting the
+flaw. Two captured tables of the same size would read the wrong one. The
+store is now passed through from the caller that resolved it, and a test
+compiles a leaf reading one element from each of two eight-element
+vectors.
+
+**The analysis now judges the primitive, not the name.** It compared the
+*symbol's* name against the pure list, so `f64vector-ref` -- which is an
+alias of `numvector-ref`, as are its nine siblings -- would have needed
+ten entries. It asks which primitive the global holds instead, so one
+entry covers them all, `(define my+ +)` is accepted, and
+`(define out display)` is refused with a message that names `display`.
+
+### Still outside the subset
+
+Writing shared data: `numvector-set!` and `array-set!` are refused,
+because a leaf runs on N render threads at once and there is no safe way
+to let it write what they all read. An index out of range reads NaN rather
+than raising, which is the one place a leaf and T0 deliberately differ --
+a leaf has no way to raise. The other is the index itself: the subset has
+one numeric type, so an index arrives integral-but-inexact where T0 wants
+an exact integer.

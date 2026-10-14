@@ -94,6 +94,11 @@ pub struct Compiled {
     shape: Shape,
     addr: usize,
     _owner: Arc<jit::Jit>,
+    /// The snapshots of captured bulk data whose addresses are baked into
+    /// the code. Held here so the buffers outlive the code that reads
+    /// them -- including a render worker still calling an older
+    /// generation after `Live::refresh` has installed a newer one.
+    _data: Vec<Arc<Vec<f64>>>,
 }
 
 impl fmt::Debug for Compiled {
@@ -200,13 +205,14 @@ pub fn vec3_abi() -> Vec3Abi {
 /// expressibility. Either refusal names the call and the chain.
 pub fn compile(vm: &mut Vm, name: &str, shape: Shape) -> Result<Compiled, Refusal> {
     let summary = Analysis::new(vm).verdict(name)?;
-    let (addr, owner) = jit::build(vm, name, shape, &summary)?;
+    let built = jit::build(vm, name, shape, &summary)?;
     Ok(Compiled {
         name: name.to_string(),
         arity: summary.arity,
         shape,
-        addr,
-        _owner: owner,
+        addr: built.addr,
+        _owner: built.owner,
+        _data: built.data,
     })
 }
 

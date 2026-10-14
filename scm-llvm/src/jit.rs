@@ -112,8 +112,16 @@ pub(crate) fn create_lljit() -> Result<(LLVMOrcLLJITRef, Arc<Jit>), String> {
     }
 }
 
+/// What a successful build hands back: the code's address, the JIT that
+/// owns its memory, and the data snapshots its address constants point at.
+pub struct Built {
+    pub addr: usize,
+    pub owner: Arc<Jit>,
+    pub data: Vec<Arc<Vec<f64>>>,
+}
+
 /// Emit, optimise, JIT, and look up the entry point.
-pub fn build(vm: &mut Vm, name: &str, shape: Shape, _summary: &Summary) -> Result<(usize, Arc<Jit>), Refusal> {
+pub fn build(vm: &mut Vm, name: &str, shape: Shape, _summary: &Summary) -> Result<Built, Refusal> {
     init();
     let refuse = |m: String| Refusal { message: m, via: vec![name.to_string()] };
     unsafe {
@@ -136,8 +144,9 @@ pub fn build(vm: &mut Vm, name: &str, shape: Shape, _summary: &Summary) -> Resul
         let (jit, owner) = create_lljit().map_err(refuse)?;
         let jd = LLVMOrcLLJITGetMainJITDylib(jit);
 
-        // ORC takes the module; the builder is ours to drop first.
-        let Cg { module, b, .. } = cg;
+        // ORC takes the module; the builder is ours to drop first. The
+        // snapshots come with us: the code holds their addresses.
+        let Cg { module, b, snapshots, .. } = cg;
         drop(b);
         let raw = module.as_mut_ptr();
         mem::forget(module);
@@ -156,7 +165,7 @@ pub fn build(vm: &mut Vm, name: &str, shape: Shape, _summary: &Summary) -> Resul
         if addr == 0 {
             return Err(refuse("the entry resolved to a null address".into()));
         }
-        Ok((addr as usize, owner))
+        Ok(Built { addr: addr as usize, owner, data: snapshots })
     }
 }
 

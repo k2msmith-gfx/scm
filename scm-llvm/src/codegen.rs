@@ -12,6 +12,7 @@
 //! in loop tails, and the `Vec3` ABI hook.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
@@ -50,10 +51,42 @@ fn libm1(n: &str) -> Option<&'static str> {
     })
 }
 
-/// A compiled table: a private constant array of `f64`.
-struct Table<'c> {
-    global: inkwell::values::GlobalValue<'c>,
-    len: u64,
+/// Where a leaf's captured data lives.
+///
+/// A plain `vector` global is a small precomputed lookup table, so it
+/// becomes a **private constant array** and LLVM can fold a read at a
+/// known index. A `numvector` or an `array` global is bulk data -- an
+/// image, a height field, a volume -- so it becomes a **pointer to a
+/// snapshot held by the compiled handle**: baking a megabyte into the IR
+/// would cost compile time, module size and a full recompile on every
+/// change, for no gain the optimiser can use.
+///
+/// Both are snapshots, which is plan §6 item (2) as written: the data is
+/// read as it was when the leaf was compiled, and `Live::refresh` (S11a)
+/// is how a leaf catches up with a change.
+#[derive(Clone)]
+enum Store<'c> {
+    /// A private constant array of `f64`.
+    Constant { global: inkwell::values::GlobalValue<'c>, len: u64 },
+    /// A raw pointer to an `Arc<Vec<f64>>` the handle keeps alive.
+    Pointer { addr: u64, len: u64 },
+}
+
+impl Store<'_> {
+    fn len(&self) -> u64 {
+        match self {
+            Store::Constant { len, .. } | Store::Pointer { len, .. } => *len,
+        }
+    }
+}
+
+/// A captured array: its shape, and where its elements are.
+#[derive(Clone)]
+struct ArrayShape<'c> {
+    dims: Vec<u64>,
+    strides: Vec<i64>,
+    offset: u64,
+    store: Store<'c>,
 }
 
 /// Per-function state: the function, and the trap block an out-of-range
@@ -76,7 +109,12 @@ pub struct Cg<'c> {
     pub module: Module<'c>,
     pub b: Builder<'c>,
     done: HashMap<String, FunctionValue<'c>>,
-    tables: HashMap<String, Table<'c>>,
+    tables: HashMap<String, Store<'c>>,
+    arrays: HashMap<String, ArrayShape<'c>>,
+    /// The snapshots whose addresses are baked into the code. The compiled
+    /// handle takes these, so the data outlives every caller -- including
+    /// a render worker still holding an old generation.
+    pub snapshots: Vec<Arc<Vec<f64>>>,
 }
 
 /// The symbol the entry point is emitted under, distinct from the Scheme
@@ -89,7 +127,15 @@ impl<'c> Cg<'c> {
     pub fn new(ctx: ContextRef<'c>) -> Self {
         let module = ctx.create_module("leaf");
         let b = ctx.create_builder();
-        Self { ctx, module, b, done: HashMap::new(), tables: HashMap::new() }
+        Self {
+            ctx,
+            module,
+            b,
+            done: HashMap::new(),
+            tables: HashMap::new(),
+            arrays: HashMap::new(),
+            snapshots: Vec::new(),
+        }
     }
 
     /// The entry point: `name` with the requested shape, under its own symbol.
@@ -409,7 +455,11 @@ impl<'c> Cg<'c> {
         if env.contains_key(&h) {
             return Err(format!("`{}` is a local, and a leaf cannot call a local", name_of(vm, h)));
         }
-        let hn = name_of(vm, vm.engine.resolve(h));
+        // The *primitive's* name, not the name it was reached through:
+        // `f64vector-ref` and its nine siblings are aliases of
+        // `numvector-ref`, so one arm serves them all. A special form or
+        // an authored procedure keeps its own name.
+        let hn = primitive_name(vm, h).unwrap_or_else(|| name_of(vm, vm.engine.resolve(h)));
         let args = &parts[1..];
         let f64t = self.ctx.f64_type();
 
@@ -509,20 +559,60 @@ impl<'c> Cg<'c> {
                 let q = self.b.build_float_div(a, b, "q").map_err(e)?;
                 self.call_extern("floor", &[q])
             }
-            "vector-ref" => {
+            // A plain vector and a numeric vector read the same way; what
+            // differs is where the snapshot lives. `numvector-ref` is also
+            // every `Tvector-ref`.
+            "vector-ref" | "numvector-ref" => {
                 let [table, index] = args else {
-                    return Err("`vector-ref` wants a table and an index".into());
+                    return Err(format!("`{hn}` wants a table and an index"));
                 };
                 let t = self.table(vm, *table)?;
                 let i = self.expr(vm, *index, env, fun)?;
-                self.load(t, i, fun)
+                self.load(&t, i, fun)
             }
-            "vector-length" => {
+            "vector-length" | "numvector-length" => {
                 let [table] = args else {
-                    return Err("`vector-length` wants a table".into());
+                    return Err(format!("`{hn}` wants a table"));
                 };
                 let t = self.table(vm, *table)?;
-                Ok(f64t.const_float(t as f64))
+                Ok(f64t.const_float(t.len() as f64))
+            }
+            // `(array-ref img y x)`: the shape and strides are known now,
+            // so the whole index is a few multiplies and adds, and each
+            // subscript is bounds-checked against its own dimension.
+            "array-ref" => {
+                let [array, subs @ ..] = args else {
+                    return Err("`array-ref` wants an array and subscripts".into());
+                };
+                let shape = self.array_shape(vm, *array)?;
+                if subs.len() != shape.dims.len() {
+                    return Err(format!(
+                        "`array-ref`: this array has rank {}, but {} subscripts were given",
+                        shape.dims.len(),
+                        subs.len()
+                    ));
+                }
+                let i64t = self.ctx.i64_type();
+                let mut at = i64t.const_int(shape.offset, false);
+                for (k, sub) in subs.iter().enumerate() {
+                    let v = self.expr(vm, *sub, env, fun)?;
+                    let idx = self.b.build_float_to_signed_int(v, i64t, "s").map_err(e)?;
+                    // Each dimension on its own, so an in-store but
+                    // out-of-shape index is still refused.
+                    let ok = self
+                        .b
+                        .build_int_compare(IntPredicate::ULT, idx, i64t.const_int(shape.dims[k], false), "sub")
+                        .map_err(e)?;
+                    let cont = self.ctx.append_basic_block(fun.f, "sub");
+                    let trap = self.trap(fun)?;
+                    self.b.build_conditional_branch(ok, cont, trap).map_err(e)?;
+                    self.b.position_at_end(cont);
+                    let stride = i64t.const_int(shape.strides[k] as u64, true);
+                    let term = self.b.build_int_mul(idx, stride, "t").map_err(e)?;
+                    at = self.b.build_int_add(at, term, "at").map_err(e)?;
+                }
+                let store = shape.store.clone();
+                self.load_at(&store, at, fun)
             }
             "if" => {
                 if args.len() != 2 && args.len() != 3 {
@@ -615,66 +705,191 @@ impl<'c> Cg<'c> {
         Ok(self.b.build_select(fix, adjusted, r, "mod").map_err(e)?.into_float_value())
     }
 
-    /// Item (2): a global vector of numbers becomes a private constant array,
-    /// snapshotted now. Returns its length.
-    fn table(&mut self, vm: &mut Vm, form: Value) -> R<u64> {
+    /// Item (2): a global holding bulk numbers becomes a snapshot, taken
+    /// now. A `vector` becomes a constant array, a `numvector` a pointer;
+    /// see [`Store`] for why they differ.
+    fn table(&mut self, vm: &mut Vm, form: Value) -> R<Store<'c>> {
         let Value::Symbol(s) = form else {
             return Err("a table must be named by a global variable".into());
         };
         let r = vm.engine.resolve(s);
         let name = name_of(vm, r);
         if let Some(t) = self.tables.get(&name) {
-            return Ok(t.len);
+            return Ok(t.clone());
         }
         let Some(Value::Obj(o)) = vm.global(r) else {
             return Err(format!("`{name}` is not a global table"));
         };
-        let Obj::Vector { items, .. } = vm.engine.obj(o).clone() else {
-            return Err(format!("`{name}` is not a vector"));
+        let store = match vm.engine.obj(o).clone() {
+            Obj::Vector { items, .. } => {
+                let data = Self::numbers_of(vm, &name, &items)?;
+                self.constant_store(&name, &data)
+            }
+            Obj::NumVector(_) => {
+                let data = Self::numvector_of(vm, o);
+                self.pointer_store(data)
+            }
+            _ => {
+                return Err(format!(
+                    "`{name}` is not a vector or a numeric vector"
+                ));
+            }
         };
-        let f64t = self.ctx.f64_type();
-        let mut consts = Vec::with_capacity(items.len());
-        for (i, it) in items.iter().enumerate() {
-            consts.push(match it {
-                Value::Flonum(x) => f64t.const_float(*x),
-                Value::Fixnum(n) => f64t.const_float(*n as f64),
-                other => {
-                    return Err(format!(
-                        "`{name}` holds `{}` at index {i}, and a table can only hold numbers",
-                        scm::write_str(&vm.engine, *other)
-                    ));
-                }
-            });
+        self.tables.insert(name, store.clone());
+        Ok(store)
+    }
+
+    /// The elements of a plain vector, which must all be numbers.
+    fn numbers_of(vm: &Vm, name: &str, items: &[Value]) -> R<Vec<f64>> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| match it {
+                Value::Flonum(x) => Ok(*x),
+                Value::Fixnum(n) => Ok(*n as f64),
+                other => Err(format!(
+                    "`{name}` holds `{}` at index {i}, and a table can only hold numbers",
+                    scm::write_str(&vm.engine, *other)
+                )),
+            })
+            .collect()
+    }
+
+    /// A numeric vector's elements, widened to `f64` -- the leaf subset's
+    /// one numeric type. An `s64` past 2^53 loses precision here, which is
+    /// the same thing that happens to it in any other arithmetic in this
+    /// subset.
+    fn numvector_of(vm: &Vm, o: scm::ObjRef) -> Vec<f64> {
+        match vm.engine.obj(o) {
+            Obj::NumVector(nv) => (0..nv.len())
+                .map(|i| match nv.get(i) {
+                    Some(Value::Flonum(x)) => x,
+                    Some(Value::Fixnum(n)) => n as f64,
+                    _ => f64::NAN,
+                })
+                .collect(),
+            _ => Vec::new(),
         }
+    }
+
+    fn constant_store(&mut self, name: &str, data: &[f64]) -> Store<'c> {
+        let f64t = self.ctx.f64_type();
+        let consts: Vec<_> = data.iter().map(|x| f64t.const_float(*x)).collect();
         let arr = f64t.const_array(&consts);
-        let global = self.module.add_global(arr.get_type(), Some(AddressSpace::default()), &format!("table_{}", entry_symbol(&name)));
+        let global = self.module.add_global(
+            arr.get_type(),
+            Some(AddressSpace::default()),
+            &format!("table_{}", entry_symbol(name)),
+        );
         global.set_initializer(&arr);
         global.set_constant(true);
         global.set_linkage(Linkage::Private);
-        let len = items.len() as u64;
-        self.tables.insert(name, Table { global, len });
-        Ok(len)
+        Store::Constant { global, len: data.len() as u64 }
+    }
+
+    /// Keep the snapshot alive in `self.snapshots` and bake its address.
+    /// The `Arc` moves to the compiled handle, so the buffer outlives the
+    /// code that reads it.
+    fn pointer_store(&mut self, data: Vec<f64>) -> Store<'c> {
+        let len = data.len() as u64;
+        let data = Arc::new(data);
+        let addr = data.as_ptr() as u64;
+        self.snapshots.push(data);
+        Store::Pointer { addr, len }
+    }
+
+    /// A captured array: its shape and strides read now, its store
+    /// snapshotted like any other bulk data.
+    fn array_shape(&mut self, vm: &mut Vm, form: Value) -> R<ArrayShape<'c>> {
+        let Value::Symbol(s) = form else {
+            return Err("an array must be named by a global variable".into());
+        };
+        let r = vm.engine.resolve(s);
+        let name = name_of(vm, r);
+        if let Some(a) = self.arrays.get(&name) {
+            return Ok(a.clone());
+        }
+        let Some(Value::Obj(o)) = vm.global(r) else {
+            return Err(format!("`{name}` is not a global array"));
+        };
+        let (dims, strides, offset, store_v) = match vm.engine.obj(o).clone() {
+            Obj::Array { dims, strides, offset, store } => (
+                dims.iter().map(|d| *d as u64).collect::<Vec<_>>(),
+                strides.iter().map(|s| *s as i64).collect::<Vec<_>>(),
+                offset as u64,
+                store,
+            ),
+            _ => return Err(format!("`{name}` is not an array")),
+        };
+        let Value::Obj(so) = store_v else {
+            return Err(format!("`{name}` has no usable store"));
+        };
+        let store = match vm.engine.obj(so).clone() {
+            Obj::NumVector(_) => {
+                let data = Self::numvector_of(vm, so);
+                self.pointer_store(data)
+            }
+            Obj::Vector { items, .. } => {
+                let data = Self::numbers_of(vm, &name, &items)?;
+                self.pointer_store(data)
+            }
+            _ => {
+                return Err(format!(
+                    "`{name}` is backed by something other than numbers"
+                ));
+            }
+        };
+        let shape = ArrayShape { dims, strides, offset, store };
+        self.arrays.insert(name, shape.clone());
+        Ok(shape)
     }
 
     /// A bounds-checked load: an index outside the table branches to the
     /// function's trap block, which returns NaN.
-    fn load(&mut self, len: u64, index: FloatValue<'c>, fun: &mut Fun<'c>) -> R<FloatValue<'c>> {
+    /// A bounds-checked read of `store` at a float index. The store is
+    /// passed in rather than searched for: looking it up by length was
+    /// wrong whenever two captured tables happened to be the same size.
+    fn load(&mut self, store: &Store<'c>, index: FloatValue<'c>, fun: &mut Fun<'c>) -> R<FloatValue<'c>> {
+        let i64t = self.ctx.i64_type();
+        let i = self.b.build_float_to_signed_int(index, i64t, "i").map_err(e)?;
+        self.load_at(store, i, fun)
+    }
+
+    /// The same, with the index already an integer.
+    fn load_at(&mut self, store: &Store<'c>, i: IntValue<'c>, fun: &mut Fun<'c>) -> R<FloatValue<'c>> {
         let f64t = self.ctx.f64_type();
         let i64t = self.ctx.i64_type();
-        let table = self.tables.values().find(|t| t.len == len).map(|t| t.global);
-        // `table` found the right global only if lengths are unique; look it
-        // up properly by the caller instead. (Kept simple: the caller just
-        // resolved it, so take the most recent insertion with this length.)
-        let global = table.ok_or("internal: table not found")?;
-        let i = self.b.build_float_to_signed_int(index, i64t, "i").map_err(e)?;
-        let in_range = self.b.build_int_compare(IntPredicate::ULT, i, i64t.const_int(len, false), "inb").map_err(e)?;
+        let len = store.len();
+        // Unsigned, so a negative index fails the same comparison.
+        let in_range = self
+            .b
+            .build_int_compare(IntPredicate::ULT, i, i64t.const_int(len, false), "inb")
+            .map_err(e)?;
         let ok = self.ctx.append_basic_block(fun.f, "ld");
         let trap = self.trap(fun)?;
         self.b.build_conditional_branch(in_range, ok, trap).map_err(e)?;
         self.b.position_at_end(ok);
-        let zero = i64t.const_int(0, false);
-        let p = unsafe {
-            self.b.build_in_bounds_gep(f64t.array_type(len as u32), global.as_pointer_value(), &[zero, i], "e").map_err(e)?
+        let p = match store {
+            Store::Constant { global, len } => {
+                let zero = i64t.const_int(0, false);
+                unsafe {
+                    self.b
+                        .build_in_bounds_gep(
+                            f64t.array_type(*len as u32),
+                            global.as_pointer_value(),
+                            &[zero, i],
+                            "e",
+                        )
+                        .map_err(e)?
+                }
+            }
+            Store::Pointer { addr, .. } => {
+                let base = self
+                    .b
+                    .build_int_to_ptr(i64t.const_int(*addr, false), self.ctx.ptr_type(AddressSpace::default()), "base")
+                    .map_err(e)?;
+                unsafe { self.b.build_in_bounds_gep(f64t, base, &[i], "e").map_err(e)? }
+            }
         };
         Ok(self.b.build_load(f64t, p, "v").map_err(e)?.into_float_value())
     }
@@ -1083,6 +1298,15 @@ fn restore<'c>(env: &mut Env<'c>, saved: Vec<(SymId, Option<FloatValue<'c>>)>) {
             Some(v) => env.insert(p, v),
             None => env.remove(&p),
         };
+    }
+}
+
+/// The name of the primitive a head symbol is bound to, if it is bound to
+/// one. `f64vector-ref` answers `numvector-ref`.
+fn primitive_name(vm: &Vm, h: SymId) -> Option<String> {
+    match vm.global(vm.engine.resolve(h))? {
+        Value::Primitive(id) => Some(vm.engine.prim_name(id).to_string()),
+        _ => None,
     }
 }
 

@@ -70,7 +70,9 @@ Shipped, embedded in the binary: `(srfi 1)` lists, `(srfi 2)` `and-let*`,
 `(srfi 4)` storage is native and unboxed -- four million `f64` cost 35 MB
 against 65 MB as boxed values -- with `#f64(1.0 2.5)` literals, and
 `(srfi 63)` arrays are strided **views** over it, so a transpose or a
-subrectangle shares the store instead of copying it.
+subrectangle shares the store instead of copying it. The leaf compiler
+samples both: a bilinear tap into a 512² image costs 3.3 ns compiled
+against 935 ns interpreted.
 
 ## The differential fuzzer
 
