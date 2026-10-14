@@ -241,11 +241,24 @@ SLIME does, instead of as the unspecified value it returns."
      (scm--request 'eval (append (list :code code) (when source (list :source source)))
                    (lambda (r) (scm--show-result r echo code))))))
 
+(defun scm--last-sexp-end ()
+  "Where the sexp before point ends. In evil's normal and visual states the
+cursor sits *on* the closing paren rather than after it, so the sexp
+before point would be the one inside; count that paren as before point."
+  (if (and (eq (char-after) ?\))
+           (bound-and-true-p evil-local-mode)
+           (not (memq (bound-and-true-p evil-state) '(insert emacs replace))))
+      (1+ (point))
+    (point)))
+
 (defun scm-eval-last-sexp ()
-  "Evaluate the sexp before point; the value goes to the echo area and the REPL."
+  "Evaluate the sexp before point; the value goes to the echo area and the REPL.
+For the whole top-level form from anywhere inside it, use `scm-eval-defun'."
   (interactive)
-  (scm-eval-string (buffer-substring-no-properties (save-excursion (backward-sexp) (point)) (point))
-                   (scm--source-name) t))
+  (let ((end (scm--last-sexp-end)))
+    (scm-eval-string (buffer-substring-no-properties
+                      (save-excursion (goto-char end) (backward-sexp) (point)) end)
+                     (scm--source-name) t)))
 
 (defun scm-eval-defun ()
   "Evaluate the top-level form around point."
