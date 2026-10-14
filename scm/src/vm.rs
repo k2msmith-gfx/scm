@@ -26,6 +26,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod compile;
+mod run;
+
+use crate::code::{CodeState, Tier};
 use crate::heap::{Engine, NamedParam, Obj, Param};
 use crate::syntax::{MacroTable, SyntaxRules};
 use crate::value::{KwId, ObjRef, PrimId, SymId, Value};
@@ -184,6 +188,17 @@ enum Frame {
         idx: usize,
         body: Rc<Vec<Value>>,
         env: ObjRef,
+        /// T1's code for the body, if the closure has it.
+        code: Option<Rc<crate::code::Code>>,
+    },
+    /// A T1 frame: compiled code, suspended at `pc` while a call it made
+    /// runs, or failed there. `base` is where its operands begin on the
+    /// value stack.
+    Code {
+        code: Rc<crate::code::Code>,
+        pc: usize,
+        env: Option<ObjRef>,
+        base: usize,
     },
     /// `%parameterize`'s parameter and value expressions are being evaluated,
     /// alternating, into `done`.
@@ -309,12 +324,19 @@ impl Frame {
                 return;
             }
             Frame::Defaults {
-                todo, body, env, ..
+                todo, body, env, code, ..
             } => {
                 out.extend(todo.iter().map(|(_, e)| *e));
                 out.extend(body.iter().copied());
                 out.push(Value::Obj(*env));
+                if let Some(c) = code {
+                    c.trace(out);
+                }
                 return;
+            }
+            Frame::Code { code, env, .. } => {
+                code.trace(out);
+                env
             }
             Frame::VecElem { done, items, env, .. } => {
                 out.extend(done.iter().copied());
@@ -331,6 +353,8 @@ impl Frame {
 enum Step {
     Eval(Value, Option<ObjRef>),
     Return(Value),
+    /// The top frame is T1 code: run it.
+    Run,
 }
 
 impl Step {
@@ -343,6 +367,7 @@ impl Step {
                 }
             }
             Step::Return(v) => out.push(*v),
+            Step::Run => {}
         }
     }
 }
@@ -364,6 +389,32 @@ pub struct Vm {
     /// the same rule the special forms follow.
     macros: MacroTable,
     stack: Vec<Frame>,
+    /// T1's operand stack. One vector for every compiled frame; each frame
+    /// records where its segment begins. Traced whole by the collector.
+    vstack: Vec<Value>,
+    /// Which engine a procedure body runs on. T1 unless told otherwise;
+    /// `SCM_TIER=t0` in the environment is the differential-test switch.
+    tier: Tier,
+    /// Bumped by every `define-syntax`, so compiled code can tell it was
+    /// built under an older macro table.
+    macro_gen: u64,
+    /// How many forms and closures T1 declined and T0 ran instead.
+    fallbacks: u64,
+    /// Why the last one was declined.
+    last_decline: Option<String>,
+    /// How many units T1 compiled.
+    compiled_units: u64,
+    /// Sub-forms inside compiled code that T0 evaluates on T1's behalf: a
+    /// macro definition in a body, mostly. Counted at compile time.
+    interp_forms: u64,
+    /// Compile results for closures T0 created, keyed on the body's first
+    /// source cell -- which every closure made from the same `lambda` form
+    /// shares, where their `body` vectors are not. A lambda inside a loop
+    /// is a new closure per iteration, and without this it was compiled
+    /// (or declined) per iteration: `triangl` compiled 161,938 times.
+    /// Cleared with the expansion cache, on every collection, for the same
+    /// reason.
+    lambda_cache: HashMap<ObjRef, CodeState>,
     /// The deepest the stack has been this run. A tail loop must leave this
     /// flat, which is S2's exit criterion, so it is measured rather than
     /// asserted by inspection.
@@ -566,6 +617,17 @@ impl Vm {
             engine,
             globals: Vec::new(),
             global_versions: Vec::new(),
+            vstack: Vec::new(),
+            tier: match std::env::var("SCM_TIER").as_deref() {
+                Ok("t0") | Ok("T0") => Tier::T0,
+                _ => Tier::T1,
+            },
+            macro_gen: 0,
+            fallbacks: 0,
+            interp_forms: 0,
+            lambda_cache: HashMap::new(),
+            last_decline: None,
+            compiled_units: 0,
             prims: Vec::new(),
             vm_prims: Vec::new(),
             macros: MacroTable::new(),
@@ -637,6 +699,35 @@ impl Vm {
 
     pub fn stack_high_water(&self) -> usize {
         self.high_water
+    }
+
+    /// Which engine runs procedure bodies from now on. Closures already
+    /// compiled keep their code; T0 only stops *compiling*.
+    pub fn set_tier(&mut self, tier: Tier) {
+        self.tier = tier;
+    }
+
+    pub fn tier(&self) -> Tier {
+        self.tier
+    }
+
+    /// Forms and closures T1 declined, which T0 then ran. The honest
+    /// measure of how much of a program the bytecode tier covered.
+    pub fn tier_fallbacks(&self) -> u64 {
+        self.fallbacks
+    }
+
+    pub fn compiled_units(&self) -> u64 {
+        self.compiled_units
+    }
+
+    pub fn interp_forms(&self) -> u64 {
+        self.interp_forms
+    }
+
+    /// Why T1 last declined something, for a test or a curious REPL.
+    pub fn last_decline(&self) -> Option<&str> {
+        self.last_decline.as_deref()
     }
 
     /// Make a parameter object. The initial value has already had the
@@ -888,15 +979,38 @@ impl Vm {
 
     pub fn eval(&mut self, expr: Value) -> VResult<Value> {
         let base = self.stack.len();
+        let vbase = self.vstack.len();
         let param_base = self.param_bindings.len();
         self.expansions = 0;
-        let out = self.eval_inner(expr, base);
+        // A failure before this form's first call must not be blamed on the
+        // previous form's last one: `(%tier-stats)` unbound at the REPL was
+        // reported "in (%make-parameter init)" -- the prelude's last call.
+        self.current_call = Value::Unspecified;
+        // T1 first: a top-level form compiles as a unit with no frame of
+        // its own, and anything the compiler declines is T0's.
+        let step = if self.tier == Tier::T1 {
+            match self.compile_toplevel(expr) {
+                Ok(code) => {
+                    self.compiled_units += 1;
+                    self.enter_code(code, None)
+                }
+                Err(why) => {
+                    self.fallbacks += 1;
+                    self.last_decline = Some(why.0);
+                    Step::Eval(expr, None)
+                }
+            }
+        } else {
+            Step::Eval(expr, None)
+        };
+        let out = self.eval_inner(step, base);
         if out.is_err() {
             // An error discards the frames that would have restored the
             // dynamic bindings, so the unwind has to do it. Without this a
             // failed `parameterize` leaks its binding into everything after.
             self.restore_params(param_base);
             self.stack.truncate(base);
+            self.vstack.truncate(vbase);
         }
         out
     }
@@ -924,6 +1038,11 @@ impl Vm {
         let Frame::Catch { param_depth } = self.stack[at] else {
             unreachable!("found a Catch")
         };
+        // T1 operands above the catch are garbage too: the frames that
+        // pushed them are about to go. Found by the conformance suite,
+        // where a `%try` that raised left its half-built call on the value
+        // stack and the next call applied `(#t . #f)`.
+        self.drop_operands_above(at);
         // An error leaving a `dynamic-wind` runs its `after` as well. The
         // thunks are queued here and run after the condition is built, so a
         // failing `after` cannot lose the original condition.
@@ -958,8 +1077,8 @@ impl Vm {
         }
     }
 
-    fn eval_inner(&mut self, expr: Value, base: usize) -> VResult<Value> {
-        let mut step = Step::Eval(expr, None);
+    fn eval_inner(&mut self, start: Step, base: usize) -> VResult<Value> {
+        let mut step = start;
         let mut ticks: u32 = 0;
         loop {
             // The safepoint. Collection will live here too (S3), which is why
@@ -984,6 +1103,13 @@ impl Vm {
 
             let outcome = match step {
                 Step::Eval(expr, env) => self.eval_step(expr, env),
+                Step::Run => match self.stack.pop() {
+                    Some(Frame::Code { code, pc, env, base: vb }) => {
+                        self.expansions = 0;
+                        self.run_code(code, pc, env, vb)
+                    }
+                    _ => unreachable!("Step::Run with no code frame on top"),
+                },
                 Step::Return(v) => {
                     // A value was produced, so whatever expansions got us
                     // here were progress and not a runaway. See the counter's
@@ -1021,7 +1147,27 @@ impl Vm {
     /// This is the whole reason `dynamic-wind` is hard: an unwind stops being
     /// a truncation and becomes a *computation*, because each `after` is a
     /// procedure call that has to finish before the next one starts.
+    /// Discard the value-stack segments of every T1 frame above `at`,
+    /// which is what an unwind must do alongside truncating the frames.
+    fn drop_operands_above(&mut self, at: usize) {
+        let level = self.stack[at..].iter().find_map(|f| match f {
+            Frame::Code { base, .. } => Some(*base),
+            _ => None,
+        });
+        if let Some(level) = level {
+            self.vstack.truncate(level);
+        }
+    }
+
+    fn proc_name(&self, name: Option<SymId>) -> String {
+        match name {
+            Some(n) => self.engine.interner.sym_name(n).to_string(),
+            None => "#<procedure>".to_string(),
+        }
+    }
+
     fn unwind_to(&mut self, at: usize, v: Value) -> Step {
+        self.drop_operands_above(at);
         let mut afters: Vec<Value> = Vec::new();
         for frame in self.stack[at..].iter().rev() {
             if let Frame::Wind { after } = frame {
@@ -1071,27 +1217,32 @@ impl Vm {
         {
             out.push(self.describe_frame(self.current_call));
         }
-        for frame in self.stack[base..].iter().rev() {
-            let form = match frame {
-                Frame::Operator { form, .. } | Frame::Operand { form, .. } => *form,
+        'frames: for frame in self.stack[base..].iter().rev() {
+            let forms: Vec<Value> = match frame {
+                Frame::Operator { form, .. } | Frame::Operand { form, .. } => vec![*form],
+                // A compiled frame knows which of its calls are pending at
+                // its pc -- the same frames T0 would have pushed.
+                Frame::Code { code, pc, .. } => code.pending_calls(*pc),
                 _ => continue,
             };
-            // The innermost call is often also the first frame's own form;
-            // saying it twice reads like a bug.
-            if out.first().map(|f: &FrameInfo| f.what.as_str())
-                != Some(abbreviate(&write_str(&self.engine, form)).as_str())
-                || out.len() > 1
-            {
-                out.push(self.describe_frame(form));
-            }
-            // A deep recursion would otherwise bury the useful frames under
-            // thousands of identical ones.
-            if out.len() >= 32 {
-                out.push(FrameInfo {
-                    what: "…".into(),
-                    loc: None,
-                });
-                break;
+            for form in forms {
+                // The innermost call is often also the first frame's own
+                // form; saying it twice reads like a bug.
+                if out.first().map(|f: &FrameInfo| f.what.as_str())
+                    != Some(abbreviate(&write_str(&self.engine, form)).as_str())
+                    || out.len() > 1
+                {
+                    out.push(self.describe_frame(form));
+                }
+                // A deep recursion would otherwise bury the useful frames
+                // under thousands of identical ones.
+                if out.len() >= 32 {
+                    out.push(FrameInfo {
+                        what: "…".into(),
+                        loc: None,
+                    });
+                    break 'frames;
+                }
             }
         }
         out
@@ -1143,6 +1294,7 @@ impl Vm {
         // stack or the step in flight still refers to it -- and both of those
         // are traced below, so an expansion being evaluated right now is safe.
         self.expansion_cache.clear();
+        self.lambda_cache.clear();
         let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() * 2 + 8);
         step.trace(&mut roots);
         // Held by the Vm, so it is a root like any other -- missing this is
@@ -1151,6 +1303,7 @@ impl Vm {
         for frame in &self.stack {
             frame.trace(&mut roots);
         }
+        roots.extend(self.vstack.iter().copied());
         roots.extend(self.globals.iter().flatten().copied());
         self.macro_roots(&mut roots);
         self.param_roots(&mut roots);
@@ -1172,6 +1325,7 @@ impl Vm {
         for frame in &self.stack {
             frame.trace(&mut roots);
         }
+        roots.extend(self.vstack.iter().copied());
         roots.extend(self.globals.iter().flatten().copied());
         self.macro_roots(&mut roots);
         self.param_roots(&mut roots);
@@ -1478,6 +1632,7 @@ impl Vm {
                     let rules = SyntaxRules::parse(&mut self.engine, name, spec, env)
                         .map_err(VmError::Error)?;
                     self.macros.insert(self.engine.resolve(name), Rc::new(rules));
+                    self.macro_gen += 1;
                     Ok(Some(Step::Return(Value::Unspecified)))
                 }
                 _ => Err(self.err("define-syntax: expected (define-syntax name (syntax-rules …))")),
@@ -1706,6 +1861,7 @@ impl Vm {
                     rest: None,
                     body,
                     env: Some(loop_env),
+                    code: CodeState::Unknown,
                 });
                 if let Obj::Env { slots, .. } = self.engine.obj_mut(loop_env) {
                     slots[0].1 = cl;
@@ -1798,6 +1954,7 @@ impl Vm {
             rest: f.rest,
             body: Rc::new(body.to_vec()),
             env,
+            code: CodeState::Unknown,
         }))
     }
 
@@ -2144,11 +2301,16 @@ impl Vm {
                 self.restore_params(self.param_bindings.len().saturating_sub(count));
                 Ok(Step::Return(v))
             }
+            Frame::Code { code, pc, env, base } => {
+                self.vstack.push(v);
+                self.run_code(code, pc, env, base)
+            }
             Frame::Defaults {
                 todo,
                 idx,
                 body,
                 env,
+                code,
             } => {
                 // Write the computed default into its slot, so a later
                 // default can see it -- defaults are evaluated left to right
@@ -2167,10 +2329,14 @@ impl Vm {
                         idx: next,
                         body,
                         env,
+                        code,
                     });
                     return Ok(Step::Eval(expr, Some(env)));
                 }
-                Ok(self.enter_body(body, Some(env)))
+                Ok(match code {
+                    Some(c) => self.enter_code(c, Some(env)),
+                    None => self.enter_body(body, Some(env)),
+                })
             }
             Frame::VecElem {
                 mut done,
@@ -2347,6 +2513,7 @@ impl Vm {
                     body,
                     env,
                     name,
+                    code,
                 } = self.engine.obj(r).clone()
                 else {
                     return Err(self.err(format!(
@@ -2354,10 +2521,53 @@ impl Vm {
                         write_str(&self.engine, callee)
                     )));
                 };
-                let who = match name {
-                    Some(n) => self.engine.interner.sym_name(n).to_string(),
-                    None => "#<procedure>".to_string(),
+                // T1: the body's code, compiled on first call -- or again,
+                // if a macro was defined since -- and `None` if the
+                // compiler declined or the tier is T0.
+                let code: Option<Rc<crate::code::Code>> = match code {
+                    CodeState::Compiled(c) if c.macro_gen == self.macro_gen => Some(c),
+                    CodeState::Interpreted => None,
+                    _ if self.tier == Tier::T0 => None,
+                    _ => {
+                        // The first heap cell in the body: shared by every
+                        // closure made from the same `lambda` form.
+                        let key = body.iter().find_map(|v| match v {
+                            Value::Obj(cell) => Some(*cell),
+                            _ => None,
+                        });
+                        let cached = key.and_then(|k| self.lambda_cache.get(&k).cloned());
+                        let state = match cached {
+                            Some(CodeState::Compiled(c)) if c.macro_gen == self.macro_gen => CodeState::Compiled(c),
+                            Some(CodeState::Interpreted) => CodeState::Interpreted,
+                            _ => {
+                                let built = self.compile_closure(&params, &opt, &named, keys, rest, &body, env);
+                                match built {
+                                    Ok(c) => {
+                                        self.compiled_units += 1;
+                                        CodeState::Compiled(c)
+                                    }
+                                    Err(why) => {
+                                        self.fallbacks += 1;
+                                        self.last_decline = Some(why.0);
+                                        CodeState::Interpreted
+                                    }
+                                }
+                            }
+                        };
+                        if let Some(k) = key {
+                            self.lambda_cache.insert(k, state.clone());
+                        }
+                        if let Obj::Closure { code, .. } = self.engine.obj_mut(r) {
+                            *code = state.clone();
+                        }
+                        match state {
+                            CodeState::Compiled(c) => Some(c),
+                            _ => None,
+                        }
+                    }
                 };
+                // The name is only spelled out on an error path: a String
+                // per call showed up in the profile.
 
                 // Plan §4's rule, in the form the cases actually require. A
                 // keyword begins the named section if
@@ -2393,7 +2603,8 @@ impl Vm {
                 for &p in params.iter() {
                     if i >= args.len() || starts_named_while_filling(args[i]) {
                         return Err(self.err(format!(
-                            "{who} expects {} required argument{}, got {i}",
+                            "{} expects {} required argument{}, got {i}",
+                            self.proc_name(name),
                             params.len(),
                             if params.len() == 1 { "" } else { "s" }
                         )));
@@ -2424,7 +2635,8 @@ impl Vm {
                 while i < args.len() && !starts_named_after_filling(args[i]) {
                     if rest.is_none() {
                         return Err(self.err(format!(
-                            "{who} got {} argument{}, which is more than it takes",
+                            "{} got {} argument{}, which is more than it takes",
+                            self.proc_name(name),
                             args.len(),
                             if args.len() == 1 { "" } else { "s" }
                         )));
@@ -2442,7 +2654,8 @@ impl Vm {
                 while i < args.len() {
                     let Value::Keyword(k) = args[i] else {
                         return Err(self.err(format!(
-                            "{who}: expected a keyword, got {}",
+                            "{}: expected a keyword, got {}",
+                            self.proc_name(name),
                             write_str(&self.engine, args[i])
                         )));
                     };
@@ -2452,11 +2665,11 @@ impl Vm {
                         // a misspelled `:radiuss` does nothing and says
                         // nothing. This is the cheapest place to catch it.
                         let kw = self.engine.interner.kw_name(k).to_string();
-                        return Err(self.err(format!("{who}: unknown named argument :{kw}")));
+                        return Err(self.err(format!("{}: unknown named argument :{kw}", self.proc_name(name))));
                     }
                     if i + 1 >= args.len() {
                         let kw = self.engine.interner.kw_name(k).to_string();
-                        return Err(self.err(format!("{who}: named argument :{kw} has no value")));
+                        return Err(self.err(format!("{}: named argument :{kw} has no value", self.proc_name(name))));
                     }
                     supplied.push((k, args[i + 1]));
                     i += 2;
@@ -2484,10 +2697,17 @@ impl Vm {
                     slots.push((keys_sym, bag));
                 }
 
+                if let Some(c) = &code {
+                    // The slots its internal defines will fill.
+                    slots.extend(c.defines.iter().map(|&d| (d, Value::Unspecified)));
+                }
                 let new_env = self.engine.env(env, slots);
                 if todo.is_empty() {
                     // The common case allocates and evaluates nothing extra.
-                    return Ok(self.enter_body(body, Some(new_env)));
+                    return Ok(match code {
+                        Some(c) => self.enter_code(c, Some(new_env)),
+                        None => self.enter_body(body, Some(new_env)),
+                    });
                 }
                 let todo = Rc::new(todo);
                 let first = todo[0].1;
@@ -2496,6 +2716,7 @@ impl Vm {
                     idx: 0,
                     body,
                     env: new_env,
+                    code,
                 });
                 Ok(Step::Eval(first, Some(new_env)))
             }

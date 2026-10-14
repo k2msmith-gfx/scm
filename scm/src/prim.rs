@@ -3142,6 +3142,23 @@ fn p_open_output_file(e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
+/// `(%tier-stats)` -> `(tier compiled-units declined-units interp-forms
+/// last-decline)`: what the bytecode tier ran and what it handed to T0.
+fn tier_stats(vm: &mut Vm, _a: &[Value]) -> PResult {
+    let tier = vm.engine.sym(match vm.tier() {
+        crate::code::Tier::T0 => "t0",
+        crate::code::Tier::T1 => "t1",
+    });
+    let units = Value::Fixnum(vm.compiled_units() as i64);
+    let fallbacks = Value::Fixnum(vm.tier_fallbacks() as i64);
+    let interp = Value::Fixnum(vm.interp_forms() as i64);
+    let why = match vm.last_decline().map(str::to_string) {
+        Some(w) => vm.engine.string(&w),
+        None => Value::Bool(false),
+    };
+    Ok(vm.engine.list(&[tier, units, fallbacks, interp, why]))
+}
+
 /// `(doc 'name)` -> its docstring, or `#f`.
 fn doc_prim(vm: &mut Vm, a: &[Value]) -> PResult {
     let Some(sym) = named_arg("doc", a)? else {
@@ -3272,6 +3289,7 @@ pub fn install(vm: &mut Vm) {
     // Introspection as *values*, which is plan §8 obligation 6. ray
     // generates its API manual from live docstrings; the ray-steel work found
     // Steel had none at all, so a REPL there could not answer "what is this".
+    vm.define_vm_prim("%tier-stats", tier_stats);
     vm.define_vm_prim("doc", doc_prim);
     vm.define_vm_prim("signature", signature_prim);
     vm.define_vm_prim("apropos", apropos_prim);

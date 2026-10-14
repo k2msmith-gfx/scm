@@ -189,6 +189,8 @@ pub enum Obj {
         rest: Option<SymId>,
         body: Rc<Vec<Value>>,
         env: Option<ObjRef>,
+        /// T1's compiled form of `body`, filled in on first call.
+        code: crate::code::CodeState,
     },
 }
 
@@ -506,15 +508,19 @@ impl Engine {
                         env,
                         opt,
                         named,
+                        code,
                         ..
                     } => {
                         // The body is *source*, and source is heap data too --
                         // and so is every default expression, which is easy to
                         // forget because it only runs when an argument is
-                        // missing.
+                        // missing. And so are the constants in compiled code.
                         work.extend(body.iter().copied());
                         work.extend(opt.iter().filter_map(|p| p.default));
                         work.extend(named.iter().filter_map(|p| p.default));
+                        if let crate::code::CodeState::Compiled(c) = code {
+                            c.trace(&mut work);
+                        }
                         if let Some(p) = env {
                             work.push(Value::Obj(*p));
                         }
