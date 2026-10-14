@@ -342,6 +342,15 @@ Scheme's #t and #f outside strings become t and nil."
   (when scm-connect-automatically
     (scm-ensure-connected)))
 
+(defun scm--no-geiser ()
+  "Keep Geiser out of scm buffers.
+Doom's scheme module hooks `geiser-mode' onto `scheme-mode', which
+`scm-mode' derives from; the parent's hooks run first, so this undoes it."
+  (when (bound-and-true-p geiser-mode)
+    (geiser-mode -1)))
+
+(add-hook 'scm-mode-hook #'scm--no-geiser 90)
+
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.scm\\'" . scm-mode))
 
