@@ -119,7 +119,12 @@ impl std::fmt::Display for FrameInfo {
 /// call back into Scheme (S7's "a host function cannot re-enter the VM" is
 /// closed by this), and the embedding layer builds the value-converting
 /// forms on top.
-pub type HostClosure = Rc<RefCell<dyn FnMut(&mut Vm, &[Value]) -> VResult<Value>>>;
+///
+/// `Fn`, not `FnMut`: a host function may re-enter *itself* through a
+/// callback -- a verb iterating a scene calls the same verb -- and a
+/// mutable borrow held across the call would make that a panic. Host
+/// state lives in a `RefCell` or `Cell` inside the closure.
+pub type HostClosure = Rc<dyn Fn(&mut Vm, &[Value]) -> VResult<Value>>;
 type HostFn = HostClosure;
 
 /// One pending computation.
@@ -842,11 +847,18 @@ impl Vm {
     pub fn define_host_fn(
         &mut self,
         name: &str,
-        mut f: impl FnMut(&[crate::Val]) -> Result<crate::Val, String> + 'static,
+        f: impl FnMut(&[crate::Val]) -> Result<crate::Val, String> + 'static,
     ) {
         let who = name.to_string();
-        self.define_host_closure(name, Rc::new(RefCell::new(move |vm: &mut Vm, args: &[Value]| {
+        // The value-converting form cannot re-enter, so holding its state
+        // borrowed for the call is safe; a re-entry would be a bug here,
+        // reported rather than deadlocked.
+        let f = RefCell::new(f);
+        self.define_host_closure(name, Rc::new(move |vm: &mut Vm, args: &[Value]| {
             let vals: Vec<crate::Val> = args.iter().map(|&a| crate::embed::read_val(&vm.engine, a, 0)).collect();
+            let Ok(mut f) = f.try_borrow_mut() else {
+                return Err(vm.err(format!("{who}: re-entered; use define_fn_with for a host function that calls back")));
+            };
             match f(&vals) {
                 // A host refusal is an ordinary Scheme error, so `guard` can
                 // catch it -- it is the host's *code* failing, not the host
@@ -854,7 +866,7 @@ impl Vm {
                 Err(msg) => Err(vm.err(format!("{who}: {msg}"))),
                 Ok(v) => crate::embed::build_val(&mut vm.engine, &v, 0).map_err(|e| vm.err(format!("{who}: {e}"))),
             }
-        })));
+        }));
     }
 
     /// The raw form: a closure over the machine and the argument values.
@@ -2118,7 +2130,7 @@ impl Vm {
         // evaluation that fails halfway -- the stacks come back to here.
         let (base, vbase, pbase) = (self.stack.len(), self.vstack.len(), self.param_bindings.len());
         let call = self.current_call;
-        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (f.borrow_mut())(self, args)));
+        let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, args)));
         self.restore_params(pbase);
         self.stack.truncate(base);
         self.vstack.truncate(vbase);

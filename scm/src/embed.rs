@@ -418,14 +418,17 @@ impl Interp {
     /// [`Host`] and its arguments, with procedures among them as
     /// [`Val::Proc`]. A panic inside is caught, the machine's stacks are put
     /// back, and the call fails as an ordinary Scheme error.
+    ///
+    /// `Fn`, so it may re-enter itself through a callback; keep its state in
+    /// a `RefCell` or `Cell`.
     pub fn define_fn_with(
         &mut self,
         name: &str,
-        mut f: impl FnMut(&mut Host, &[Val]) -> Result<Val, String> + 'static,
+        f: impl Fn(&mut Host, &[Val]) -> Result<Val, String> + 'static,
     ) -> Result<(), Error> {
         self.enter()?;
         let (id, pending, who) = (self.id, Rc::clone(&self.pending), name.to_string());
-        let closure: crate::vm::HostClosure = Rc::new(RefCell::new(move |vm: &mut Vm, args: &[Value]| {
+        let closure: crate::vm::HostClosure = Rc::new(move |vm: &mut Vm, args: &[Value]| {
             let vals: Vec<Val> = args.iter().map(|&a| read_val_rooting(&mut vm.engine, a, 0, id, &pending)).collect();
             let mut host = Host { vm, id, pending: Rc::clone(&pending) };
             let out = f(&mut host, &vals);
@@ -433,7 +436,7 @@ impl Interp {
                 Err(msg) => Err(vm.err(format!("{who}: {msg}"))),
                 Ok(v) => build_val(&mut vm.engine, &v, 0).map_err(|e| vm.err(format!("{who}: {e}"))),
             }
-        }));
+        });
         let vm = &mut self.vm;
         match guard(|| vm.define_host_closure(name, closure)) {
             Ok(()) => Ok(()),

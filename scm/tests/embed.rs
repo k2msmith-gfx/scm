@@ -181,12 +181,17 @@ fn host_values_go_in_and_come_back() {
 #[test]
 fn what_has_no_host_form_says_so_instead_of_guessing() {
     let mut it = Interp::new().unwrap();
-    // A procedure, an improper list and a cycle are all Opaque rather than
-    // a lie or a hang. The cycle is the one that matters: `set-cdr!` makes
-    // them constructible, and an unbounded walk would never return.
-    for src in ["car", "(lambda (x) x)", "'(1 . 2)", "(open-input-string \"x\")"] {
+    // A port, an improper list and a cycle are all Opaque rather than a
+    // lie or a hang. The cycle is the one that matters: `set-cdr!` makes
+    // them constructible, and an unbounded walk would never return. A
+    // procedure is the exception: it comes back as a callable `Proc`.
+    for src in ["'(1 . 2)", "(open-input-string \"x\")"] {
         let r = it.eval(src).unwrap();
         assert_eq!(it.value(&r).unwrap(), Val::Opaque, "{src}");
+    }
+    for src in ["car", "(lambda (x) x)"] {
+        let r = it.eval(src).unwrap();
+        assert!(matches!(it.value(&r).unwrap(), Val::Proc(_)), "{src}");
     }
     let cyclic = it.eval("(let ([x (list 1 2)]) (set-cdr! (cdr x) x) x)").unwrap();
     assert_eq!(it.value(&cyclic).unwrap(), Val::Opaque);
