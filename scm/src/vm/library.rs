@@ -39,8 +39,24 @@ pub struct Library {
     pub exports: Vec<(SymId, SymId)>,
 }
 
-/// Libraries this crate ships, embedded: `(name, source)`.
-pub const EMBEDDED: &[(&str, &str)] = &[];
+/// Libraries this crate ships, embedded: `(name, source)`. Embedded rather
+/// than installed, so `scm` needs no library directory beside it and a
+/// `scm build` bundle carries them too. A file of the same name found on
+/// the library path wins, which is how one is overridden or developed.
+pub const EMBEDDED: &[(&str, &str)] = &[
+    ("(scm test)", include_str!("../../lib/scm/test.sld")),
+    ("(srfi 1)", include_str!("../../lib/srfi/1.sld")),
+    ("(srfi 2)", include_str!("../../lib/srfi/2.sld")),
+    ("(srfi 8)", include_str!("../../lib/srfi/8.sld")),
+    ("(srfi 26)", include_str!("../../lib/srfi/26.sld")),
+    ("(srfi 111)", include_str!("../../lib/srfi/111.sld")),
+    ("(srfi 132)", include_str!("../../lib/srfi/132.sld")),
+];
+
+/// Every embedded library's name, for `(scm libraries)` and the gate.
+pub fn embedded_names() -> Vec<&'static str> {
+    EMBEDDED.iter().map(|(n, _)| *n).collect()
+}
 
 /// A binding as it crosses a library boundary.
 #[derive(Clone)]
@@ -421,16 +437,29 @@ impl Vm {
         Ok(())
     }
 
+    /// A library's binding for `name`: its own, or -- since re-exporting
+    /// an imported binding is legal R7RS and a standard import lands in
+    /// the globals -- a global of that name. `(export make-list)` beside
+    /// `(import (scheme base))` is the case that needs the fallback.
     fn frame_binding(&self, frame: ObjRef, name: SymId) -> Option<Binding> {
-        let Obj::Env { slots, .. } = self.engine.obj(frame) else { return None };
         let resolved = self.engine.resolve(name);
-        let (_, v) = slots.iter().rev().find(|(s, _)| *s == name || self.engine.resolve(*s) == resolved)?;
-        if let Value::Obj(r) = v
-            && let Obj::Macro(m) = self.engine.obj(*r)
+        if let Obj::Env { slots, .. } = self.engine.obj(frame)
+            && let Some((_, v)) = slots
+                .iter()
+                .rev()
+                .find(|(s, _)| *s == name || self.engine.resolve(*s) == resolved)
         {
+            if let Value::Obj(r) = v
+                && let Obj::Macro(m) = self.engine.obj(*r)
+            {
+                return Some(Binding::Macro(Rc::clone(m)));
+            }
+            return Some(Binding::Value(*v));
+        }
+        if let Some(m) = self.macros.get(&resolved) {
             return Some(Binding::Macro(Rc::clone(m)));
         }
-        Some(Binding::Value(*v))
+        self.global(resolved).map(Binding::Value)
     }
 
     fn bind_in_frame(&mut self, frame: ObjRef, name: SymId, b: Binding) {

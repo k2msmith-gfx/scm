@@ -272,6 +272,22 @@ fn emit(
                     stack.push(Job::Text(" "));
                 }
             }
+            // R7RS does not specify how a record prints. The name alone,
+            // because a record may contain itself and the label machinery
+            // for shared structure covers pairs and vectors only.
+            Obj::Record { rtype, .. } => {
+                let name = match rtype {
+                    Value::Obj(r) => match e.obj(*r) {
+                        Obj::RecordType { name, .. } => e.interner.sym_name(*name).to_string(),
+                        _ => "record".to_string(),
+                    },
+                    _ => "record".to_string(),
+                };
+                out.push_str(&format!("#<{name}>"));
+            }
+            Obj::RecordType { name, .. } => {
+                out.push_str(&format!("#<record-type {}>", e.interner.sym_name(*name)));
+            }
             Obj::Port { kind, .. } => {
                 out.push_str(match kind {
                     crate::heap::PortKind::StringIn { .. } => "#<input-port string>",

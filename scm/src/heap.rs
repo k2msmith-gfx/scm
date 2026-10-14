@@ -172,6 +172,18 @@ pub enum Obj {
         parent: Option<ObjRef>,
         slots: Vec<(SymId, Value)>,
     },
+    /// A record type descriptor, from `define-record-type`. Two types with
+    /// the same name are distinct objects, which is what R7RS wants and
+    /// what comparing names would get wrong.
+    RecordType { name: SymId, fields: Rc<Vec<SymId>> },
+    /// An instance. `rtype` is the descriptor it was made from, compared by
+    /// identity. A heap type of its own, rather than a tagged vector, is
+    /// what makes a record **disjoint from every other type** as R7RS
+    /// §5.5 requires: `vector?` is false of one, and two distinct records
+    /// with equal fields are not `equal?`, because `equal?` recurses into
+    /// pairs, vectors, strings and bytevectors and compares everything
+    /// else by identity.
+    Record { rtype: Value, fields: Vec<Value> },
     /// `params` and `body` are behind `Rc` so that applying a closure clones
     /// two pointers instead of two vectors -- a tail loop applies the same
     /// closure 10^8 times and must not allocate to do it.
@@ -557,6 +569,16 @@ impl Engine {
                     }
                     Obj::Port { .. } => {}
                     Obj::Values(vs) => work.extend(vs.iter().copied()),
+                    Obj::Record { rtype, fields } => {
+                        visited += fields.len() + 1;
+                        if is_obj(rtype) {
+                            work.push(*rtype);
+                        }
+                        work.extend(fields.iter().copied().filter(is_obj));
+                    }
+                    // A type descriptor holds interned names and nothing
+                    // collectable.
+                    Obj::RecordType { .. } => {}
                     // A macro's patterns and templates are heap data, so
                     // they must be traced -- this is the `macro_roots` bug
                     // again, and gc stress is what caught it the first time.
@@ -714,6 +736,14 @@ impl Engine {
             irritants,
             kind,
         })
+    }
+
+    pub fn record_type(&mut self, name: SymId, fields: Vec<SymId>) -> Value {
+        self.alloc(Obj::RecordType { name, fields: Rc::new(fields) })
+    }
+
+    pub fn record(&mut self, rtype: Value, fields: Vec<Value>) -> Value {
+        self.alloc(Obj::Record { rtype, fields })
     }
 
     pub fn port(&mut self, kind: PortKind) -> Value {

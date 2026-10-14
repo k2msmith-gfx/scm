@@ -60,8 +60,11 @@ SLIME-style mode with a REPL window, completion and a break-free `C-c C-b`.
 A library is an environment frame; importing copies its exports into
 yours, or into the globals at top level. `(acme util)` is found as
 `acme/util.sld` on `.`, `SCM_LIBRARY_PATH`, or embedded in the binary.
-See [docs/libraries.md](docs/libraries.md). Nothing beyond R7RS-small is
-shipped yet; the SRFIs are next.
+See [docs/libraries.md](docs/libraries.md).
+
+Shipped, embedded in the binary: `(srfi 1)` lists, `(srfi 2)` `and-let*`,
+`(srfi 8)` `receive`, `(srfi 26)` `cut`, `(srfi 111)` boxes, `(srfi 132)`
+sorting, and `(scm test)`. See [docs/srfi.md](docs/srfi.md).
 
 ## The differential fuzzer
 

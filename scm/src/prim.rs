@@ -11,6 +11,8 @@
 use crate::heap::{Engine, ErrorKind, Obj, PortKind};
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
+use std::rc::Rc;
+
 use crate::value::{ObjRef, SymId};
 use crate::writer::{Labels, display_str, write_str, write_with};
 
@@ -2020,6 +2022,166 @@ fn stderr_port(e: &mut Engine, _a: &[Value]) -> PResult {
     Ok(e.port(PortKind::Stderr))
 }
 
+// ── records ─────────────────────────────────────────────────────────────
+//
+// A record is its own heap type, so it is disjoint from every other one
+// (R7RS §5.5) -- `vector?` is false of one, and two distinct records with
+// equal fields are not `equal?`. The prelude's `define-record-type` builds
+// the descriptor and the accessors on top of these five.
+//
+// A field is found by scanning the type's name list, as the prelude's
+// version did; the list is a handful of interned symbols and the scan is
+// now Rust rather than Scheme.
+
+fn record_type_parts(e: &Engine, t: Value) -> Option<(SymId, Rc<Vec<SymId>>)> {
+    let Value::Obj(r) = t else { return None };
+    match e.obj(r) {
+        Obj::RecordType { name, fields } => Some((*name, Rc::clone(fields))),
+        _ => None,
+    }
+}
+
+/// `(%record-type 'name '(field …))`
+fn p_record_type(e: &mut Engine, a: &[Value]) -> PResult {
+    let [Value::Symbol(name), fields] = a else {
+        return Err(err("%record-type: expects a name and a list of field names"));
+    };
+    let mut names = Vec::new();
+    let mut cur = *fields;
+    while let Value::Obj(r) = cur {
+        let Obj::Pair(car, cdr) = *e.obj(r) else {
+            return Err(err("%record-type: the field list is improper"));
+        };
+        match car {
+            Value::Symbol(s) => names.push(s),
+            _ => return Err(err("%record-type: a field name must be a symbol")),
+        }
+        cur = cdr;
+    }
+    Ok(e.record_type(*name, names))
+}
+
+/// `(%record-make type '((field . value) …))` -- the constructor names a
+/// subset of the fields in any order, so values arrive by name.
+///
+/// A field the constructor did not name is **`#f`**. R7RS says only that
+/// it is unspecified, and `#<unspecified>` would be the more literal
+/// reading, but plan §4 already decided that an absent value in this
+/// language is `#f` -- so that a supplied-check is `(if field …)` -- and a
+/// record field is the same question as an optional argument.
+fn p_record_make(e: &mut Engine, a: &[Value]) -> PResult {
+    let [t, vals] = a else {
+        return Err(err("%record-make: expects a type and an alist"));
+    };
+    let Some((_, fields)) = record_type_parts(e, *t) else {
+        return Err(err("%record-make: not a record type"));
+    };
+    // The alist, as (name, value) pairs.
+    let mut given: Vec<(SymId, Value)> = Vec::new();
+    let mut cur = *vals;
+    while let Value::Obj(r) = cur {
+        let Obj::Pair(car, cdr) = *e.obj(r) else {
+            return Err(err("%record-make: the alist is improper"));
+        };
+        if let Value::Obj(pr) = car
+            && let Obj::Pair(Value::Symbol(k), v) = *e.obj(pr)
+        {
+            given.push((k, v));
+        }
+        cur = cdr;
+    }
+    let values = fields
+        .iter()
+        .map(|f| {
+            given
+                .iter()
+                .find(|(k, _)| k == f)
+                .map(|(_, v)| *v)
+                .unwrap_or(Value::Bool(false))
+        })
+        .collect();
+    Ok(e.record(*t, values))
+}
+
+fn is_instance(e: &Engine, o: Value, t: Value) -> bool {
+    let Value::Obj(r) = o else { return false };
+    match e.obj(r) {
+        Obj::Record { rtype, .. } => match (rtype, t) {
+            (Value::Obj(a), Value::Obj(b)) => *a == b,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn p_record_is(e: &mut Engine, a: &[Value]) -> PResult {
+    let [o, t] = a else {
+        return Err(err("%record-is?: expects an object and a type"));
+    };
+    Ok(Value::Bool(is_instance(e, *o, *t)))
+}
+
+/// The index of `name` in the type's field list.
+fn field_index(e: &Engine, t: Value, name: Value) -> Result<usize, VmError> {
+    let Some((tname, fields)) = record_type_parts(e, t) else {
+        return Err(err("not a record type"));
+    };
+    let Value::Symbol(f) = name else {
+        return Err(err("a field name must be a symbol"));
+    };
+    fields.iter().position(|x| *x == f).ok_or_else(|| {
+        err(format!(
+            "{} has no field {}",
+            e.interner.sym_name(tname),
+            e.interner.sym_name(f)
+        ))
+    })
+}
+
+fn p_record_get(e: &mut Engine, a: &[Value]) -> PResult {
+    let [o, t, f] = a else {
+        return Err(err("%record-get: expects an object, a type and a field"));
+    };
+    let i = field_index(e, *t, *f)?;
+    if !is_instance(e, *o, *t) {
+        let (tname, _) = record_type_parts(e, *t).expect("checked by field_index");
+        return Err(err(format!(
+            "{}: not a {}: {}",
+            e.interner.sym_name(match f { Value::Symbol(s) => *s, _ => tname }),
+            e.interner.sym_name(tname),
+            write_str(e, *o)
+        )));
+    }
+    let Value::Obj(r) = *o else { unreachable!("checked") };
+    match e.obj(r) {
+        Obj::Record { fields, .. } => Ok(fields[i]),
+        _ => unreachable!("checked"),
+    }
+}
+
+fn p_record_put(e: &mut Engine, a: &[Value]) -> PResult {
+    let [o, t, f, v] = a else {
+        return Err(err("%record-put!: expects an object, a type, a field and a value"));
+    };
+    let i = field_index(e, *t, *f)?;
+    if !is_instance(e, *o, *t) {
+        let (tname, _) = record_type_parts(e, *t).expect("checked by field_index");
+        return Err(err(format!(
+            "not a {}: {}",
+            e.interner.sym_name(tname),
+            write_str(e, *o)
+        )));
+    }
+    let Value::Obj(r) = *o else { unreachable!("checked") };
+    match e.obj_mut(r) {
+        Obj::Record { fields, .. } => {
+            fields[i] = *v;
+            Ok(Value::Unspecified)
+        }
+        _ => unreachable!("checked"),
+    }
+}
+
 fn stdin_port(e: &mut Engine, _a: &[Value]) -> PResult {
     Ok(e.port(PortKind::Stdin))
 }
@@ -3373,6 +3535,11 @@ pub fn install(vm: &mut Vm) {
     vm.define_vm_prim("char-ready?", |vm, a| with_in_port(vm, a, 0, is_char_ready));
     vm.define_prim("%stdout-port", stdout_port);
     vm.define_prim("%stdin-port", stdin_port);
+    vm.define_prim("%record-type", p_record_type);
+    vm.define_prim("%record-make", p_record_make);
+    vm.define_prim("%record-is?", p_record_is);
+    vm.define_prim("%record-get", p_record_get);
+    vm.define_prim("%record-put!", p_record_put);
     vm.define_prim("%stderr-port", stderr_port);
     // vectors, including the growable addition
     vm.define_prim("make-vector", make_vector);

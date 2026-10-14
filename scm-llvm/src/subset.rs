@@ -135,7 +135,8 @@ impl<'a> Analysis<'a> {
     fn walk(&mut self, expr: Value, locals: &mut Vec<SymId>, acc: &mut Acc) -> Result<(), String> {
         match expr {
             Value::Fixnum(_) | Value::Flonum(_) | Value::Bool(_) => Ok(()),
-            Value::Char(_) | Value::Keyword(_) | Value::Null | Value::Unspecified | Value::Eof => {
+            Value::Char(_) | Value::Keyword(_) | Value::Null | Value::Unspecified
+            | Value::Undefined | Value::Eof => {
                 Err(format!("a literal `{}` has no numeric form", scm::write_str(&self.vm.engine, expr)))
             }
             Value::Primitive(_) => Ok(()),

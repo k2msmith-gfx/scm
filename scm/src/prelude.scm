@@ -613,42 +613,14 @@
 ;;     run time. `syntax-rules` cannot compute "the position of x in (x y)",
 ;;     and a few-element `memq` is cheaper than the machinery that could.
 ;;
-;; `vector?` is true of a record, which is a leak this representation cannot
-;; close without a heap type of its own. Recorded rather than hidden.
-(define (%make-record-type name fields) (vector '%record-type name fields))
-(define (%rt-fields t) (vector-ref t 2))
-(define (%rt-name t) (vector-ref t 1))
-
-(define (%record-is? o type)
-  (and (vector? o) (> (vector-length o) 0) (eq? (vector-ref o 0) type)))
-
-(define (%record-make type vals)
-  (let* ([fs (%rt-fields type)]
-         [v (make-vector (+ 1 (length fs)) #f)])
-    (vector-set! v 0 type)
-    (let loop ([fs fs] [i 1])
-      (if (null? fs)
-          v
-          (begin
-            (let ([p (assq (car fs) vals)])
-              (if p (vector-set! v i (cdr p))))
-            (loop (cdr fs) (+ i 1)))))))
-
-(define (%record-index type f)
-  (let loop ([fs (%rt-fields type)] [i 1])
-    (cond [(null? fs) (error "no such field" (%rt-name type) f)]
-          [(eq? (car fs) f) i]
-          [else (loop (cdr fs) (+ i 1))])))
-
-(define (%record-get o type f)
-  (if (%record-is? o type)
-      (vector-ref o (%record-index type f))
-      (error "not a record of this type" (%rt-name type) o)))
-
-(define (%record-put! o type f v)
-  (if (%record-is? o type)
-      (vector-set! o (%record-index type f) v)
-      (error "not a record of this type" (%rt-name type) o)))
+;; A record is its own heap type (`%record-type`, `%record-make`,
+;; `%record-is?`, `%record-get` and `%record-put!` are primitives), which is
+;; what makes it **disjoint from every other type** as R7RS §5.5 requires:
+;; `vector?` is false of a record, and two distinct records with equal
+;; fields are not `equal?`. The earlier representation was a tagged vector
+;; and was neither; the SRFI 111 box, whose whole content is its identity,
+;; is what made that worth closing.
+(define (%make-record-type name fields) (%record-type name fields))
 
 ;; R7RS `define-record-type`. The constructor names a SUBSET of the fields in
 ;; whatever order it likes, which is why it builds an alist rather than
@@ -687,7 +659,10 @@
 ;; mutable cell plus a thunk, and `force` is an ordinary procedure -- no VM
 ;; support at all, which is the test of whether `delay` really is a macro.
 
-(define (%make-promise-thunk thunk) (vector 'promise #f thunk))
+(define %promise-type (%record-type 'promise (list 'done 'value)))
+
+(define (%make-promise-thunk thunk)
+  (%record-make %promise-type (list (cons 'done #f) (cons 'value thunk))))
 
 (define-syntax delay
   (syntax-rules ()
@@ -698,25 +673,26 @@
     [(_ expr) (%make-promise-thunk (lambda () (force expr)))]))
 
 (define (make-promise v)
-  (if (promise? v) v (vector 'promise #t v)))
+  (if (promise? v)
+      v
+      (%record-make %promise-type (list (cons 'done #t) (cons 'value v)))))
 
-(define (promise? x)
-  (and (vector? x)
-       (= (vector-length x) 3)
-       (eq? (vector-ref x 0) 'promise)))
+;; A record of the promise type, and nothing else: the old predicate was
+;; true of any three-element vector whose head was the symbol `promise`.
+(define (promise? x) (%record-is? x %promise-type))
 
 ;; Memoising: a promise is forced at most once, which is the whole point.
 (define (force p)
   (if (promise? p)
-      (if (vector-ref p 1)
-          (vector-ref p 2)
-          (let ([v ((vector-ref p 2))])
+      (if (%record-get p %promise-type 'done)
+          (%record-get p %promise-type 'value)
+          (let ([v ((%record-get p %promise-type 'value))])
             ;; Re-check: forcing may have forced this same promise.
-            (if (vector-ref p 1)
-                (vector-ref p 2)
+            (if (%record-get p %promise-type 'done)
+                (%record-get p %promise-type 'value)
                 (begin
-                  (vector-set! p 1 #t)
-                  (vector-set! p 2 v)
+                  (%record-put! p %promise-type 'done #t)
+                  (%record-put! p %promise-type 'value v)
                   v))))
       p))
 

@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Runs external R7RS conformance suites against scm and reports a number"
+# Two binaries now, so `cargo run -p scm-conform` stays unambiguous.
+default-run = "scm-conform"
 
 [lib]
 path = "src/lib.rs"

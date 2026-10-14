@@ -1650,6 +1650,8 @@ impl Vm {
                 // themselves; only a pair is a form.
                 Obj::Closure { .. }
                 | Obj::Env { .. }
+                | Obj::Record { .. }
+                | Obj::RecordType { .. }
                 | Obj::Parameter { .. }
                 | Obj::Rng(_)
                 | Obj::Continuation { .. }
