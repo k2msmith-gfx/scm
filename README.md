@@ -6,8 +6,12 @@ macOS — and ray's scripting language.
 
 **Status: S0–S11 done** on aarch64 macOS — reader, interpreter, GC, the
 lambda list, `syntax-rules`, the embedding API, the REPL protocol, the rest
-of R7RS-small, the boot budget, the leaf compiler and live recompilation
-of a leaf under a running render. Next is S12, the bytecode VM.
+of R7RS-small, the boot budget, the leaf compiler, live recompilation of a
+leaf under a running render, and the bytecode tier. Two engines run every
+program: T0, the interpreter and semantic oracle, and T1, the bytecode VM
+and default, 6.7× faster on the benchmark suite with identical results
+(`SCM_TIER=t0` picks the oracle). See [docs/s12-bytecode.md](docs/s12-bytecode.md).
+Next is S13 or S14, with S13's case now a measured one.
 Development targets **aarch64 macOS first**; x86-64 Linux is sequenced
 later, not dropped (plan §2.5). The plan is in [docs/plan.md](docs/plan.md);
 the LLVM feasibility results are in [docs/s0-findings.md](docs/s0-findings.md).

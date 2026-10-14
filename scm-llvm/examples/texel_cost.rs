@@ -42,6 +42,6 @@ fn main() {
         "(let loop ([i 0] [acc 0.0]) (if (= i {m}) acc (loop (+ i 1) (let inner ([j 0] [a acc]) (if (= j {m}) a (inner (+ j 1) (+ a (apply + (texel (/ i {m}.0) (/ j {m}.0))))))))))"
     )).unwrap();
     let interp = t.elapsed().as_nanos() as f64 / (m * m) as f64;
-    println!("T0                   {interp:8.1} ns/texel   ({:.0}x)", interp / native);
+    println!("interpreted ({:?})   {interp:8.1} ns/texel   ({:.0}x)", vm.tier(), interp / native);
     std::hint::black_box(sink);
 }
