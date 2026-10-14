@@ -1204,6 +1204,11 @@ impl Vm {
                     // here were progress and not a runaway. See the counter's
                     // declaration: it measures *consecutive* expansions.
                     self.expansions = 0;
+                    // And whatever call was in progress has returned: an
+                    // error after this point is not *in* that call, and a
+                    // backtrace that still named it was blaming `(+ i 1)`
+                    // for an unbound variable two forms later.
+                    self.current_call = Value::Unspecified;
                     if self.stack.len() <= base {
                         return Ok(v);
                     }

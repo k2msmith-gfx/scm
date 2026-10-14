@@ -422,6 +422,7 @@ pub unsafe extern "C" fn rt_call_prim(st: *mut NativeState, argc: u32, form: u32
         match f(&mut vm.engine, args) {
             Ok(v) => {
                 *callee = v;
+                vm.current_call = Value::Unspecified;
                 0
             }
             Err(e) => fail(st, e),

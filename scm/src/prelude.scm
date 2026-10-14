@@ -484,6 +484,8 @@
 (define current-error-port (make-parameter (%stderr-port)))
 (define current-input-port (make-parameter (open-input-string "")))
 
+(define call/cc call-with-current-continuation)
+
 (define (call-with-port port proc)
   (let ([r (proc port)])
     (close-port port)

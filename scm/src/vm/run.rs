@@ -100,6 +100,7 @@ impl Vm {
             let r = f(&mut self.engine, &self.vstack[start + 1..]);
             self.vstack.truncate(start);
             let v = r?;
+            self.current_call = Value::Unspecified;
             if tail {
                 self.vstack.truncate(base);
                 return Ok(Some(Step::Return(v)));
