@@ -26,7 +26,7 @@ pub use reader::{ReadError, Reader, ReaderOptions, Span};
 pub use value::{KwId, ObjRef, SymId, Value};
 pub use value::PrimId;
 pub use code::Tier;
-pub use vm::{PRELUDE, Vm, VmError};
+pub use vm::{BreakAction, BreakHandler, FrameView, PRELUDE, Vm, VmError};
 pub use writer::{display_str, write_str};
 
 /// Whether a chunk of source is a complete set of datums, needs more input,

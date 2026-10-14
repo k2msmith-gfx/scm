@@ -43,8 +43,12 @@ scm> (seq (i 0 5) (* i i))
 ```
 
 An unclosed paren continues the entry rather than reporting an error, which
-is what S1's *incomplete* vs *invalid* distinction was for. The terminal and
-the socket are two clients of one protocol, [docs/repl.md](docs/repl.md).
+is what S1's *incomplete* vs *invalid* distinction was for. The terminal has
+line editing, history, tab completion, `,help` for its commands, and a
+**break REPL**: an uncaught error stops with the frames live, so you can
+inspect locals, evaluate in any frame, and `,return` a value to continue.
+The terminal and the socket are two clients of one protocol,
+[docs/repl.md](docs/repl.md).
 
 ## The leaf compiler
 

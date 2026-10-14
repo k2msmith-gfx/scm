@@ -594,3 +594,79 @@ fn stopping_a_runaway_says_where_it_was() {
     assert!(bt[0].starts_with("(loop)"), "{bt:#?}");
     assert!(bt.iter().any(|f| f.contains("(+ 0 (inner))")), "{bt:#?}");
 }
+
+// ── S8b: the break REPL, and the REPL's conveniences ─────────────────────
+
+#[test]
+fn a_break_handler_sees_live_frames_and_can_return_a_value() {
+    use scm::{BreakAction, Value, Vm};
+    let mut vm = Vm::new();
+    vm.eval_str("(define (f x) (* 2 (vector-ref (vector 1 2) x)))").unwrap();
+    let seen: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+    let log = seen.clone();
+    vm.set_break_handler(Some(Box::new(move |vm, e| {
+        log.borrow_mut().push(format!("{e}"));
+        let frames = vm.live_frames();
+        log.borrow_mut().push(frames.iter().map(|f| f.what.clone()).collect::<Vec<_>>().join(" | "));
+        let env = frames[0].env;
+        let bindings = vm.bindings_of(env);
+        log.borrow_mut().push(format!("{:?}", bindings.iter().map(|(n, v)| format!("{n}={v:?}")).collect::<Vec<_>>()));
+        // Evaluate in the frame, with the stack below still live.
+        let v = vm.eval_in("(+ x 100)", env).unwrap();
+        log.borrow_mut().push(format!("{v:?}"));
+        // An error inside the handler does not re-break: it just fails.
+        assert!(vm.eval_in("(car 1)", env).is_err());
+        BreakAction::Return(Value::Fixnum(21))
+    })));
+    let v = vm.eval_str("(f 5)").unwrap();
+    assert_eq!(v, Value::Fixnum(42), "the failed expression became 21, and (* 2 21) went on");
+    let seen = seen.borrow();
+    assert!(seen[0].contains("out of range"), "{}", seen[0]);
+    assert!(seen[1].starts_with("(vector-ref (vector 1 2) x) | (* 2 (vector-ref"), "{}", seen[1]);
+    assert_eq!(seen[2], r#"["x=Fixnum(5)"]"#);
+    assert_eq!(seen[3], "Fixnum(105)");
+    // Abort unwinds as if there were no handler; a guarded error never breaks.
+    vm.set_break_handler(Some(Box::new(|_, _| panic!("a guarded error must not break"))));
+    assert_eq!(vm.eval_str("(guard (e (#t 'caught)) (f 9))").unwrap(), vm.engine.sym("caught"));
+    vm.set_break_handler(Some(Box::new(|_, _| BreakAction::Abort)));
+    assert!(vm.eval_str("(f 9)").is_err());
+    assert_eq!(vm.eval_str("(f 0)").unwrap(), Value::Fixnum(2), "the session is intact afterwards");
+}
+
+#[test]
+fn load_macroexpand_values_and_pretty_results() {
+    let mut s = Session::new().unwrap();
+    let dir = std::env::temp_dir().join(format!("scm-load-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("lib.scm");
+    std::fs::write(&file, "(define (triple x) (* 3 x))\n(define loaded 'yes)\n").unwrap();
+    let code = format!("(load {:?}) (list (triple 4) loaded)", file.to_str().unwrap());
+    match s.handle(Request { id: 1, op: Op::Eval { code, source: None } }).outcome {
+        Outcome::Value { value, .. } => assert_eq!(value, "(12 yes)"),
+        other => panic!("{other:?}"),
+    }
+    // An error inside a loaded file names the file.
+    std::fs::write(&file, "(define a 1)\n(car a)\n").unwrap();
+    let code = format!("(load {:?})", file.to_str().unwrap());
+    match s.handle(Request { id: 2, op: Op::Eval { code, source: None } }).outcome {
+        Outcome::Failed { message, backtrace, .. } => {
+            assert!(message.contains("not a pair"), "{message}");
+            assert!(backtrace.iter().any(|f| f.contains("lib.scm:2")), "{backtrace:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let shown = |s: &mut Session, code: &str| match s.handle(Request { id: 3, op: Op::Eval { code: code.into(), source: None } }).outcome {
+        Outcome::Value { value, .. } => value,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(shown(&mut s, "(macroexpand-1 '(when #t 1 2))"), "(if #t (begin 1 2) (if #f #f))");
+    assert_eq!(shown(&mut s, "(macroexpand '(unless #f 1))"), "(if #f (if #f #f) (begin 1))");
+    assert_eq!(shown(&mut s, "(macroexpand '(+ 1 2))"), "(+ 1 2)");
+    // Multiple values on separate lines; a long result broken over lines.
+    assert_eq!(shown(&mut s, "(values 1 'two \"three\")"), "1\ntwo\n\"three\"");
+    let long = shown(&mut s, "(let loop ([i 0] [acc '()]) (if (= i 12) acc (loop (+ i 1) (cons (list i 'abcdefghij (* i i)) acc))))");
+    assert!(long.lines().count() == 12, "{long}");
+    assert!(long.starts_with("((11 abcdefghij 121)\n  (10 abcdefghij 100)"), "{long}");
+    assert!(long.lines().all(|l| l.len() <= 80));
+    let _ = std::fs::remove_dir_all(&dir);
+}

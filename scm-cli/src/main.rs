@@ -16,14 +16,24 @@
 //! reader itself — the same answer over the same door, so an editor pane's
 //! `RET` and this prompt's continuation can never disagree.
 
+use std::cell::RefCell;
 use std::io::{self, BufRead, Read, Write};
+use std::rc::Rc;
 use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
-use scm::{Framing, Op, Outcome, Request, Response, Session};
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::{CmdKind, Highlighter, MatchingBracketHighlighter};
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::Editor;
+
+use scm::{BreakAction, Framing, Op, Outcome, Request, Response, Session};
 
 /// The running session's interrupt flag, so a `SIGINT` handler can reach it.
 static INTERRUPT: OnceLock<std::sync::Arc<AtomicBool>> = OnceLock::new();
@@ -32,6 +42,7 @@ static INTERRUPT: OnceLock<std::sync::Arc<AtomicBool>> = OnceLock::new();
 // dependencies and one extern is cheaper than acquiring one.
 unsafe extern "C" {
     fn signal(sig: i32, handler: usize) -> usize;
+    fn isatty(fd: i32) -> i32;
 }
 
 const SIGINT: i32 = 2;
@@ -121,7 +132,7 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        None => repl(&mut session),
+        None => repl(session),
     }
 }
 
@@ -186,106 +197,370 @@ fn run_once(session: &mut Session, src: &str, source: &str) -> ExitCode {
     }
 }
 
-fn repl(session: &mut Session) -> ExitCode {
-    let version = match ask(session, 0, Op::Ping).outcome {
-        Outcome::Pong { version } => version,
-        _ => "?".into(),
-    };
-    println!("scm {version} — C-c interrupts, C-d leaves");
+/// The terminal client. With a terminal: line editing, history, multi-line
+/// entry (`RET` inside an unfinished form inserts a newline, decided by the
+/// same parse the socket client asks for), tab completion over the global
+/// names, and the break REPL on an uncaught error. Without one -- a pipe,
+/// a test -- plain lines, so `echo '(+ 1 2)' | scm` still works.
+fn repl(session: Session) -> ExitCode {
+    let version = env!("CARGO_PKG_VERSION");
+    let session = Rc::new(RefCell::new(session));
+    let names: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    refresh_names(&session, &names);
+    let tty = unsafe { isatty(0) } != 0;
+    println!("scm {version} — C-c interrupts, C-d leaves, ,help for commands");
     println!(
         "{} globals. (apropos \"vector\") lists names, (doc 'map) and (signature 'map) explain one.",
-        session.interp_mut().complete("").len()
+        names.borrow().len()
     );
 
-    let stdin = io::stdin();
-    let mut lines = stdin.lock().lines();
+    let mut editor: Option<Rc<RefCell<Line>>> = None;
+    if tty {
+        match Line::new(Rc::clone(&names)) {
+            Ok(ed) => {
+                let ed = Rc::new(RefCell::new(ed));
+                // The break REPL reads from the same editor; the handler
+                // gets the machine directly because the session is busy
+                // with the evaluation that broke.
+                let for_break = Rc::clone(&ed);
+                let names_b = Rc::clone(&names);
+                session.borrow_mut().interp_mut().vm_mut().set_break_handler(Some(Box::new(
+                    move |vm, e| break_loop(vm, e, &for_break, &names_b),
+                )));
+                editor = Some(ed);
+            }
+            Err(e) => eprintln!("scm: no line editing ({e}); plain input"),
+        }
+    }
+
+    let mut plain = io::stdin().lock().lines();
     let mut pending = String::new();
     let mut id = 0u64;
     let mut entry = 0u64;
+    let mut last_backtrace: Vec<String> = Vec::new();
 
     loop {
-        let prompt = if pending.is_empty() { "scm> " } else { "...  " };
-        print!("{prompt}");
-        let _ = io::stdout().flush();
-
-        let Some(line) = lines.next() else {
-            println!();
-            return ExitCode::SUCCESS;
-        };
-        let line = match line {
-            Ok(l) => l,
-            // A C-c during `read_line` surfaces as an interrupted read, not
-            // as EOF: clear the pending form and offer a fresh prompt rather
-            // than exiting.
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                pending.clear();
+        // One complete form, or a comma command.
+        let src = if let Some(ed) = &editor {
+            match ed.borrow_mut().read("scm> ") {
+                Ok(text) => text,
+                Err(ReadlineError::Interrupted) => continue,
+                Err(ReadlineError::Eof) => break,
+                Err(e) => {
+                    eprintln!("scm: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            let prompt = if pending.is_empty() { "scm> " } else { "...  " };
+            print!("{prompt}");
+            let _ = io::stdout().flush();
+            let Some(line) = plain.next() else {
                 println!();
+                break;
+            };
+            let line = match line {
+                Ok(l) => l,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                    pending.clear();
+                    println!();
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("scm: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if pending.is_empty() && line.trim().is_empty() {
                 continue;
             }
-            Err(e) => {
-                eprintln!("scm: {e}");
-                return ExitCode::FAILURE;
+            if pending.is_empty() && line.trim_start().starts_with(',') {
+                line
+            } else {
+                pending.push_str(&line);
+                pending.push('\n');
+                id += 1;
+                let framed = session.borrow_mut().handle(Request { id, op: Op::Parse { code: pending.clone() } });
+                if matches!(framed.outcome, Outcome::Framed(Framing::Incomplete)) {
+                    continue;
+                }
+                std::mem::take(&mut pending)
             }
         };
-
-        if pending.is_empty() && line.trim().is_empty() {
+        if src.trim().is_empty() {
             continue;
         }
-        pending.push_str(&line);
-        pending.push('\n');
-
-        id += 1;
-        // The server decides whether the form is finished -- the same
-        // question an editor pane asks, answered the same way.
-        match ask(session, id, Op::Parse { code: pending.clone() }).outcome {
-            Outcome::Framed(Framing::Incomplete) => continue,
-            Outcome::Framed(Framing::Invalid) => {
-                // The message comes from evaluating it, which reports better
-                // than the framing answer does.
-            }
-            _ => {}
-        }
-
-        let src = std::mem::take(&mut pending);
-        // A form may have been interrupted at the prompt before it ran.
         if let Some(f) = INTERRUPT.get() {
             f.store(false, Ordering::Relaxed);
         }
+
+        // Comma commands are the client's, not the language's.
+        let trimmed = src.trim();
+        let (code, timed) = if let Some(cmd) = trimmed.strip_prefix(',') {
+            let (word, rest) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
+            let rest = rest.trim();
+            match word {
+                "q" | "quit" | "exit" => break,
+                "help" | "h" | "?" => {
+                    print_help();
+                    continue;
+                }
+                "bt" => {
+                    if last_backtrace.is_empty() {
+                        println!("no failure yet");
+                    }
+                    for f in &last_backtrace {
+                        println!("  in {f}");
+                    }
+                    continue;
+                }
+                "load" | "l" => (format!("(load {})", scheme_string(rest)), false),
+                "time" | "t" => (rest.to_string(), true),
+                "expand" | "e" => (format!("(macroexpand '{rest})"), false),
+                "expand1" | "e1" => (format!("(macroexpand-1 '{rest})"), false),
+                "tier" => ("(%tier-stats)".to_string(), false),
+                other => {
+                    println!("unknown command ,{other}; ,help lists them");
+                    continue;
+                }
+            }
+        } else {
+            (src.clone(), false)
+        };
+
         id += 1;
         entry += 1;
-        let name = format!("<repl:{entry}>");
-        match ask(
-            session,
-            id,
-            Op::Eval {
-                code: src,
-                source: Some(name),
-            },
-        )
-        .outcome {
+        let t0 = std::time::Instant::now();
+        let outcome = session
+            .borrow_mut()
+            .handle(Request { id, op: Op::Eval { code, source: Some(format!("<repl:{entry}>")) } })
+            .outcome;
+        let took = t0.elapsed();
+        match outcome {
             Outcome::Value { value, output } => {
                 print!("{output}");
                 if value != "#<unspecified>" {
                     println!("{value}");
                 }
             }
-            Outcome::Failed {
-                message,
-                output,
-                backtrace,
-                ..
-            } => {
+            Outcome::Failed { message, output, backtrace, .. } => {
                 print!("{output}");
                 eprintln!("{message}");
-                // Innermost first, which is the order you read it in.
                 for f in &backtrace {
                     eprintln!("  in {f}");
                 }
+                last_backtrace = backtrace;
             }
             other => eprintln!("scm: unexpected outcome {other:?}"),
         }
+        if timed {
+            println!("{:.3} ms", took.as_secs_f64() * 1e3);
+        }
+        refresh_names(&session, &names);
+    }
+    if let Some(ed) = &editor {
+        ed.borrow_mut().save();
+    }
+    ExitCode::SUCCESS
+}
+
+fn refresh_names(session: &Rc<RefCell<Session>>, names: &Rc<RefCell<Vec<String>>>) {
+    let mut s = session.borrow_mut();
+    let mut all = s.interp_mut().complete("");
+    all.sort();
+    *names.borrow_mut() = all;
+}
+
+fn print_help() {
+    println!("  ,load FILE      evaluate a file at top level       ,time EXPR   time one form");
+    println!("  ,expand FORM    expand every macro in a form       ,expand1     one step");
+    println!("  ,bt             the last failure's backtrace       ,tier        what the engines ran");
+    println!("  ,quit           leave (so does C-d)");
+    println!("  At a break: ,frames  ,frame N  ,locals  ,return EXPR  ,abort  -- and any");
+    println!("  expression, evaluated in the selected frame.");
+}
+
+fn scheme_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The break REPL (plan §8). The frames are live: inspect them, evaluate
+/// in any of them, then abort the evaluation or return a value in place
+/// of the expression that failed.
+fn break_loop(vm: &mut scm::Vm, e: &scm::VmError, ed: &Rc<RefCell<Line>>, names: &Rc<RefCell<Vec<String>>>) -> BreakAction {
+    println!("break: {e}");
+    let frames = vm.live_frames();
+    show_frames(&frames);
+    println!("  ,abort leaves, ,return EXPR continues with a value, ,help lists the rest");
+    {
+        let mut all: Vec<String> = vm.global_names().into_iter().map(str::to_string).collect();
+        all.sort();
+        *names.borrow_mut() = all;
+    }
+    let mut selected = 0usize;
+    loop {
+        let prompt = format!("break[{selected}]> ");
+        let line = match ed.borrow_mut().read(&prompt) {
+            Ok(l) => l,
+            Err(_) => {
+                println!("abort");
+                return BreakAction::Abort;
+            }
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let env = frames.get(selected).and_then(|f| f.env);
+        if let Some(cmd) = line.strip_prefix(',') {
+            let (word, rest) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
+            match word {
+                "abort" | "a" | "q" => return BreakAction::Abort,
+                "frames" | "bt" => show_frames(&frames),
+                "frame" | "f" => match rest.trim().parse::<usize>() {
+                    Ok(n) if n < frames.len() => {
+                        selected = n;
+                        println!("  [{n}] {}", frames[n].what);
+                    }
+                    _ => println!("  ,frame N with N below {}", frames.len()),
+                },
+                "locals" | "l" => {
+                    let bindings = vm.bindings_of(env);
+                    if bindings.is_empty() {
+                        println!("  no local bindings here");
+                    }
+                    for (name, v) in bindings {
+                        println!("  {name} = {}", scm::writer::pretty_str(&vm.engine, v, 70));
+                    }
+                }
+                "return" | "r" => match vm.eval_in(rest, env) {
+                    Ok(v) => return BreakAction::Return(v),
+                    Err(e) => println!("  {e}"),
+                },
+                "help" | "h" | "?" => print_help(),
+                other => println!("  unknown command ,{other}"),
+            }
+            continue;
+        }
+        match vm.eval_in(line, env) {
+            Ok(v) => {
+                if v != scm::Value::Unspecified {
+                    println!("{}", scm::writer::pretty_str(&vm.engine, v, 80));
+                }
+            }
+            Err(e) => println!("  {e}"),
+        }
     }
 }
+
+fn show_frames(frames: &[scm::FrameView]) {
+    for (i, f) in frames.iter().enumerate() {
+        match &f.loc {
+            Some(l) => println!("  [{i}] {}  at {l}", f.what),
+            None => println!("  [{i}] {}", f.what),
+        }
+    }
+}
+
+// ---- line editing -----------------------------------------------------------
+
+/// rustyline, with the session's answers behind its hooks: completion over
+/// the global names, and "is this form finished?" from the reader.
+struct Line {
+    editor: Editor<Hooks, DefaultHistory>,
+    history: Option<std::path::PathBuf>,
+}
+
+struct Hooks {
+    names: Rc<RefCell<Vec<String>>>,
+    brackets: MatchingBracketHighlighter,
+}
+
+impl Line {
+    fn new(names: Rc<RefCell<Vec<String>>>) -> Result<Self, ReadlineError> {
+        let mut editor: Editor<Hooks, DefaultHistory> = Editor::new()?;
+        editor.set_helper(Some(Hooks { names, brackets: MatchingBracketHighlighter::new() }));
+        let history = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".scm_history"));
+        if let Some(h) = &history {
+            let _ = editor.load_history(h);
+        }
+        Ok(Line { editor, history })
+    }
+
+    fn read(&mut self, prompt: &str) -> Result<String, ReadlineError> {
+        let text = self.editor.readline(prompt)?;
+        if !text.trim().is_empty() {
+            let _ = self.editor.add_history_entry(text.as_str());
+        }
+        Ok(text)
+    }
+
+    fn save(&mut self) {
+        if let Some(h) = &self.history {
+            let _ = self.editor.save_history(h);
+        }
+    }
+}
+
+impl Completer for Hooks {
+    type Candidate = Pair;
+    fn complete(&self, line: &str, pos: usize, _ctx: &rustyline::Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let head = &line[..pos];
+        let start = head
+            .rfind(|c: char| c.is_whitespace() || "()[]'`,\"".contains(c))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prefix = &head[start..];
+        if prefix.is_empty() {
+            return Ok((pos, Vec::new()));
+        }
+        let names = self.names.borrow();
+        let candidates = names
+            .iter()
+            .filter(|n| n.starts_with(prefix))
+            .map(|n| Pair { display: n.clone(), replacement: n.clone() })
+            .collect();
+        Ok((start, candidates))
+    }
+}
+
+impl Hinter for Hooks {
+    type Hint = String;
+}
+
+impl Highlighter for Hooks {
+    fn highlight<'l>(&self, line: &'l str, pos: usize) -> std::borrow::Cow<'l, str> {
+        self.brackets.highlight(line, pos)
+    }
+    fn highlight_char(&self, line: &str, pos: usize, kind: CmdKind) -> bool {
+        self.brackets.highlight_char(line, pos, kind)
+    }
+}
+
+impl Validator for Hooks {
+    fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
+        let input = ctx.input();
+        if input.trim_start().starts_with(',') {
+            return Ok(ValidationResult::Valid(None));
+        }
+        Ok(match scm::parse_status(input) {
+            scm::ParseStatus::Incomplete => ValidationResult::Incomplete,
+            _ => ValidationResult::Valid(None),
+        })
+    }
+}
+
+impl rustyline::Helper for Hooks {}
 
 // ---- the socket client --------------------------------------------------
 

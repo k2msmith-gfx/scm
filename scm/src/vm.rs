@@ -256,6 +256,23 @@ enum Frame {
 }
 
 impl Frame {
+    /// The environment this frame evaluates in, if it has one.
+    fn env(&self) -> Option<ObjRef> {
+        match self {
+            Frame::If { env, .. }
+            | Frame::Seq { env, .. }
+            | Frame::Operator { env, .. }
+            | Frame::Operand { env, .. }
+            | Frame::Let { env, .. }
+            | Frame::Assign { env, .. }
+            | Frame::ParamArgs { env, .. }
+            | Frame::VecElem { env, .. }
+            | Frame::Code { env, .. } => *env,
+            Frame::Defaults { env, .. } => Some(*env),
+            _ => None,
+        }
+    }
+
     /// Every `Value` and environment this frame keeps alive. Missing one here
     /// is the classic collector bug: it does not fail at the next collection,
     /// it fails later when the slot has been reused for something else. The
@@ -407,6 +424,10 @@ pub struct Vm {
     native_compiler: Option<native::NativeCompiler>,
     native_units: u64,
     native_hot: u32,
+    break_handler: Option<BreakHandler>,
+    /// Where the evaluation that broke began on the stack, so `live_frames`
+    /// shows that evaluation and not the one the handler is nested in.
+    break_base: usize,
     /// An error a native helper stored for the wrapper to raise.
     native_err: Option<VmError>,
     /// How many units T1 compiled.
@@ -564,6 +585,29 @@ struct Formals {
     rest: Option<SymId>,
 }
 
+/// What a break handler decides.
+pub enum BreakAction {
+    /// Unwind as if there had been no handler.
+    Abort,
+    /// Continue as if the failed expression had produced this value.
+    Return(Value),
+}
+
+/// Called on an error nothing in the program will catch, with the frames
+/// still live (plan §8, the break REPL). It may evaluate -- nested
+/// evaluation leaves the stack below intact -- and it may not be reentered:
+/// an error inside the handler unwinds normally.
+pub type BreakHandler = Box<dyn FnMut(&mut Vm, &VmError) -> BreakAction>;
+
+/// A live frame, for inspection at a break: the pending call, where it
+/// was written, and the environment it was evaluating in.
+#[derive(Clone, Debug)]
+pub struct FrameView {
+    pub what: String,
+    pub loc: Option<String>,
+    pub env: Option<ObjRef>,
+}
+
 /// A form, short enough to read in a backtrace.
 ///
 /// A frame whose form is a whole 400-line `define` is noise; the head and
@@ -637,6 +681,8 @@ impl Vm {
             native_compiler: None,
             native_units: 0,
             native_hot: native::HOT,
+            break_handler: None,
+            break_base: 0,
             native_err: None,
             compiled_units: 0,
             prims: Vec::new(),
@@ -1140,6 +1186,17 @@ impl Vm {
                     // stack still intact. A line later `unwind_to_catch` has
                     // truncated it, so there would be nothing left to walk.
                     self.last_backtrace = self.capture_backtrace(base);
+                    // The break REPL: an error nothing will catch, with a
+                    // handler installed, stops here with the frames live.
+                    if let Some(action) = self.maybe_break(base, &e) {
+                        match action {
+                            BreakAction::Return(v) => {
+                                step = Step::Return(v);
+                                continue;
+                            }
+                            BreakAction::Abort => {}
+                        }
+                    }
                     match self.unwind_to_catch(base, e)? {
                         Some(s) => s,
                         None => {
@@ -1149,6 +1206,128 @@ impl Vm {
                 }
             };
         }
+    }
+
+    /// Call the break handler if this error is catchable, nothing above
+    /// `base` would catch it, and a handler is installed. The handler runs
+    /// with `current-output-port` pointed at stdout, so what it prints is
+    /// seen now and not captured into the broken evaluation's output.
+    fn maybe_break(&mut self, base: usize, e: &VmError) -> Option<BreakAction> {
+        if !matches!(e, VmError::Error(_) | VmError::Raised(..)) {
+            return None;
+        }
+        if self.stack[base..].iter().any(|f| matches!(f, Frame::Catch { .. })) {
+            return None;
+        }
+        let mut handler = self.break_handler.take()?;
+        let saved_base = self.break_base;
+        self.break_base = base;
+        let out_slot = self.param_slot("current-output-port");
+        let saved_port = out_slot.map(|s| self.param_value(s));
+        if let Some(s) = out_slot {
+            let stdout = self.engine.port(crate::heap::PortKind::Stdout);
+            self.set_param_value(s, stdout);
+        }
+        let action = handler(self, e);
+        if let (Some(s), Some(p)) = (out_slot, saved_port) {
+            self.set_param_value(s, p);
+        }
+        self.break_base = saved_base;
+        self.break_handler = Some(handler);
+        Some(action)
+    }
+
+    fn param_slot(&self, name: &str) -> Option<usize> {
+        let sym = self.engine.interner.lookup(name)?;
+        match self.global(sym)? {
+            Value::Obj(r) => match self.engine.obj(r) {
+                Obj::Parameter { slot, .. } => Some(*slot),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn set_break_handler(&mut self, h: Option<BreakHandler>) {
+        self.break_handler = h;
+    }
+
+    /// The frames of the evaluation that broke, innermost first, each with
+    /// the environment to evaluate in. The first is the innermost call,
+    /// whose frame a tail call may already have dropped; it borrows the
+    /// environment of the nearest frame below it.
+    pub fn live_frames(&self) -> Vec<FrameView> {
+        let mut out = Vec::new();
+        let frames = &self.stack[self.break_base..];
+        let innermost_env = frames.iter().rev().find_map(|f| f.env());
+        if let Value::Obj(r) = self.current_call
+            && matches!(self.engine.obj(r), Obj::Pair(..))
+        {
+            let d = self.describe_frame(self.current_call);
+            out.push(FrameView { what: d.what, loc: d.loc, env: innermost_env });
+        }
+        for frame in frames.iter().rev() {
+            let forms: Vec<Value> = match frame {
+                Frame::Operator { form, .. } | Frame::Operand { form, .. } => vec![*form],
+                Frame::Code { code, pc, .. } => code.pending_calls(*pc),
+                _ => continue,
+            };
+            for form in forms {
+                let d = self.describe_frame(form);
+                if out.len() == 1 && out[0].what == d.what {
+                    continue;
+                }
+                out.push(FrameView { what: d.what, loc: d.loc, env: frame.env() });
+            }
+            if out.len() >= 64 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// The bindings visible from `env`, innermost first: `(name, value)`.
+    pub fn bindings_of(&self, env: Option<ObjRef>) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        let mut cur = env;
+        while let Some(r) = cur {
+            let Obj::Env { parent, slots } = self.engine.obj(r) else { break };
+            for (s, v) in slots.iter().rev() {
+                out.push((self.engine.interner.sym_name(self.engine.resolve(*s)).to_string(), *v));
+            }
+            cur = *parent;
+        }
+        out
+    }
+
+    /// Evaluate one datum in `env` -- a frame's environment at a break.
+    pub fn eval_in(&mut self, src: &str, env: Option<ObjRef>) -> VResult<Value> {
+        let forms = crate::reader::Reader::read_all_named(src, "<break>", &mut self.engine)
+            .map_err(|e| VmError::Error(format!("read error: {e}")))?;
+        let handles: Vec<_> = forms.iter().map(|&f| self.engine.root(f)).collect();
+        let mut last = Value::Unspecified;
+        let mut result = Ok(());
+        for &form in &forms {
+            let base = self.stack.len();
+            let vbase = self.vstack.len();
+            let param_base = self.param_bindings.len();
+            self.current_call = Value::Unspecified;
+            let out = self.eval_inner(Step::Eval(form, env), base);
+            match out {
+                Ok(v) => last = v,
+                Err(e) => {
+                    self.restore_params(param_base);
+                    self.stack.truncate(base);
+                    self.vstack.truncate(vbase);
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        for h in handles {
+            self.engine.unroot(h);
+        }
+        result.map(|()| last)
     }
 
     /// Leave the stack at `at`, running the `after` thunk of every
@@ -2874,7 +3053,8 @@ impl Vm {
 
     /// Resolve every renamed identifier in a datum back to what it was
     /// written as. Iterative, because quoted data can be arbitrarily deep.
-    fn strip_renames(&mut self, v: Value) -> Value {
+    /// `syntax->datum`: template-introduced renames back to plain names.
+    pub fn strip_renames(&mut self, v: Value) -> Value {
         match v {
             Value::Symbol(s) => Value::Symbol(self.engine.resolve(s)),
             Value::Obj(r) => match self.engine.obj(r).clone() {

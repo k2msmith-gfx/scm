@@ -162,9 +162,54 @@ evaluations and watches the table settle.
 Deep recursion is truncated at 32 frames with a trailing `"…"`, so a
 5,000-deep failure does not bury its own message.
 
+## The break REPL (S8b)
+
+An error nothing in the program will catch stops **with the frames live**,
+when the client has installed a break handler (`Vm::set_break_handler`).
+The explicit stack is what makes this cheap: the handler evaluates with
+ordinary nested evaluation, which leaves the frames below untouched, and
+decides `Abort` -- unwind as usual -- or `Return(v)` -- continue as if the
+failed expression had produced `v`. In the terminal:
+
+```
+scm> (f 5)
+break: vector-ref: index 5 out of range
+  [0] (vector-ref (vector 1 2) x)  at <repl:1>:2:8
+  [1] (* 2 (vector-ref (vector 1 2) x))  at <repl:1>:2:3
+break[0]> ,locals
+  x = 5
+break[0]> (+ x 100)
+105
+break[0]> ,return 21
+42
+```
+
+`,frames`, `,frame N`, `,locals`, `,return EXPR`, `,abort`; any other input
+is evaluated in the selected frame's environment. An error in the handler
+itself does not break again. A `guard`ed error never breaks: the handler is
+only for what would otherwise reach the top. The socket client installs no
+handler and gets today's unwind-and-report; an editor client can install
+its own over the same `Vm` API (`live_frames`, `bindings_of`, `eval_in`).
+
+## The terminal client (S8b)
+
+Line editing and history (`~/.scm_history`) through rustyline, with the
+session's own answers behind its hooks: `RET` inside an unfinished form
+inserts a newline because the reader says *incomplete*, and tab completes
+over the global names. Comma commands belong to the client, not the
+language: `,load FILE`, `,time EXPR`, `,expand FORM`, `,expand1 FORM`,
+`,bt`, `,tier`, `,help`, `,quit`. Results are pretty-printed to 80 columns
+and multiple values print one per line. Without a terminal -- a pipe, a
+test -- the client reads plain lines, so `echo '(+ 1 2)' | scm` still works.
+
+`load`, `macroexpand` and `macroexpand-1` are procedures, not commands, so
+every client has them.
+
 ## What is not here yet
 
-- **A break REPL** — stop on error with the frames live, inspect, resume or
+- ~~**A break REPL**~~ — done, above.
+- **Resume into the handler's choice of restart** beyond return-a-value: a
+  retry, or a store-and-continue, are the next rungs.
   restart. §8's stretch goal, and now a good deal closer: the frames are
   already walkable and already named. What is missing is suspending at the
   error instead of unwinding past it.

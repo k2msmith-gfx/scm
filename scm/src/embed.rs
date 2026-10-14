@@ -413,6 +413,24 @@ impl Interp {
     }
 
     /// `(display v)` as a string: the human one.
+    /// `write`, pretty-printed to `width` columns, with multiple values on
+    /// separate lines: what a REPL shows for a result.
+    pub fn pretty(&mut self, v: &Rooted, width: usize) -> Result<String, Error> {
+        self.enter()?;
+        let value = self.raw(v)?;
+        if let Value::Obj(r) = value
+            && let Obj::Values(vs) = self.vm.engine.obj(r)
+        {
+            let vs = vs.clone();
+            return Ok(vs
+                .iter()
+                .map(|x| crate::writer::pretty_str(&self.vm.engine, *x, width))
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
+        Ok(crate::writer::pretty_str(&self.vm.engine, value, width))
+    }
+
     pub fn display(&mut self, v: &Rooted) -> Result<String, Error> {
         self.enter()?;
         let raw = self.raw(v)?;

@@ -3142,6 +3142,38 @@ fn p_open_output_file(e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
+/// `(load path)`: read and evaluate every form in the file at top level,
+/// naming the file in backtraces. Nested evaluation is ordinary here: the
+/// explicit stack is what makes it so.
+fn load_prim(vm: &mut Vm, a: &[Value]) -> PResult {
+    let v = one("load", a)?;
+    let path: String = chars_of("load", &vm.engine, v)?.into_iter().collect();
+    let text = std::fs::read_to_string(&path)
+        .map_err(|io| file_err(&mut vm.engine, &format!("load: {path}: {io}")))?;
+    vm.eval_str_named(&text, &path)
+}
+
+/// `(macroexpand form)`: the form with every macro use at its head
+/// expanded, to a fixed point. `(macroexpand-1 form)`: one step, or the
+/// form itself if its head is not a macro. Both strip the hygiene renames,
+/// as `quote` does: the result is for reading, and `if.724` is not.
+fn macroexpand(vm: &mut Vm, a: &[Value]) -> PResult {
+    let mut form = one("macroexpand", a)?;
+    for _ in 0..10_000 {
+        match vm.expand_once(form)? {
+            Some(next) => form = next,
+            None => return Ok(vm.strip_renames(form)),
+        }
+    }
+    Err(err("macroexpand: expansion did not terminate"))
+}
+
+fn macroexpand_1(vm: &mut Vm, a: &[Value]) -> PResult {
+    let form = one("macroexpand-1", a)?;
+    let out = vm.expand_once(form)?.unwrap_or(form);
+    Ok(vm.strip_renames(out))
+}
+
 /// `(%tier-stats)` -> `(tier compiled-units declined-units interp-forms
 /// last-decline)`: what the bytecode tier ran and what it handed to T0.
 fn tier_stats(vm: &mut Vm, _a: &[Value]) -> PResult {
@@ -3290,6 +3322,9 @@ pub fn install(vm: &mut Vm) {
     // generates its API manual from live docstrings; the ray-steel work found
     // Steel had none at all, so a REPL there could not answer "what is this".
     vm.define_vm_prim("%tier-stats", tier_stats);
+    vm.define_vm_prim("load", load_prim);
+    vm.define_vm_prim("macroexpand", macroexpand);
+    vm.define_vm_prim("macroexpand-1", macroexpand_1);
     vm.define_vm_prim("doc", doc_prim);
     vm.define_vm_prim("signature", signature_prim);
     vm.define_vm_prim("apropos", apropos_prim);

@@ -154,7 +154,7 @@ impl Session {
                     Ok(v) => {
                         let value = self
                             .interp
-                            .write(&v)
+                            .pretty(&v, 80)
                             .unwrap_or_else(|e| format!("#<unprintable: {e}>"));
                         Outcome::Value { value, output }
                     }

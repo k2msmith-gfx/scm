@@ -18,3 +18,6 @@ jit = ["dep:scm-llvm"]
 [dependencies]
 scm = { path = "../scm" }
 scm-llvm = { path = "../scm-llvm", optional = true }
+# Line editing, history and multi-line entry for the terminal client. The
+# multi-line decision still comes from the session's own parse op.
+rustyline = "17"

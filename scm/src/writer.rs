@@ -494,3 +494,72 @@ fn looks_like_number(name: &str) -> bool {
         || lower.starts_with("-nan")
         || name.contains('\\')
 }
+
+
+/// `write`, broken over lines when it would not fit in `width` columns.
+///
+/// Flat if it fits; otherwise a list opens, its head goes on the first
+/// line, and each remaining element goes on its own line indented two
+/// past the paren -- recursively, so a nested structure reads as an
+/// outline. Cycles and shared structure take the labelled flat form,
+/// since a label refers to a position on a line.
+pub fn pretty_str(e: &Engine, v: Value, width: usize) -> String {
+    let flat = write_str(e, v);
+    if flat.chars().count() <= width || flat.contains("#0=") {
+        return flat;
+    }
+    let mut out = String::new();
+    pretty_into(e, v, width, 0, &mut out);
+    out
+}
+
+fn pretty_into(e: &Engine, v: Value, width: usize, indent: usize, out: &mut String) {
+    let flat = write_str(e, v);
+    if indent + flat.chars().count() <= width {
+        out.push_str(&flat);
+        return;
+    }
+    let items: Option<(&str, Vec<Value>)> = match v {
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Pair(..) => proper_items(e, v).map(|items| ("(", items)),
+            Obj::Vector { items, bracket } => Some((if *bracket { "[" } else { "#(" }, items.clone())),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some((open, items)) = items else {
+        out.push_str(&flat);
+        return;
+    };
+    out.push_str(open);
+    let inner = indent + 2;
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+            out.push_str(&" ".repeat(inner));
+        }
+        pretty_into(e, *item, width, if i == 0 { indent + open.len() } else { inner }, out);
+    }
+    out.push_str(if open == "[" { "]" } else { ")" });
+}
+
+fn proper_items(e: &Engine, mut v: Value) -> Option<Vec<Value>> {
+    let mut out = Vec::new();
+    let cap = e.obj_count() + 1;
+    loop {
+        match v {
+            Value::Null => return Some(out),
+            Value::Obj(r) => match e.obj(r) {
+                Obj::Pair(car, cdr) => {
+                    out.push(*car);
+                    v = *cdr;
+                    if out.len() > cap {
+                        return None;
+                    }
+                }
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+}
