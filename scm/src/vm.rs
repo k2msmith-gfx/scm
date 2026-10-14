@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod compile;
+pub mod library;
 pub mod native;
 mod run;
 
@@ -435,6 +436,13 @@ pub struct Vm {
     native_units: u64,
     native_hot: u32,
     break_handler: Option<BreakHandler>,
+    /// Loaded libraries by canonical name, their frames collector roots.
+    libraries: HashMap<String, library::Library>,
+    /// Libraries whose bodies are running: a cycle is reported, not looped.
+    loading: Vec<String>,
+    /// The directory of the library file being loaded, for `include`.
+    source_dir: Option<std::path::PathBuf>,
+    library_path: Vec<std::path::PathBuf>,
     /// Where the evaluation that broke began on the stack, so `live_frames`
     /// shows that evaluation and not the one the handler is nested in.
     break_base: usize,
@@ -567,6 +575,9 @@ struct SpecialForms {
     let_: SymId,
     begin: SymId,
     define_syntax: SymId,
+    define_library: SymId,
+    import: SymId,
+    cond_expand: SymId,
     let_syntax: SymId,
     letrec_syntax: SymId,
     parameterize: SymId,
@@ -649,7 +660,24 @@ fn abbreviate(text: &str) -> String {
 }
 
 impl Vm {
+    /// A machine whose tier is fixed before the prelude loads, so a T0
+    /// machine runs *everything* on T0 -- `set_tier` after `new` leaves the
+    /// prelude's already-compiled closures on T1.
+    pub fn with_tier(tier: Tier) -> Self {
+        let mut vm = Self::new_on(tier);
+        vm.tier = tier;
+        vm
+    }
+
     pub fn new() -> Self {
+        let tier = match std::env::var("SCM_TIER").as_deref() {
+            Ok("t0") | Ok("T0") => Tier::T0,
+            _ => Tier::T1,
+        };
+        Self::new_on(tier)
+    }
+
+    fn new_on(tier: Tier) -> Self {
         let mut engine = Engine::new();
         let syms = SpecialForms {
             quote: engine.interner.symbol("quote"),
@@ -660,6 +688,9 @@ impl Vm {
             let_: engine.interner.symbol("let"),
             begin: engine.interner.symbol("begin"),
             define_syntax: engine.interner.symbol("define-syntax"),
+            define_library: engine.interner.symbol("define-library"),
+            import: engine.interner.symbol("import"),
+            cond_expand: engine.interner.symbol("cond-expand"),
             let_syntax: engine.interner.symbol("let-syntax"),
             letrec_syntax: engine.interner.symbol("letrec-syntax"),
             parameterize: engine.interner.symbol("%parameterize"),
@@ -679,10 +710,7 @@ impl Vm {
             globals: Vec::new(),
             global_versions: Vec::new(),
             vstack: Vec::new(),
-            tier: match std::env::var("SCM_TIER").as_deref() {
-                Ok("t0") | Ok("T0") => Tier::T0,
-                _ => Tier::T1,
-            },
+            tier,
             macro_gen: 0,
             fallbacks: 0,
             interp_forms: 0,
@@ -693,6 +721,10 @@ impl Vm {
             native_hot: native::HOT,
             break_handler: None,
             break_base: 0,
+            libraries: HashMap::new(),
+            loading: Vec::new(),
+            source_dir: None,
+            library_path: Vec::new(),
             native_err: None,
             compiled_units: 0,
             prims: Vec::new(),
@@ -1534,6 +1566,7 @@ impl Vm {
         roots.extend(self.globals.iter().flatten().copied());
         self.macro_roots(&mut roots);
         self.param_roots(&mut roots);
+        self.library_roots(&mut roots);
         self.engine.collect(&roots);
     }
 
@@ -1556,6 +1589,7 @@ impl Vm {
         roots.extend(self.globals.iter().flatten().copied());
         self.macro_roots(&mut roots);
         self.param_roots(&mut roots);
+        self.library_roots(&mut roots);
         self.engine.collect(&roots)
     }
 
@@ -1576,7 +1610,8 @@ impl Vm {
             | Value::Keyword(_)
             | Value::Primitive(_)
             | Value::Unspecified
-            | Value::Eof => Ok(Step::Return(expr)),
+            | Value::Eof
+            | Value::Undefined => Ok(Step::Return(expr)),
 
             Value::Symbol(sym) => match self.lookup(sym, env) {
                 Some(v) => Ok(Step::Return(v)),
@@ -1852,12 +1887,47 @@ impl Vm {
             });
             return Ok(Some(Step::Eval(first, env)));
         }
+        if head == s.define_library {
+            if env.is_some() {
+                return Err(self.err("define-library: only at top level"));
+            }
+            let args = args.to_vec();
+            return self.define_library(&args, None).map(Some);
+        }
+        if head == s.import {
+            if env.is_some() {
+                return Err(self.err("import: only at top level, or in a define-library"));
+            }
+            let args = args.to_vec();
+            return self.import_toplevel(&args).map(Some);
+        }
+        if head == s.cond_expand {
+            let args = args.to_vec();
+            let chosen = self.cond_expand(&args)?;
+            let mut forms = vec![self.engine.sym("begin")];
+            forms.extend(chosen);
+            let form = self.engine.list(&forms);
+            return Ok(Some(Step::Eval(form, env)));
+        }
         if head == s.define_syntax {
             return match args {
                 [Value::Symbol(name), spec] => {
                     let (name, spec) = (*name, *spec);
                     let rules = SyntaxRules::parse(&mut self.engine, name, spec, env)
                         .map_err(VmError::Error)?;
+                    // Inside a frame -- a library's, or a body's -- the macro
+                    // is a value in that frame, as `let-syntax` binds one, so
+                    // it is scoped there and not global.
+                    if let Some(frame) = env {
+                        let m = self.engine.alloc(Obj::Macro(Rc::new(rules)));
+                        if let Obj::Env { slots, .. } = self.engine.obj_mut(frame) {
+                            match slots.iter_mut().find(|(s, _)| *s == name) {
+                                Some(slot) => slot.1 = m,
+                                None => slots.push((name, m)),
+                            }
+                        }
+                        return Ok(Some(Step::Return(Value::Unspecified)));
+                    }
                     self.macros.insert(self.engine.resolve(name), Rc::new(rules));
                     self.macro_gen += 1;
                     Ok(Some(Step::Return(Value::Unspecified)))
@@ -2934,8 +3004,9 @@ impl Vm {
                 }
 
                 if let Some(c) = &code {
-                    // The slots its internal defines will fill.
-                    slots.extend(c.defines.iter().map(|&d| (d, Value::Unspecified)));
+                    // The slots its internal defines will fill: a read
+                    // before then is "unbound", as it is on T0.
+                    slots.extend(c.defines.iter().map(|&d| (d, Value::Undefined)));
                 }
                 let new_env = self.engine.env(env, slots);
                 if todo.is_empty() {

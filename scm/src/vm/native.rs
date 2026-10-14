@@ -61,7 +61,7 @@ pub struct NativeState {
     pub pairs: u32,
     /// Direct reads, refreshed by `rt_refresh` at entry and after any
     /// helper that could move them: the globals buffer (an absent global
-    /// is `None`, tag 11), and the slot buffers of the innermost two
+    /// is `None`, tag 12), and the slot buffers of the innermost two
     /// frames (null when there is no such frame). A slot is `(SymId,
     /// Value)`: the name at 0, the value at 8, 24 bytes each -- pinned by
     /// `layouts_native_code_relies_on` below.
@@ -286,6 +286,59 @@ pub unsafe extern "C" fn rt_set_local(st: *mut NativeState, depth: u32, idx: u32
     }
 }
 
+/// `LocalDef`: as `rt_local`, but `Undefined` is the unbound-variable error.
+///
+/// # Safety
+/// As [`rt_local`].
+pub unsafe extern "C" fn rt_local_def(st: *mut NativeState, depth: u32, idx: u32, sym: u32, out: *mut Value) -> u32 {
+    unsafe {
+        let r = rt_local(st, depth, idx, out);
+        if r != 0 {
+            return r;
+        }
+        if *out == Value::Undefined {
+            let vm = vm!(st);
+            let e = vm.err(format!("unbound variable: {}", vm.engine.interner.sym_name(crate::value::SymId(sym))));
+            return fail(st, e);
+        }
+        0
+    }
+}
+
+/// `SetLocalDef`: `set!` of a define's slot before the define ran is an error.
+///
+/// # Safety
+/// As [`rt_local`].
+pub unsafe extern "C" fn rt_set_local_def(st: *mut NativeState, depth: u32, idx: u32, sym: u32, v: *const Value) -> u32 {
+    unsafe {
+        let mut cur = Value::Undefined;
+        let r = rt_local(st, depth, idx, &mut cur);
+        if r != 0 {
+            return r;
+        }
+        if cur == Value::Undefined {
+            let vm = vm!(st);
+            let e = vm.err(format!("set!: unbound variable: {}", vm.engine.interner.sym_name(crate::value::SymId(sym))));
+            return fail(st, e);
+        }
+        rt_set_local(st, depth, idx, v)
+    }
+}
+
+/// `Slot`: a permanent frame's slot by address.
+///
+/// # Safety
+/// As [`rt_local`].
+pub unsafe extern "C" fn rt_slot(st: *mut NativeState, frame: u32, idx: u32, out: *mut Value) -> u32 {
+    unsafe {
+        let vm = vm!(st);
+        if let Obj::Env { slots, .. } = vm.engine.obj(ObjRef(frame)) {
+            *out = slots[idx as usize].1;
+        }
+        0
+    }
+}
+
 /// `Global(i)` -> `*out`, with T0's unbound-variable error.
 ///
 /// # Safety
@@ -362,7 +415,7 @@ pub unsafe extern "C" fn rt_push_env(st: *mut NativeState, names: u32, ninit: u3
         let names = &(&*(*st).code).names[names as usize];
         let vals = std::slice::from_raw_parts(vals, ninit as usize);
         let mut slots = vm.engine.slots(names.len());
-        slots.extend(names.iter().enumerate().map(|(i, &n)| (n, vals.get(i).copied().unwrap_or(Value::Unspecified))));
+        slots.extend(names.iter().enumerate().map(|(i, &n)| (n, vals.get(i).copied().unwrap_or(Value::Undefined))));
         let new_env = vm.engine.env(env_of((*st).env), slots);
         (*st).env = bits_of(Some(new_env));
         refresh(&mut *st);
@@ -467,7 +520,7 @@ mod tests {
     fn layouts_native_code_relies_on() {
         assert_eq!(std::mem::size_of::<Option<Value>>(), 16);
         let none: [u8; 16] = unsafe { std::mem::transmute::<Option<Value>, [u8; 16]>(None) };
-        assert_eq!(none[0], 11);
+        assert_eq!(none[0], 12);
         let some: [u8; 16] = unsafe { std::mem::transmute(Some(Value::Fixnum(3))) };
         assert_eq!((some[0], some[8]), (0, 3));
         assert_eq!(std::mem::size_of::<(SymId, Value)>(), 24);

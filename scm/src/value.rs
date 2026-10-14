@@ -52,6 +52,12 @@ pub enum Value {
     Unspecified,
     Eof,
     Obj(ObjRef),
+    /// The slot of an internal `define` before its definition has run. No
+    /// expression produces it: a read finds it and raises "unbound
+    /// variable", which is what T0, whose slot does not exist yet, says.
+    /// Last, so every other tag keeps its number (S13's native code reads
+    /// them).
+    Undefined,
 }
 
 impl Value {
@@ -96,6 +102,7 @@ mod tests {
         assert_eq!(bytes(Value::Eof)[0], 9);
         let b = bytes(Value::Obj(ObjRef(3)));
         assert_eq!((b[0], u32::from_ne_bytes(b[4..8].try_into().unwrap())), (10, 3));
+        assert_eq!(bytes(Value::Undefined)[0], 11);
     }
 
     #[test]

@@ -204,6 +204,7 @@ fn emit(
         Value::Null => out.push_str("()"),
         Value::Unspecified => out.push_str("#<unspecified>"),
         Value::Eof => out.push_str("#<eof>"),
+        Value::Undefined => out.push_str("#<undefined>"),
         Value::Obj(r) => match e.obj(r) {
             Obj::Str(chars) => {
                 if quoted {

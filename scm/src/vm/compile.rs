@@ -33,7 +33,11 @@ fn decline<T>(why: impl Into<String>) -> R<T> {
 }
 
 enum Var {
-    Local { depth: u16, idx: u16 },
+    /// `checked`: a slot an internal `define` fills, read through
+    /// `LocalDef` so a use before the define is "unbound" as on T0.
+    Local { depth: u16, idx: u16, checked: bool },
+    /// A slot of a permanent frame -- a library's -- by address.
+    Slot { frame: ObjRef, idx: u16 },
     Global(SymId, SymId),
 }
 
@@ -42,6 +46,9 @@ struct Cx<'a> {
     /// Compile-time frames, innermost last; each becomes one runtime
     /// environment frame.
     scopes: Vec<Vec<SymId>>,
+    /// For each scope, the index from which its slots belong to internal
+    /// defines rather than parameters or `let` variables.
+    defs_from: Vec<usize>,
     /// The runtime chain beneath the compile-time frames, for a closure
     /// compiled after its environment already exists.
     runtime: Option<ObjRef>,
@@ -61,7 +68,7 @@ impl Vm {
     /// A top-level form. Declines what T0 should see: macro definitions,
     /// malformed syntax, anything with a local macro.
     pub(super) fn compile_toplevel(&mut self, form: Value) -> R<Rc<Code>> {
-        let mut cx = Cx::new(self, Vec::new(), None, Rc::new(Vec::new()));
+        let mut cx = Cx::new(self, Vec::new(), Vec::new(), None, Rc::new(Vec::new()));
         // A top-level `define-syntax` is the one syntax definition that can
         // be handed to T0 as a sub-form: nothing in this unit was compiled
         // against it. Inside a body the uses that follow it would have
@@ -69,8 +76,14 @@ impl Vm {
         let expanded = cx.expand(form)?;
         if let Value::Obj(r) = expanded
             && let Obj::Pair(Value::Symbol(h), _) = *cx.vm.engine.obj(r)
-            && cx.special(h)? == Some(cx.vm.syms.define_syntax)
+            && let Some(sp) = cx.special(h)?
+            && (sp == cx.vm.syms.define_syntax
+                || sp == cx.vm.syms.define_library
+                || sp == cx.vm.syms.import
+                || sp == cx.vm.syms.cond_expand)
         {
+            // Library forms are T0's as well: nothing in this unit was
+            // compiled against what they bind.
             cx.interp(expanded)?;
             cx.ops.push(Op::Return);
             return Ok(cx.finish());
@@ -100,16 +113,17 @@ impl Vm {
         frame.extend(rest);
         frame.extend(named.iter().map(|p| p.name));
         frame.extend(keys);
-        let cx = Cx::new(self, Vec::new(), env, Rc::new(Vec::new()));
+        let cx = Cx::new(self, Vec::new(), Vec::new(), env, Rc::new(Vec::new()));
         cx.body_unit(frame, body)
     }
 }
 
 impl<'a> Cx<'a> {
-    fn new(vm: &'a mut Vm, scopes: Vec<Vec<SymId>>, runtime: Option<ObjRef>, defines: Rc<Vec<SymId>>) -> Self {
+    fn new(vm: &'a mut Vm, scopes: Vec<Vec<SymId>>, defs_from: Vec<usize>, runtime: Option<ObjRef>, defines: Rc<Vec<SymId>>) -> Self {
         Cx {
             vm,
             scopes,
+            defs_from,
             runtime,
             ops: Vec::new(),
             consts: Vec::new(),
@@ -151,6 +165,7 @@ impl<'a> Cx<'a> {
         }
         let mut defs = Vec::new();
         self.scan_defines(body, &mut defs)?;
+        self.defs_from.push(frame.len());
         frame.extend(defs.iter().copied());
         self.defines = Rc::new(defs);
         self.scopes.push(frame);
@@ -164,9 +179,9 @@ impl<'a> Cx<'a> {
     /// T0's `lookup_exact` over the chain, then its global rules.
     fn resolve(&self, sym: SymId) -> R<Var> {
         let mut depth: usize = 0;
-        for scope in self.scopes.iter().rev() {
+        for (scope, &from) in self.scopes.iter().zip(&self.defs_from).rev() {
             if let Some(idx) = scope.iter().rposition(|&s| s == sym) {
-                return Ok(Var::Local { depth: narrow(depth)?, idx: narrow(idx)? });
+                return Ok(Var::Local { depth: narrow(depth)?, idx: narrow(idx)?, checked: idx >= from });
             }
             depth += 1;
         }
@@ -181,26 +196,40 @@ impl<'a> Cx<'a> {
                 {
                     return decline("a local macro");
                 }
-                return Ok(Var::Local { depth: narrow(depth)?, idx: narrow(idx)? });
+                // A frame that already exists: whether this slot is a
+                // define's cannot be told, so it is read checked.
+                return Ok(Var::Local { depth: narrow(depth)?, idx: narrow(idx)?, checked: true });
             }
             depth += 1;
             cur = *parent;
         }
         let resolved = self.vm.engine.resolve(sym);
         // A template-introduced name from a macro defined in a *local*
-        // scope means what it meant there (T0's `alias_env` step). That
-        // scope has no address this compiler can give it, so T0 keeps
-        // those closures -- the suite's "forward hygienic refs" case.
+        // scope means what it meant there (T0's `alias_env` step). A
+        // library's frame is such a scope and it is permanent, so a
+        // reference into it is a direct slot read; any other local scope
+        // has no address this compiler can give it, and T0 keeps those
+        // closures -- the suite's "forward hygienic refs" case.
         if resolved != sym
-            && let Some(Some(_)) = self.vm.engine.alias_env(sym)
+            && let Some(Some(def)) = self.vm.engine.alias_env(sym)
         {
+            if let Obj::Env { parent: None, slots } = self.vm.engine.obj(def)
+                && let Some(idx) = slots.iter().rposition(|(s, _)| self.vm.engine.resolve(*s) == resolved)
+            {
+                if let Value::Obj(m) = slots[idx].1
+                    && matches!(self.vm.engine.obj(m), Obj::Macro(_))
+                {
+                    return decline("a local macro");
+                }
+                return Ok(Var::Slot { frame: def, idx: narrow(idx)? });
+            }
             return decline("a reference through a locally defined macro");
         }
         Ok(Var::Global(sym, resolved))
     }
 
     fn is_local(&self, sym: SymId) -> R<bool> {
-        Ok(matches!(self.resolve(sym)?, Var::Local { .. }))
+        Ok(matches!(self.resolve(sym)?, Var::Local { .. } | Var::Slot { .. }))
     }
 
     /// Is this head a special form here? Only when nothing shadows it --
@@ -286,14 +315,17 @@ impl<'a> Cx<'a> {
             | Value::Keyword(_)
             | Value::Primitive(_)
             | Value::Unspecified
-            | Value::Eof => {
+            | Value::Eof
+            | Value::Undefined => {
                 self.konst(expr);
                 Ok(())
             }
             Value::Null => decline("empty application: ()"),
             Value::Symbol(sym) => {
                 match self.resolve(sym)? {
-                    Var::Local { depth, idx } => self.ops.push(Op::Local { depth, idx }),
+                    Var::Local { depth, idx, checked: false } => self.ops.push(Op::Local { depth, idx }),
+                    Var::Local { depth, idx, checked: true } => self.ops.push(Op::LocalDef { depth, idx, sym: sym.0 }),
+                    Var::Slot { frame, idx } => self.ops.push(Op::Slot { frame: frame.0, idx }),
                     Var::Global(s, r) => {
                         let i = self.global_slot(s, r);
                         self.ops.push(Op::Global(i));
@@ -398,6 +430,9 @@ impl<'a> Cx<'a> {
                 // it ran. T0 takes the whole unit.
                 return decline("a syntax definition in a body");
             }
+            if resolved == s.define_library || resolved == s.import || resolved == s.cond_expand {
+                return decline("a library form");
+            }
             if resolved == s.let_syntax || resolved == s.letrec_syntax {
                 // Self-contained: T0 evaluates it here, in this
                 // environment, and this code resumes with the value. Not in
@@ -485,8 +520,10 @@ impl<'a> Cx<'a> {
                 self.names.push(Rc::new(frame.clone()));
                 self.ops.push(Op::PushEnv { names: ni, ninit: vars.len() as u32 });
                 self.scopes.push(frame);
+                self.defs_from.push(vars.len());
                 let out = self.body(body, tail);
                 self.scopes.pop();
+                self.defs_from.pop();
                 out?;
                 if !tail {
                     self.ops.push(Op::PopEnv);
@@ -501,14 +538,18 @@ impl<'a> Cx<'a> {
                 self.names.push(Rc::new(vec![n]));
                 self.ops.push(Op::PushEnv { names: ni, ninit: 0 });
                 self.scopes.push(vec![n]);
+                self.defs_from.push(1);
                 let lam = self.lambda_inner(Some(n), vars.clone(), Vec::new(), Vec::new(), None, None, body);
                 self.scopes.pop();
+                self.defs_from.pop();
                 let lam = lam?;
                 self.scopes.push(vec![n]);
+                self.defs_from.push(1);
                 self.ops.push(Op::MakeClosure(lam));
                 self.ops.push(Op::SetLocal { depth: 0, idx: 0 });
                 self.ops.push(Op::Local { depth: 0, idx: 0 });
                 self.scopes.pop();
+                self.defs_from.pop();
                 let argc = vars.len() as u32;
                 self.ops.push(Op::InsertBelow(argc));
                 let form = self.forms.len() as u32;
@@ -555,7 +596,7 @@ impl<'a> Cx<'a> {
         frame.extend(rest);
         frame.extend(named.iter().map(|p| p.name));
         frame.extend(keys);
-        let inner = Cx::new(self.vm, self.scopes.clone(), self.runtime, Rc::new(Vec::new()));
+        let inner = Cx::new(self.vm, self.scopes.clone(), self.defs_from.clone(), self.runtime, Rc::new(Vec::new()));
         let code = inner.body_unit(frame, body)?;
         let i = self.lambdas.len() as u32;
         self.lambdas.push(Rc::new(Lambda {
@@ -574,7 +615,7 @@ impl<'a> Cx<'a> {
     /// A sub-block for `%try` and `%parameterize`: same scope, own code,
     /// run as a nested frame that returns to this one.
     fn block(&mut self, e: Value) -> R<u32> {
-        let mut inner = Cx::new(self.vm, self.scopes.clone(), self.runtime, Rc::new(Vec::new()));
+        let mut inner = Cx::new(self.vm, self.scopes.clone(), self.defs_from.clone(), self.runtime, Rc::new(Vec::new()));
         inner.expr(e, true)?;
         inner.ops.push(Op::Return);
         let code = inner.finish();
@@ -666,7 +707,9 @@ impl<'a> Cx<'a> {
             }
         } else {
             match self.resolve(sym)? {
-                Var::Local { depth, idx } => self.ops.push(Op::SetLocal { depth, idx }),
+                Var::Local { depth, idx, checked: false } => self.ops.push(Op::SetLocal { depth, idx }),
+                Var::Local { depth, idx, checked: true } => self.ops.push(Op::SetLocalDef { depth, idx, sym: sym.0 }),
+                Var::Slot { .. } => return decline("set! of a library binding"),
                 Var::Global(s, r) => {
                     let i = self.global_slot(s, r);
                     self.ops.push(Op::SetGlobal(i));

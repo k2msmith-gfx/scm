@@ -126,8 +126,8 @@ fn depths(code: &Code) -> Option<Vec<Option<i32>>> {
             None => out[pc] = Some(d),
         }
         let (next, after) = match code.ops[pc] {
-            Op::Const(_) | Op::Local { .. } | Op::Global(_) | Op::Unspecified | Op::MakeClosure(_) => (true, d + 1),
-            Op::SetLocal { .. } | Op::SetGlobal(_) | Op::DefineGlobal(_) | Op::Pop => (true, d - 1),
+            Op::Const(_) | Op::Local { .. } | Op::LocalDef { .. } | Op::Slot { .. } | Op::Global(_) | Op::Unspecified | Op::MakeClosure(_) => (true, d + 1),
+            Op::SetLocal { .. } | Op::SetLocalDef { .. } | Op::SetGlobal(_) | Op::DefineGlobal(_) | Op::Pop => (true, d - 1),
             Op::Jump(t) => {
                 work.push((t as usize, d));
                 (false, d)
@@ -456,6 +456,24 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.check(s, after, d)?;
                 self.fallthrough(i)
             }
+            Op::Slot { frame, idx } => {
+                let out = self.cell(d)?;
+                let s = self.call_helper("rt_slot", native::rt_slot as *const () as usize, &[self.st_ptr(), c32(self, frame), c32(self, idx as u32), out.into()])?;
+                self.check(s, after, d)?;
+                self.fallthrough(i)
+            }
+            Op::LocalDef { depth, idx, sym } => {
+                let out = self.cell(d)?;
+                let s = self.call_helper("rt_local_def", native::rt_local_def as *const () as usize, &[self.st_ptr(), c32(self, depth as u32), c32(self, idx as u32), c32(self, sym), out.into()])?;
+                self.check(s, after, d)?;
+                self.fallthrough(i)
+            }
+            Op::SetLocalDef { depth, idx, sym } => {
+                let v = self.cell(d - 1)?;
+                let s = self.call_helper("rt_set_local_def", native::rt_set_local_def as *const () as usize, &[self.st_ptr(), c32(self, depth as u32), c32(self, idx as u32), c32(self, sym), v.into()])?;
+                self.check(s, after, d - 1)?;
+                self.fallthrough(i)
+            }
             Op::SetLocal { depth, idx } if depth <= 1 => {
                 let v = self.cell(d - 1)?;
                 let (w0, w1) = (self.word(v, 0)?, self.word(v, 1)?);
@@ -489,7 +507,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let cellp = unsafe { Self::e(self.b.build_in_bounds_gep(self.value_t, globals, &[self.i64.const_int(sym, false)], "gc"))? };
                 let w0 = self.word(cellp, 0)?;
                 let tag = Self::e(self.b.build_int_truncate(w0, self.i8, "gt"))?;
-                let bound = Self::e(self.b.build_int_compare(IntPredicate::NE, tag, self.i8.const_int(11, false), "bound"))?;
+                // `None` is tag 12: one past `Value`'s last variant.
+                let bound = Self::e(self.b.build_int_compare(IntPredicate::NE, tag, self.i8.const_int(12, false), "bound"))?;
                 let hit = self.ctx.append_basic_block(f, "ghit");
                 Self::e(self.b.build_conditional_branch(bound, hit, slow))?;
                 self.b.position_at_end(hit);

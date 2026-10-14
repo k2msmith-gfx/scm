@@ -5,9 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "Runs external R7RS conformance suites against scm and reports a number"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "scm-conform"
 path = "src/main.rs"
+
+[[bin]]
+name = "scm-fuzz"
+path = "src/bin/fuzz.rs"
 
 [features]
 # Run the suites under T2 with SCM_TIER=t2; needs LLVM.

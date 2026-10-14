@@ -126,7 +126,7 @@ impl Vm {
             let (params, cenv, c) = (Rc::clone(params), *cenv, Rc::clone(c));
             let mut slots: Vec<(crate::value::SymId, Value)> = self.engine.slots(params.len() + c.defines.len());
             slots.extend(params.iter().copied().zip(self.vstack[start + 1..].iter().copied()));
-            slots.extend(c.defines.iter().map(|&d| (d, Value::Unspecified)));
+            slots.extend(c.defines.iter().map(|&d| (d, Value::Undefined)));
             if tail {
                 self.vstack.truncate(base);
             } else {
@@ -195,6 +195,36 @@ impl Vm {
                     let Obj::Env { slots, .. } = self.engine.obj(r) else { unreachable!() };
                     let v = slots[idx as usize].1;
                     self.vstack.push(v);
+                }
+                Op::LocalDef { depth, idx, sym } => {
+                    let r = match self.frame_at(env, depth) {
+                        Ok(r) => r,
+                        Err(e) => fail!(e),
+                    };
+                    let Obj::Env { slots, .. } = self.engine.obj(r) else { unreachable!() };
+                    let v = slots[idx as usize].1;
+                    if v == Value::Undefined {
+                        fail!(self.err(format!("unbound variable: {}", self.engine.interner.sym_name(crate::value::SymId(sym)))));
+                    }
+                    self.vstack.push(v);
+                }
+                Op::Slot { frame, idx } => {
+                    let Obj::Env { slots, .. } = self.engine.obj(ObjRef(frame)) else { unreachable!() };
+                    let v = slots[idx as usize].1;
+                    self.vstack.push(v);
+                }
+                Op::SetLocalDef { depth, idx, sym } => {
+                    let v = self.vstack.pop().expect("a value to store");
+                    let r = match self.frame_at(env, depth) {
+                        Ok(r) => r,
+                        Err(e) => fail!(e),
+                    };
+                    if let Obj::Env { slots, .. } = self.engine.obj_mut(r) {
+                        if slots[idx as usize].1 == Value::Undefined {
+                            fail!(self.err(format!("set!: unbound variable: {}", self.engine.interner.sym_name(crate::value::SymId(sym)))));
+                        }
+                        slots[idx as usize].1 = v;
+                    }
                 }
                 Op::SetLocal { depth, idx } => {
                     let v = self.vstack.pop().expect("a value to store");
@@ -267,7 +297,7 @@ impl Vm {
                     let start = self.vstack.len() - ninit as usize;
                     let mut slots = self.engine.slots(names.len());
                     slots.extend(names.iter().enumerate().map(|(i, &n)| {
-                        (n, self.vstack.get(start + i).copied().unwrap_or(Value::Unspecified))
+                        (n, self.vstack.get(start + i).copied().unwrap_or(Value::Undefined))
                     }));
                     self.vstack.truncate(start);
                     env = Some(self.engine.env(env, slots));

@@ -788,7 +788,7 @@ pub(crate) fn read_val(engine: &crate::heap::Engine, v: Value, depth: usize) -> 
     {
         match v {
             Value::Null => Val::Null,
-            Value::Unspecified | Value::Eof => Val::Unspecified,
+            Value::Unspecified | Value::Eof | Value::Undefined => Val::Unspecified,
             Value::Bool(b) => Val::Bool(b),
             Value::Fixnum(n) => Val::Int(n),
             Value::Flonum(x) => Val::Float(x),

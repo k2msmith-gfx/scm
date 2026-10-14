@@ -22,6 +22,16 @@ pub enum Op {
     Local { depth: u16, idx: u16 },
     /// Pop into that slot.
     SetLocal { depth: u16, idx: u16 },
+    /// As `Local`, for a slot an internal `define` fills: `Undefined` there
+    /// means the define has not run, and the read raises "unbound
+    /// variable" as T0 does. `sym` names it for the message.
+    LocalDef { depth: u16, idx: u16, sym: u32 },
+    /// As `SetLocal` for such a slot: `set!` before the define is an error.
+    SetLocalDef { depth: u16, idx: u16, sym: u32 },
+    /// Push slot `idx` of the permanent frame `frame` -- a library's -- by
+    /// address: how a library macro's reference to a library-private
+    /// binding compiles instead of declining.
+    Slot { frame: u32, idx: u16 },
     /// Push the global named by `globals[i]`, or fail as T0 does.
     Global(u32),
     /// Pop into the global, with `set!`'s rule: it must already exist.

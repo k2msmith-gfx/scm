@@ -51,6 +51,25 @@ The terminal and the socket are two clients of one protocol,
 [docs/repl.md](docs/repl.md); the third is [emacs/](emacs/README.md), a
 SLIME-style mode with a REPL window, completion and a break-free `C-c C-b`.
 
+## Libraries
+
+    (define-library (acme util) (export twice) (import (scheme base)) (begin (define (twice x) (* 2 x))))
+    (import (prefix (acme util) u:))
+    (u:twice 21)
+
+A library is an environment frame; importing copies its exports into
+yours, or into the globals at top level. `(acme util)` is found as
+`acme/util.sld` on `.`, `SCM_LIBRARY_PATH`, or embedded in the binary.
+See [docs/libraries.md](docs/libraries.md). Nothing beyond R7RS-small is
+shipped yet; the SRFIs are next.
+
+## The differential fuzzer
+
+    cargo run --release -p scm-conform --bin scm-fuzz -- --seed 42 --count 2000
+
+Random programs under every tier must agree on value, output and error
+message. [docs/fuzz.md](docs/fuzz.md) records what it found.
+
 ## Against Steel
 
     scm-conform/bench/vs-steel/run.py        # needs `steel` on PATH
