@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod compile;
+pub mod native;
 mod run;
 
 use crate::code::{CodeState, Tier};
@@ -402,6 +403,11 @@ pub struct Vm {
     fallbacks: u64,
     /// Why the last one was declined.
     last_decline: Option<String>,
+    /// T2's compiler, when scm-llvm has installed one, and its counts.
+    native_compiler: Option<native::NativeCompiler>,
+    native_units: u64,
+    /// An error a native helper stored for the wrapper to raise.
+    native_err: Option<VmError>,
     /// How many units T1 compiled.
     compiled_units: u64,
     /// Sub-forms inside compiled code that T0 evaluates on T1's behalf: a
@@ -627,6 +633,9 @@ impl Vm {
             interp_forms: 0,
             lambda_cache: HashMap::new(),
             last_decline: None,
+            native_compiler: None,
+            native_units: 0,
+            native_err: None,
             compiled_units: 0,
             prims: Vec::new(),
             vm_prims: Vec::new(),

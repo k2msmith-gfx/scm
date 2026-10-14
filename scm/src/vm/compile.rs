@@ -14,6 +14,7 @@
 //! first call resolves its free variables against the *actual* runtime
 //! chain it captured, so the two engines can nest in either order.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -135,6 +136,10 @@ impl<'a> Cx<'a> {
             calls: self.calls,
             defines: self.defines,
             macro_gen: self.vm.macro_gen,
+            hits: Cell::new(0),
+            native: Cell::new(None),
+            native_declined: Cell::new(false),
+            max_depth: Cell::new(0),
         })
     }
 

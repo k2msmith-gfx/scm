@@ -19,7 +19,7 @@ impl Vm {
     }
 
     /// The frame `depth` levels up the chain from `env`.
-    fn frame_at(&self, env: Option<ObjRef>, depth: u16) -> VResult<ObjRef> {
+    pub(super) fn frame_at(&self, env: Option<ObjRef>, depth: u16) -> VResult<ObjRef> {
         let mut cur = env;
         for _ in 0..depth {
             let Some(r) = cur else { break };
@@ -34,7 +34,7 @@ impl Vm {
     /// A primitive that takes the engine and its arguments and nothing
     /// else: the one kind that can be called on a slice of the value stack
     /// with no vector built.
-    fn plain_prim(&self, id: crate::value::PrimId) -> bool {
+    pub(super) fn plain_prim(&self, id: crate::value::PrimId) -> bool {
         let i = id.0 as usize;
         if self.vm_prims.get(i).is_some_and(|p| p.is_some()) {
             return false;
@@ -52,6 +52,99 @@ impl Vm {
         !special.contains(&Some(id))
     }
 
+    /// `(%parameterize)`: the `pairs` parameter/value pairs on top of the
+    /// value stack become dynamic bindings; returns how many to restore.
+    pub(super) fn install_params(&mut self, pairs: usize) -> VResult<usize> {
+        let values = self.vstack.split_off(self.vstack.len() - 2 * pairs);
+        let mut count = 0;
+        for pair in values.chunks(2) {
+            let (param, value) = (pair[0], pair[1]);
+            let slot = match param {
+                Value::Obj(r) => match self.engine.obj(r) {
+                    Obj::Parameter { slot, .. } => *slot,
+                    _ => return Err(self.err("parameterize: not a parameter")),
+                },
+                _ => return Err(self.err("parameterize: not a parameter")),
+            };
+            let old = self.param_values[slot];
+            self.param_bindings.push((slot, old));
+            self.param_values[slot] = value;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// A call whose callee and `argc` arguments are on top of the value
+    /// stack. `Ok(None)` means it was a plain primitive and its result is
+    /// on the stack: carry on in this frame. `Ok(Some)` is the step to take
+    /// instead, with this frame already pushed if the call was not a tail
+    /// call. Shared by T1 and T2.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn do_call(
+        &mut self,
+        code: &Rc<crate::code::Code>,
+        pc: usize,
+        env: Option<ObjRef>,
+        base: usize,
+        argc: u32,
+        form: u32,
+        tail: bool,
+    ) -> VResult<Option<Step>> {
+        let start = self.vstack.len() - argc as usize - 1;
+        let callee = self.vstack[start];
+        self.current_call = code.forms[form as usize];
+        if let Value::Primitive(id) = callee
+            && self.plain_prim(id)
+        {
+            let f = self.prims[id.0 as usize];
+            let r = f(&mut self.engine, &self.vstack[start + 1..]);
+            self.vstack.truncate(start);
+            let v = r?;
+            if tail {
+                self.vstack.truncate(base);
+                return Ok(Some(Step::Return(v)));
+            }
+            self.vstack.push(v);
+            return Ok(None);
+        }
+        // A compiled closure with a plain lambda list: the frame is built
+        // straight from the operand stack, no argument vector in between.
+        // Everything else -- T0 closures, optional and named parameters,
+        // arity errors, the special primitives -- goes through the one
+        // `apply`, which also compiles on first call.
+        if let Value::Obj(r) = callee
+            && let Obj::Closure { params, opt, named, keys, rest, env: cenv, code: CodeState::Compiled(c), .. } =
+                self.engine.obj(r)
+            && opt.is_empty()
+            && named.is_empty()
+            && keys.is_none()
+            && rest.is_none()
+            && params.len() == argc as usize
+            && c.macro_gen == self.macro_gen
+        {
+            let (params, cenv, c) = (Rc::clone(params), *cenv, Rc::clone(c));
+            let mut slots: Vec<(crate::value::SymId, Value)> = Vec::with_capacity(params.len() + c.defines.len());
+            slots.extend(params.iter().copied().zip(self.vstack[start + 1..].iter().copied()));
+            slots.extend(c.defines.iter().map(|&d| (d, Value::Unspecified)));
+            if tail {
+                self.vstack.truncate(base);
+            } else {
+                self.vstack.truncate(start);
+                self.push(Frame::Code { code: Rc::clone(code), pc, env, base });
+            }
+            let new_env = self.engine.env(cenv, slots);
+            return Ok(Some(self.enter_code(c, Some(new_env))));
+        }
+        let args = self.vstack.split_off(start + 1);
+        if tail {
+            self.vstack.truncate(base);
+        } else {
+            self.vstack.truncate(start);
+            self.push(Frame::Code { code: Rc::clone(code), pc, env, base });
+        }
+        self.apply(callee, args).map(Some)
+    }
+
     pub(super) fn run_code(
         &mut self,
         code: Rc<crate::code::Code>,
@@ -59,6 +152,10 @@ impl Vm {
         mut env: Option<ObjRef>,
         base: usize,
     ) -> VResult<Step> {
+        // T2, if this code has it or has earned it.
+        if let Some(f) = self.native_for(&code) {
+            return self.run_native(code, f, pc, env, base);
+        }
         let mut ticks: u32 = 0;
         // On any failure the frame goes back on the stack with `pc` just
         // past the op in progress, so the backtrace can name the calls
@@ -138,65 +235,11 @@ impl Vm {
                 }
                 Op::Call { argc, form } | Op::TailCall { argc, form } => {
                     let tail = matches!(op, Op::TailCall { .. });
-                    let start = self.vstack.len() - argc as usize - 1;
-                    let callee = self.vstack[start];
-                    self.current_call = code.forms[form as usize];
-                    if let Value::Primitive(id) = callee
-                        && self.plain_prim(id)
-                    {
-                        let f = self.prims[id.0 as usize];
-                        let r = f(&mut self.engine, &self.vstack[start + 1..]);
-                        self.vstack.truncate(start);
-                        match r {
-                            Ok(v) => {
-                                if tail {
-                                    self.vstack.truncate(base);
-                                    return Ok(Step::Return(v));
-                                }
-                                self.vstack.push(v);
-                            }
-                            Err(e) => fail!(e),
-                        }
-                        continue;
+                    match self.do_call(&code, pc, env, base, argc, form, tail) {
+                        Ok(None) => {}
+                        Ok(Some(step)) => return Ok(step),
+                        Err(e) => fail!(e),
                     }
-                    // A compiled closure with a plain lambda list: the
-                    // frame is built straight from the operand stack, no
-                    // argument vector in between. Everything else -- T0
-                    // closures, optional and named parameters, arity
-                    // errors, the special primitives -- goes through the
-                    // one `apply`, which also compiles on first call.
-                    if let Value::Obj(r) = callee
-                        && let Obj::Closure { params, opt, named, keys, rest, env: cenv, code: CodeState::Compiled(c), .. } =
-                            self.engine.obj(r)
-                        && opt.is_empty()
-                        && named.is_empty()
-                        && keys.is_none()
-                        && rest.is_none()
-                        && params.len() == argc as usize
-                        && c.macro_gen == self.macro_gen
-                    {
-                        let (params, cenv, c) = (Rc::clone(params), *cenv, Rc::clone(c));
-                        let mut slots: Vec<(crate::value::SymId, Value)> =
-                            Vec::with_capacity(params.len() + c.defines.len());
-                        slots.extend(params.iter().copied().zip(self.vstack[start + 1..].iter().copied()));
-                        slots.extend(c.defines.iter().map(|&d| (d, Value::Unspecified)));
-                        if tail {
-                            self.vstack.truncate(base);
-                        } else {
-                            self.vstack.truncate(start);
-                            self.push(Frame::Code { code, pc, env, base });
-                        }
-                        let new_env = self.engine.env(cenv, slots);
-                        return Ok(self.enter_code(c, Some(new_env)));
-                    }
-                    let args = self.vstack.split_off(start + 1);
-                    if tail {
-                        self.vstack.truncate(base);
-                    } else {
-                        self.vstack.truncate(start);
-                        self.push(Frame::Code { code, pc, env, base });
-                    }
-                    return self.apply(callee, args);
                 }
                 Op::Return => {
                     let v = self.vstack.pop().expect("a value to return");
@@ -256,22 +299,10 @@ impl Vm {
                     return Ok(Step::Eval(form, env));
                 }
                 Op::Parameterize { pairs, block } => {
-                    let values = self.vstack.split_off(self.vstack.len() - 2 * pairs as usize);
-                    let mut count = 0;
-                    for pair in values.chunks(2) {
-                        let (param, value) = (pair[0], pair[1]);
-                        let slot = match param {
-                            Value::Obj(r) => match self.engine.obj(r) {
-                                Obj::Parameter { slot, .. } => *slot,
-                                _ => fail!(self.err("parameterize: not a parameter")),
-                            },
-                            _ => fail!(self.err("parameterize: not a parameter")),
-                        };
-                        let old = self.param_values[slot];
-                        self.param_bindings.push((slot, old));
-                        self.param_values[slot] = value;
-                        count += 1;
-                    }
+                    let count = match self.install_params(pairs as usize) {
+                        Ok(c) => c,
+                        Err(e) => fail!(e),
+                    };
                     let block = Rc::clone(&code.blocks[block as usize]);
                     self.push(Frame::Code { code, pc, env, base });
                     self.push(Frame::ParamRestore { count });

@@ -28,6 +28,12 @@ pub struct PrimId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ObjRef(pub u32);
 
+/// `repr(u8)` gives the layout a definition native code can rely on (S13):
+/// the tag is the first byte, in declaration order from 0, and each
+/// variant's payload sits at its natural alignment after it -- an `i64` or
+/// `f64` at offset 8, a `u32` at 4, a `bool` at 1. `layout_is_defined`
+/// below pins it.
+#[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Value {
     /// An exact integer. No bignums: `ratios` and `exact-closed` are not
@@ -64,6 +70,32 @@ mod tests {
         // §4.5 says 16 bytes. If this ever fails, the plan is wrong or a
         // variant grew a payload it should not have.
         assert_eq!(std::mem::size_of::<Value>(), 16);
+    }
+
+    #[test]
+    fn layout_is_defined() {
+        fn bytes(v: Value) -> [u8; 16] {
+            unsafe { std::mem::transmute(v) }
+        }
+        let b = bytes(Value::Fixnum(-2));
+        assert_eq!(b[0], 0);
+        assert_eq!(i64::from_ne_bytes(b[8..16].try_into().unwrap()), -2);
+        let b = bytes(Value::Flonum(1.5));
+        assert_eq!(b[0], 1);
+        assert_eq!(f64::from_ne_bytes(b[8..16].try_into().unwrap()), 1.5);
+        let b = bytes(Value::Bool(true));
+        assert_eq!((b[0], b[1]), (2, 1));
+        let b = bytes(Value::Char('x'));
+        assert_eq!((b[0], u32::from_ne_bytes(b[4..8].try_into().unwrap())), (3, 'x' as u32));
+        let b = bytes(Value::Symbol(SymId(7)));
+        assert_eq!((b[0], u32::from_ne_bytes(b[4..8].try_into().unwrap())), (4, 7));
+        assert_eq!(bytes(Value::Keyword(KwId(1)))[0], 5);
+        assert_eq!(bytes(Value::Primitive(PrimId(9)))[0], 6);
+        assert_eq!(bytes(Value::Null)[0], 7);
+        assert_eq!(bytes(Value::Unspecified)[0], 8);
+        assert_eq!(bytes(Value::Eof)[0], 9);
+        let b = bytes(Value::Obj(ObjRef(3)));
+        assert_eq!((b[0], u32::from_ne_bytes(b[4..8].try_into().unwrap())), (10, 3));
     }
 
     #[test]

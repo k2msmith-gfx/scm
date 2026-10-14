@@ -8,6 +8,7 @@
 //! macros are expanded once, special forms are decided once, and arguments
 //! are evaluated straight onto a value stack with no vector per call.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::heap::{NamedParam, Param};
@@ -104,6 +105,13 @@ pub struct Code {
     /// `define-syntax` recompiles on next call, so a redefined macro takes
     /// effect as it would in T0.
     pub macro_gen: u64,
+    /// T2: how often this has run, the native function once it is hot, and
+    /// whether the native compiler declined it. The operand-stack depth it
+    /// needs is computed by that compiler.
+    pub hits: Cell<u32>,
+    pub native: Cell<Option<crate::vm::native::NativeFn>>,
+    pub native_declined: Cell<bool>,
+    pub max_depth: Cell<u32>,
 }
 
 impl Code {
