@@ -473,8 +473,17 @@ impl Engine {
         self.marks.clear();
         self.marks.resize(self.slots.len(), false);
 
+        // Only a heap reference can mark anything, so nothing else goes on
+        // the worklist: a million-element vector of fixnums used to cost a
+        // million pushes and pops per collection. `visited` counts what
+        // the mark phase looked at either way, and sets how long the next
+        // collection waits -- marking work is amortised over at least as
+        // many allocations, so a large live vector is not re-marked every
+        // few thousand frames.
+        let is_obj = |v: &Value| matches!(v, Value::Obj(_));
+        let mut visited: usize = roots.len();
         let mut work: Vec<Value> = Vec::with_capacity(roots.len() + self.handles.len());
-        work.extend_from_slice(roots);
+        work.extend(roots.iter().copied().filter(is_obj));
         work.extend(self.handles.iter().flatten().copied());
         // A local macro's definition frame has to outlive its expansion, so
         // the environments recorded beside the aliases are roots.
@@ -498,15 +507,24 @@ impl Engine {
                 Slot::Free { .. } => panic!("gc: a root points at free slot {i}"),
                 Slot::Used(obj) => match obj {
                     Obj::Pair(a, d) => {
-                        work.push(*a);
-                        work.push(*d);
+                        visited += 2;
+                        if is_obj(a) {
+                            work.push(*a);
+                        }
+                        if is_obj(d) {
+                            work.push(*d);
+                        }
                     }
-                    Obj::Vector { items, .. } => work.extend(items.iter().copied()),
+                    Obj::Vector { items, .. } => {
+                        visited += items.len();
+                        work.extend(items.iter().copied().filter(is_obj));
+                    }
                     Obj::Env { parent, slots } => {
+                        visited += slots.len();
                         if let Some(p) = parent {
                             work.push(Value::Obj(*p));
                         }
-                        work.extend(slots.iter().map(|(_, v)| *v));
+                        work.extend(slots.iter().map(|(_, v)| *v).filter(is_obj));
                     }
                     Obj::Closure {
                         body,
@@ -587,7 +605,7 @@ impl Engine {
         }
         self.used -= freed;
         self.collections += 1;
-        self.threshold = self.min_heap.max(self.used.saturating_mul(2));
+        self.threshold = self.min_heap.max(self.used.saturating_mul(2)).max(visited);
         GcStats {
             live: self.used,
             freed,
