@@ -389,7 +389,15 @@ Doom's scheme module hooks `geiser-mode' onto `scheme-mode', which
   "The scm REPL: a buffer of prompts over the protocol."
   (setq-local scm--repl-input-start (make-marker))
   (add-hook 'completion-at-point-functions #'scm-complete-at-point nil t)
-  (setq-local comment-start ";"))
+  (setq-local comment-start ";")
+  (setq-local indent-tabs-mode nil)
+  ;; The indenter parses from the "beginning of defun": here that is the
+  ;; start of the current input, so earlier output never confuses it and
+  ;; columns stay real, prompt included.
+  (setq-local beginning-of-defun-function
+              (lambda (&optional _arg)
+                (goto-char (marker-position scm--repl-input-start))
+                t)))
 
 (defun scm--repl-ensure ()
   (with-current-buffer (scm--repl-buffer)
@@ -441,7 +449,7 @@ Doom's scheme module hooks `geiser-mode' onto `scheme-mode', which
         (scm--repl-prompt)
       (let ((framing (plist-get (scm--request-sync 'parse (list :code input)) :framing)))
         (if (eq framing 'incomplete)
-            (progn (goto-char (point-max)) (insert "\n"))
+            (scm--repl-newline-and-indent)
           (let ((inhibit-read-only t))
             (goto-char (point-max))
             (insert "\n")
@@ -451,6 +459,14 @@ Doom's scheme module hooks `geiser-mode' onto `scheme-mode', which
           (scm--repl-prompt)
           (scm--request 'eval (list :code input :source "<repl>")
                         (lambda (r) (scm--show-result r))))))))
+
+(defun scm--repl-newline-and-indent ()
+  "A newline inside an unfinished form, indented as `scheme-mode' would.
+Only the current input is parsed: earlier output in the buffer is not
+Scheme and must not influence the indentation."
+  (goto-char (point-max))
+  (insert "\n")
+  (lisp-indent-line))
 
 (defun scm--repl-replace-input (text)
   (let ((inhibit-read-only t))
