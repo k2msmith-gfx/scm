@@ -32,6 +32,7 @@ mod codegen;
 mod jit;
 mod live;
 mod subset;
+mod t2;
 
 use std::fmt;
 use std::sync::Arc;
@@ -39,6 +40,7 @@ use std::sync::Arc;
 use scm::Vm;
 
 pub use live::Live;
+pub use t2::install as install_t2;
 pub use subset::{Analysis, Summary};
 
 /// What a compiled leaf returns.

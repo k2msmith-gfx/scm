@@ -39,6 +39,10 @@ fn main() -> ExitCode {
     };
 
     let mut vm = Vm::new();
+    #[cfg(feature = "t2")]
+    if matches!(std::env::var("SCM_TIER").as_deref(), Ok("t2") | Ok("T2")) {
+        scm_llvm::install_t2(&mut vm);
+    }
     // A runaway test must stop the runner rather than hang it. Generous
     // enough that no honest test hits it.
     vm.set_fuel(Some(200_000_000));

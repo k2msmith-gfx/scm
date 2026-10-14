@@ -219,6 +219,11 @@ impl Interp {
     ///
     /// Deliberately not catchable by the script: `(guard (e (else …)) …)`
     /// must not be a way to ignore the host.
+    /// The machine itself, for a host that installs a tier into it.
+    pub fn vm_mut(&mut self) -> &mut crate::Vm {
+        &mut self.vm
+    }
+
     pub fn interrupt_handle(&self) -> Arc<AtomicBool> {
         self.vm.interrupt_handle()
     }

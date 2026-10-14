@@ -9,5 +9,12 @@ description = "The scm binary: a REPL and a script runner"
 name = "scm"
 path = "src/main.rs"
 
+# `jit` links LLVM through scm-llvm and enables `SCM_TIER=t2`. Without a
+# toolchain it fails loudly in llvm-sys, which is the plan §5 gate in its
+# final form; the default build needs no LLVM.
+[features]
+jit = ["dep:scm-llvm"]
+
 [dependencies]
 scm = { path = "../scm" }
+scm-llvm = { path = "../scm-llvm", optional = true }

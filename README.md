@@ -11,7 +11,10 @@ leaf under a running render, and the bytecode tier. Two engines run every
 program: T0, the interpreter and semantic oracle, and T1, the bytecode VM
 and default, 6.7× faster on the benchmark suite with identical results
 (`SCM_TIER=t0` picks the oracle). See [docs/s12-bytecode.md](docs/s12-bytecode.md).
-Next is S13 or S14, with S13's case now a measured one.
+A third engine, T2, compiles T1's bytecode to native code behind
+`--features jit` and `SCM_TIER=t2`; it agrees with the others everywhere
+and is 1.3× T1 on hot loops, which [docs/s13-general-tier.md](docs/s13-general-tier.md)
+explains is the call protocol's ceiling, not the code's.
 Development targets **aarch64 macOS first**; x86-64 Linux is sequenced
 later, not dropped (plan §2.5). The plan is in [docs/plan.md](docs/plan.md);
 the LLVM feasibility results are in [docs/s0-findings.md](docs/s0-findings.md).

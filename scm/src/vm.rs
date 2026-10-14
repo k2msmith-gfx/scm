@@ -406,6 +406,7 @@ pub struct Vm {
     /// T2's compiler, when scm-llvm has installed one, and its counts.
     native_compiler: Option<native::NativeCompiler>,
     native_units: u64,
+    native_hot: u32,
     /// An error a native helper stored for the wrapper to raise.
     native_err: Option<VmError>,
     /// How many units T1 compiled.
@@ -635,6 +636,7 @@ impl Vm {
             last_decline: None,
             native_compiler: None,
             native_units: 0,
+            native_hot: native::HOT,
             native_err: None,
             compiled_units: 0,
             prims: Vec::new(),

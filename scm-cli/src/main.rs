@@ -93,6 +93,13 @@ fn main() -> ExitCode {
         }
     };
     session.interp_mut().set_fuel(fuel);
+    #[cfg(feature = "jit")]
+    if matches!(std::env::var("SCM_TIER").as_deref(), Ok("t2") | Ok("T2")) {
+        scm_llvm::install_t2(session.interp_mut().vm_mut());
+        if let Some(n) = std::env::var("SCM_T2_HOT").ok().and_then(|s| s.parse().ok()) {
+            session.interp_mut().vm_mut().set_native_threshold(n);
+        }
+    }
     let _ = INTERRUPT.set(session.interrupt_handle());
     unsafe { signal(SIGINT, on_sigint as *const () as usize) };
 

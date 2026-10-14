@@ -30,8 +30,9 @@ pub const TRY: u32 = 3;
 pub const PARAM: u32 = 4;
 pub const INTERP: u32 = 5;
 
-/// How many times a `Code` runs before T2 is asked to compile it.
-pub const HOT: u32 = 50;
+/// How many times a `Code` runs before T2 is asked to compile it. Each
+/// compile is milliseconds, so a function has to earn it.
+pub const HOT: u32 = 400;
 
 /// A compiled `Code`: `fn(state, pc) -> status`.
 pub type NativeFn = unsafe extern "C" fn(*mut NativeState, u32) -> u32;
@@ -58,6 +59,16 @@ pub struct NativeState {
     pub tail: u32,
     pub block: u32,
     pub pairs: u32,
+    /// Direct reads, refreshed by `rt_refresh` at entry and after any
+    /// helper that could move them: the globals buffer (an absent global
+    /// is `None`, tag 11), and the slot buffers of the innermost two
+    /// frames (null when there is no such frame). A slot is `(SymId,
+    /// Value)`: the name at 0, the value at 8, 24 bytes each -- pinned by
+    /// `layouts_native_code_relies_on` below.
+    pub globals: *const Option<Value>,
+    pub globals_len: usize,
+    pub slots0: *mut (crate::value::SymId, Value),
+    pub slots1: *mut (crate::value::SymId, Value),
 }
 
 fn env_of(bits: i64) -> Option<ObjRef> {
@@ -71,6 +82,13 @@ fn bits_of(env: Option<ObjRef>) -> i64 {
 impl Vm {
     pub fn install_native_compiler(&mut self, c: NativeCompiler) {
         self.native_compiler = Some(c);
+    }
+
+    /// How many runs a `Code` needs before T2 compiles it. `HOT` by
+    /// default; a test sets 1, a batch job that cannot amortise a compile
+    /// sets more.
+    pub fn set_native_threshold(&mut self, n: u32) {
+        self.native_hot = n;
     }
 
     /// How many `Code`s T2 has compiled.
@@ -87,7 +105,7 @@ impl Vm {
         let mut compiler = self.native_compiler.take()?;
         let hits = code.hits.get() + 1;
         code.hits.set(hits);
-        let out = if hits >= HOT && !code.native_declined.get() {
+        let out = if hits >= self.native_hot && !code.native_declined.get() {
             match compiler(self, code) {
                 Some(f) => {
                     code.native.set(Some(f));
@@ -129,7 +147,12 @@ impl Vm {
                 tail: 0,
                 block: 0,
                 pairs: 0,
+                globals: std::ptr::null(),
+                globals_len: 0,
+                slots0: std::ptr::null_mut(),
+                slots1: std::ptr::null_mut(),
             };
+            refresh(&mut st);
             // Safety: `f` was compiled from `code` by the installed
             // compiler against exactly this state layout, and the helpers
             // it calls take `self` back through `st.vm`.
@@ -189,6 +212,27 @@ impl Vm {
             }
         }
     }
+}
+
+/// Recompute the direct-read pointers from the VM's current state.
+fn refresh(st: &mut NativeState) {
+    // Safety: `st.vm` is the live VM for the duration of the native run.
+    let vm = unsafe { &mut *st.vm };
+    st.globals = vm.globals.as_ptr();
+    st.globals_len = vm.globals.len();
+    let mut cur = env_of(st.env);
+    let mut out = [std::ptr::null_mut(); 2];
+    for slot in out.iter_mut() {
+        let Some(r) = cur else { break };
+        if let Obj::Env { parent, slots } = vm.engine.obj_mut(r) {
+            *slot = slots.as_mut_ptr();
+            cur = *parent;
+        } else {
+            break;
+        }
+    }
+    st.slots0 = out[0];
+    st.slots1 = out[1];
 }
 
 macro_rules! vm {
@@ -275,7 +319,9 @@ pub unsafe extern "C" fn rt_set_global(st: *mut NativeState, i: u32, v: *const V
     unsafe {
         let vm = vm!(st);
         let (sym, _) = (&*(*st).code).globals[i as usize];
-        match vm.bind(sym, *v, define != 0, None) {
+        let r = vm.bind(sym, *v, define != 0, None);
+        refresh(&mut *st);
+        match r {
             Ok(()) => 0,
             Err(e) => fail(st, e),
         }
@@ -322,6 +368,7 @@ pub unsafe extern "C" fn rt_push_env(st: *mut NativeState, names: u32, ninit: u3
             .collect();
         let new_env = vm.engine.env(env_of((*st).env), slots);
         (*st).env = bits_of(Some(new_env));
+        refresh(&mut *st);
         0
     }
 }
@@ -339,6 +386,7 @@ pub unsafe extern "C" fn rt_pop_env(st: *mut NativeState) -> u32 {
         };
         let Obj::Env { parent, .. } = vm.engine.obj(r) else { unreachable!() };
         (*st).env = bits_of(*parent);
+        refresh(&mut *st);
         0
     }
 }
@@ -393,16 +441,39 @@ pub unsafe extern "C" fn rt_safepoint(st: *mut NativeState, pc: u32) -> u32 {
     unsafe {
         let vm = vm!(st);
         vm.vstack.set_len((*st).len);
-        let code = Rc::increment_strong_count((*st).code);
-        let _ = code;
-        let code = Rc::from_raw((*st).code);
-        vm.stack.push(Frame::Code { code: Rc::clone(&code), pc: pc as usize, env: env_of((*st).env), base: (*st).base });
+        // The wrapper holds a strong count for the duration; borrow it to
+        // clone one for the frame, and hand it back untouched.
+        let borrowed = Rc::from_raw((*st).code);
+        let code = Rc::clone(&borrowed);
+        std::mem::forget(borrowed);
+        vm.stack.push(Frame::Code { code, pc: pc as usize, env: env_of((*st).env), base: (*st).base });
         let r = vm.safepoint(&Step::Run);
         vm.stack.pop();
-        std::mem::forget(code);
         match r {
             Ok(()) => 0,
             Err(e) => fail(st, e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::SymId;
+
+    /// Native code reads these two layouts directly. Rust does not promise
+    /// either, so this test is the promise: if it fails, T2 is reading
+    /// garbage and `rt_global`/`rt_local` must go back to being the only
+    /// path.
+    #[test]
+    fn layouts_native_code_relies_on() {
+        assert_eq!(std::mem::size_of::<Option<Value>>(), 16);
+        let none: [u8; 16] = unsafe { std::mem::transmute::<Option<Value>, [u8; 16]>(None) };
+        assert_eq!(none[0], 11);
+        let some: [u8; 16] = unsafe { std::mem::transmute(Some(Value::Fixnum(3))) };
+        assert_eq!((some[0], some[8]), (0, 3));
+        assert_eq!(std::mem::size_of::<(SymId, Value)>(), 24);
+        let slot: [u8; 24] = unsafe { std::mem::transmute((SymId(7), Value::Fixnum(9))) };
+        assert_eq!((slot[0], slot[8], slot[16]), (7, 0, 9));
     }
 }

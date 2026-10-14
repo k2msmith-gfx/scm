@@ -56,14 +56,14 @@ impl Drop for Jit {
     }
 }
 
-fn init() {
+pub(crate) fn init() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         Target::initialize_native(&InitializationConfig::default()).expect("native target initialisation");
     });
 }
 
-fn message(err: LLVMErrorRef) -> String {
+pub(crate) fn message(err: LLVMErrorRef) -> String {
     unsafe {
         let msg = LLVMGetErrorMessage(err);
         let s = CStr::from_ptr(msg).to_string_lossy().into_owned();
@@ -72,7 +72,7 @@ fn message(err: LLVMErrorRef) -> String {
     }
 }
 
-fn target_machine() -> Result<TargetMachine, String> {
+pub(crate) fn target_machine() -> Result<TargetMachine, String> {
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
     target
@@ -85,6 +85,31 @@ fn target_machine() -> Result<TargetMachine, String> {
             CodeModel::Default,
         )
         .ok_or_else(|| "no target machine for the host".to_string())
+}
+
+/// An LLJIT with the process's symbols -- libm -- visible to it.
+pub(crate) fn create_lljit() -> Result<(LLVMOrcLLJITRef, Arc<Jit>), String> {
+    unsafe {
+        let mut jit: LLVMOrcLLJITRef = std::ptr::null_mut();
+        let err = LLVMOrcCreateLLJIT(&mut jit, LLVMOrcCreateLLJITBuilder());
+        if !err.is_null() {
+            return Err(format!("LLJIT: {}", message(err)));
+        }
+        let owner = Arc::new(Jit { jit });
+        let jd = LLVMOrcLLJITGetMainJITDylib(jit);
+        let mut generator: LLVMOrcDefinitionGeneratorRef = std::ptr::null_mut();
+        let err = LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
+            &mut generator,
+            LLVMOrcLLJITGetGlobalPrefix(jit),
+            None,
+            std::ptr::null_mut(),
+        );
+        if !err.is_null() {
+            return Err(format!("process symbols: {}", message(err)));
+        }
+        LLVMOrcJITDylibAddGenerator(jd, generator);
+        Ok((jit, owner))
+    }
 }
 
 /// Emit, optimise, JIT, and look up the entry point.
@@ -108,25 +133,8 @@ pub fn build(vm: &mut Vm, name: &str, shape: Shape, _summary: &Summary) -> Resul
             .run_passes("default<O2>", &tm, PassBuilderOptions::create())
             .map_err(|s| refuse(format!("optimisation failed: {s}")))?;
 
-        let mut jit: LLVMOrcLLJITRef = std::ptr::null_mut();
-        let err = LLVMOrcCreateLLJIT(&mut jit, LLVMOrcCreateLLJITBuilder());
-        if !err.is_null() {
-            return Err(refuse(format!("LLJIT: {}", message(err))));
-        }
-        let owner = Arc::new(Jit { jit });
-        // libm: `sin`, `pow` and friends resolve from the process.
+        let (jit, owner) = create_lljit().map_err(refuse)?;
         let jd = LLVMOrcLLJITGetMainJITDylib(jit);
-        let mut generator: LLVMOrcDefinitionGeneratorRef = std::ptr::null_mut();
-        let err = LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(
-            &mut generator,
-            LLVMOrcLLJITGetGlobalPrefix(jit),
-            None,
-            std::ptr::null_mut(),
-        );
-        if !err.is_null() {
-            return Err(refuse(format!("process symbols: {}", message(err))));
-        }
-        LLVMOrcJITDylibAddGenerator(jd, generator);
 
         // ORC takes the module; the builder is ours to drop first.
         let Cg { module, b, .. } = cg;

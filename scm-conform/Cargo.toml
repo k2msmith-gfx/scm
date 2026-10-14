@@ -9,5 +9,10 @@ description = "Runs external R7RS conformance suites against scm and reports a n
 name = "scm-conform"
 path = "src/main.rs"
 
+[features]
+# Run the suites under T2 with SCM_TIER=t2; needs LLVM.
+t2 = ["dep:scm-llvm"]
+
 [dependencies]
 scm = { path = "../scm" }
+scm-llvm = { path = "../scm-llvm", optional = true }

@@ -85,6 +85,10 @@ fn run_one(suite: &Path, name: &str) -> Result<f64, String> {
     .concat();
     let input = read(Path::new(BENCH).join("inputs-small").join(format!("{name}.input")))?;
     let mut interp = Interp::new().map_err(|e| format!("{e}"))?;
+    #[cfg(feature = "t2")]
+    if matches!(std::env::var("SCM_TIER").as_deref(), Ok("t2") | Ok("T2")) {
+        scm_llvm::install_t2(interp.vm_mut());
+    }
     interp
         .eval(&format!(
             "(define current-input-port (make-parameter (open-input-string {})))",
