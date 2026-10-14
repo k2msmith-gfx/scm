@@ -14,8 +14,10 @@ the first tranche.
 |---|---|---|
 | `(srfi 1)` | the list library, ~95 procedures | Scheme |
 | `(srfi 2)` | `and-let*` | Scheme |
+| `(srfi 4)` | homogeneous numeric vectors | **native, unboxed** |
 | `(srfi 8)` | `receive` | Scheme |
 | `(srfi 26)` | `cut`, `cute` | Scheme |
+| `(srfi 63)` | arrays and shared arrays | **native views**, Scheme prototypes |
 | `(srfi 111)` | boxes | Scheme, on records |
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
 | `(scm test)` | `check`, `check-raises`, `test-failures` | Scheme |
@@ -86,3 +88,75 @@ supplied-check is `(if field …)`.
 - `(srfi 13)`/`(srfi 130)` strings, `(srfi 14)` char sets, `(srfi 133)`
   vectors, and the control and testing SRFIs.
 - The fuzzer does not generate libraries yet.
+
+## Tranche two: numeric vectors and arrays
+
+2026-10-14. `(srfi 4)` and `(srfi 63)`, the pair ray wants: an image, a
+height field or a volume is a rectangular block of numbers, and holding
+one as boxed values costs both memory and an indirection per sample.
+
+**`(srfi 4)` is native and unboxed.** `Obj::NumVector` holds a `Vec` of the
+element type -- `s8`, `s16`, `u16`, `s32`, `u32`, `s64`, `u64`, `f32`,
+`f64` -- and `u8vector` *is* R7RS's bytevector, because two
+representations of the vector of octets is how they drift apart. Measured,
+four million elements resident:
+
+| | |
+|---|---|
+| `(make-f64vector 4000000 1.5)` | 35 MB |
+| `(make-vector 4000000 1.5)` | 65 MB |
+
+Thirty megabytes is exactly eight bytes a sample against sixteen. Note
+what this is *not*: an object count, because a flonum is an immediate
+`Value` and a boxed vector of them is a single object too. The gain is
+bytes and locality.
+
+The reader and printer know the literals: `#f64(1.0 2.5)`, `#s8(-1 2)`,
+`#u16(65535)`. `#f32(` and `#f64(` are matched **before** `#f`, or every
+float vector would read as the boolean false -- there is a test that says
+so.
+
+The type-agnostic operations are *aliases* of the generic primitives rather
+than wrappers: `f64vector-ref` **is** `numvector-ref`, which asks the
+vector its own type. A hot loop therefore pays nothing for the per-type
+name, and `(f64vector-ref some-s32vector i)` returns the element instead of
+complaining -- a case SRFI 4 calls "an error", which leaves it
+unspecified. The alternative was a Scheme call per element.
+
+**`(srfi 63)` arrays are native views.** `Obj::Array` is dimensions, a
+stride per dimension, an offset and a store, with the index arithmetic in
+Rust. So `make-shared-array` is a row, a column, a transpose or a
+subrectangle that **shares** the store rather than copying it, and writing
+through a transpose is visible in the array it came from. `make-shared-array`
+solves its mapper instead of calling it per access: the SRFI requires the
+mapper to be affine, so the image of the origin is the offset and the image
+of each unit step is that dimension's stride -- rank-plus-one calls at
+construction, none afterwards. A view that would reach outside the store is
+refused when it is made, not when it is read.
+
+`equal?` is extended to arrays as the SRFI requires: same shape and
+`equal?` elements, whatever either side's store or strides, so a transpose
+compares equal to a materialised copy of itself. That extension is the
+reason the array is a native type rather than a record -- R7RS compares
+records by identity, and arrays had to compare structurally without
+changing that.
+
+Three things recorded rather than hidden:
+
+- **`array-set!` takes the value second**: `(array-set! a obj k …)`, SRFI
+  63's order, inherited from SLIB. SRFI 25 puts it last. Getting it
+  backwards is silent, so the library says it twice.
+- **Five prototype procedures are absent**: `a:floc128b`, `a:floc64b`,
+  `a:floc32b` and `a:floc16b` are complex, which plan §2.3 declines, and
+  `a:flor128b` and `a:flor16b` want 128- and 16-bit floats, of which there
+  are none. Absent rather than silently widened to something else.
+  `a:bool` is backed by a general vector, so it holds real `#t`/`#f`
+  rather than being bit-packed.
+- **SRFI 47 will not be implemented.** It is withdrawn, and SRFI 63
+  supersedes it and SRFI 25.
+
+Still open for ray's sake: the **leaf compiler does not know about
+numeric vectors**, so a texel function that samples an `f64vector` falls
+outside the compiled subset. That is the next thing worth doing for the
+array work to pay off in a render, and it is a `scm-llvm` change rather
+than a library one.

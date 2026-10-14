@@ -8,7 +8,7 @@
 //!   * **`(/ 8 3)` is inexact**, because `ratios` is not claimed -- which is
 //!     the Steel trap avoided by construction rather than by discipline.
 
-use crate::heap::{Engine, ErrorKind, Obj, PortKind};
+use crate::heap::{Engine, ErrorKind, NumTag, NumVec, Obj, PortKind};
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
 use std::rc::Rc;
@@ -2022,6 +2022,439 @@ fn stderr_port(e: &mut Engine, _a: &[Value]) -> PResult {
     Ok(e.port(PortKind::Stderr))
 }
 
+// ── homogeneous numeric vectors (SRFI 4) ────────────────────────────────
+//
+// One set of primitives for every element type, because the vector knows
+// its own type: only the constructors and the predicates need to be told
+// one. `(srfi 4)`'s per-type names are aliases of these where the
+// operation does not care (`f64vector-ref` *is* `numvector-ref`), which
+// costs a hot loop nothing over a direct primitive.
+
+fn numvec_ref<'a>(who: &str, e: &'a Engine, v: Value) -> Result<&'a NumVec, VmError> {
+    match v {
+        Value::Obj(r) => match e.obj(r) {
+            Obj::NumVector(nv) => Ok(nv),
+            _ => Err(err(format!("{who}: not a numeric vector: {}", write_str(e, v)))),
+        },
+        _ => Err(err(format!("{who}: not a numeric vector: {}", write_str(e, v)))),
+    }
+}
+
+fn tag_of(who: &str, e: &Engine, v: Value) -> Result<NumTag, VmError> {
+    let Value::Symbol(s) = v else {
+        return Err(err(format!("{who}: expects an element-type symbol like 'f64")));
+    };
+    NumTag::from_name(e.interner.sym_name(s))
+        .ok_or_else(|| err(format!("{who}: `{}` is not an element type", e.interner.sym_name(s))))
+}
+
+/// An index argument, checked against `len`.
+fn index_of(who: &str, v: Value, len: usize) -> Result<usize, VmError> {
+    match v {
+        Value::Fixnum(n) if n >= 0 && (n as usize) < len => Ok(n as usize),
+        Value::Fixnum(n) => Err(err(format!("{who}: index {n} is out of range for a vector of length {len}"))),
+        _ => Err(err(format!("{who}: an index must be an exact integer"))),
+    }
+}
+
+/// An optional `start`/`end` pair, defaulting to the whole vector.
+fn bounds(who: &str, a: &[Value], at: usize, len: usize) -> Result<(usize, usize), VmError> {
+    let start = match a.get(at) {
+        None => 0,
+        Some(Value::Fixnum(n)) if *n >= 0 && (*n as usize) <= len => *n as usize,
+        Some(_) => return Err(err(format!("{who}: a bad start index"))),
+    };
+    let end = match a.get(at + 1) {
+        None => len,
+        Some(Value::Fixnum(n)) if *n >= 0 && (*n as usize) <= len => *n as usize,
+        Some(_) => return Err(err(format!("{who}: a bad end index"))),
+    };
+    if start > end {
+        return Err(err(format!("{who}: start {start} is past end {end}")));
+    }
+    Ok((start, end))
+}
+
+/// `(numvector? x)` -- is it one at all; `(numvector? x 'f64)` -- is it one
+/// of that element type.
+fn p_numvector_is(e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(match a {
+        [v] => matches!(v, Value::Obj(r) if matches!(e.obj(*r), Obj::NumVector(_))),
+        [v, t] => {
+            let want = tag_of("numvector?", e, *t)?;
+            matches!(v, Value::Obj(r) if matches!(e.obj(*r), Obj::NumVector(nv) if nv.tag() == want))
+        }
+        _ => return Err(err("numvector?: expects a value and an optional element type")),
+    }))
+}
+
+fn p_numvector_tag(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("numvector-tag", a)?;
+    let tag = numvec_ref("numvector-tag", e, v)?.tag();
+    Ok(e.sym(tag.name()))
+}
+
+/// `(make-numvector 'f64 n [fill])`
+fn p_make_numvector(e: &mut Engine, a: &[Value]) -> PResult {
+    let (tag, n) = match a {
+        [t, Value::Fixnum(n), ..] if *n >= 0 => (tag_of("make-numvector", e, *t)?, *n as usize),
+        _ => return Err(err("make-numvector: expects an element type and a non-negative length")),
+    };
+    let fill = a.get(2).copied().unwrap_or(if tag.is_float() {
+        Value::Flonum(0.0)
+    } else {
+        Value::Fixnum(0)
+    });
+    let v = NumVec::make(tag, n, fill).map_err(err)?;
+    Ok(e.numvector(v))
+}
+
+fn p_numvector_length(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("numvector-length", a)?;
+    Ok(Value::Fixnum(numvec_ref("numvector-length", e, v)?.len() as i64))
+}
+
+fn p_numvector_ref(e: &mut Engine, a: &[Value]) -> PResult {
+    let [v, i] = a else {
+        return Err(err("numvector-ref: expects a vector and an index"));
+    };
+    let nv = numvec_ref("numvector-ref", e, *v)?;
+    let i = index_of("numvector-ref", *i, nv.len())?;
+    Ok(nv.get(i).expect("checked"))
+}
+
+fn p_numvector_set(e: &mut Engine, a: &[Value]) -> PResult {
+    let [v, i, x] = a else {
+        return Err(err("numvector-set!: expects a vector, an index and a number"));
+    };
+    let len = numvec_ref("numvector-set!", e, *v)?.len();
+    let i = index_of("numvector-set!", *i, len)?;
+    let Value::Obj(r) = *v else { unreachable!("checked") };
+    match e.obj_mut(r) {
+        Obj::NumVector(nv) => nv.set(i, *x).map(|()| Value::Unspecified).map_err(err),
+        _ => unreachable!("checked"),
+    }
+}
+
+fn p_numvector_copy(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = *a.first().ok_or_else(|| err("numvector-copy: expects a vector"))?;
+    let nv = numvec_ref("numvector-copy", e, v)?;
+    let (start, end) = bounds("numvector-copy", a, 1, nv.len())?;
+    let out = nv.slice(start, end);
+    Ok(e.numvector(out))
+}
+
+/// `(numvector-copy! to at from [start end])`
+fn p_numvector_copy_into(e: &mut Engine, a: &[Value]) -> PResult {
+    let (to, at, from) = match a {
+        [to, Value::Fixnum(at), from, ..] if *at >= 0 => (*to, *at as usize, *from),
+        _ => return Err(err("numvector-copy!: expects a target, an index and a source")),
+    };
+    let src = numvec_ref("numvector-copy!", e, from)?;
+    let (start, end) = bounds("numvector-copy!", a, 3, src.len())?;
+    let dst_len = numvec_ref("numvector-copy!", e, to)?.len();
+    let n = end - start;
+    if at + n > dst_len {
+        return Err(err(format!(
+            "numvector-copy!: {n} elements at {at} do not fit a vector of length {dst_len}"
+        )));
+    }
+    // Read the source out first: the target may be the same vector.
+    let taken: Vec<Value> = (start..end).map(|i| src.get(i).expect("in range")).collect();
+    let Value::Obj(r) = to else { unreachable!("checked") };
+    match e.obj_mut(r) {
+        Obj::NumVector(nv) => {
+            for (k, x) in taken.into_iter().enumerate() {
+                nv.set(at + k, x).map_err(err)?;
+            }
+            Ok(Value::Unspecified)
+        }
+        _ => unreachable!("checked"),
+    }
+}
+
+fn p_numvector_to_list(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = *a.first().ok_or_else(|| err("numvector->list: expects a vector"))?;
+    let nv = numvec_ref("numvector->list", e, v)?;
+    let (start, end) = bounds("numvector->list", a, 1, nv.len())?;
+    let items: Vec<Value> = (start..end).map(|i| nv.get(i).expect("in range")).collect();
+    Ok(e.list(&items))
+}
+
+/// `(list->numvector 'f64 '(1 2 3))`
+fn p_list_to_numvector(e: &mut Engine, a: &[Value]) -> PResult {
+    let [t, lst] = a else {
+        return Err(err("list->numvector: expects an element type and a list"));
+    };
+    let tag = tag_of("list->numvector", e, *t)?;
+    let mut items = Vec::new();
+    let mut cur = *lst;
+    loop {
+        match cur {
+            Value::Null => break,
+            Value::Obj(r) => match *e.obj(r) {
+                Obj::Pair(car, cdr) => {
+                    items.push(car);
+                    cur = cdr;
+                    if items.len() > e.obj_count() {
+                        return Err(err("list->numvector: a circular list"));
+                    }
+                }
+                _ => return Err(err("list->numvector: an improper list")),
+            },
+            _ => return Err(err("list->numvector: an improper list")),
+        }
+    }
+    let mut v = NumVec::make(tag, items.len(), Value::Fixnum(0)).map_err(err)?;
+    for (i, x) in items.into_iter().enumerate() {
+        v.set(i, x).map_err(err)?;
+    }
+    Ok(e.numvector(v))
+}
+
+/// `(numvector-fill! v x [start end])`
+fn p_numvector_fill(e: &mut Engine, a: &[Value]) -> PResult {
+    let (v, x) = match a {
+        [v, x, ..] => (*v, *x),
+        _ => return Err(err("numvector-fill!: expects a vector and a number")),
+    };
+    let len = numvec_ref("numvector-fill!", e, v)?.len();
+    let (start, end) = bounds("numvector-fill!", a, 2, len)?;
+    let Value::Obj(r) = v else { unreachable!("checked") };
+    match e.obj_mut(r) {
+        Obj::NumVector(nv) => {
+            for i in start..end {
+                nv.set(i, x).map_err(err)?;
+            }
+            Ok(Value::Unspecified)
+        }
+        _ => unreachable!("checked"),
+    }
+}
+
+// ── arrays (SRFI 63) ────────────────────────────────────────────────────
+//
+// An array is a view: dimensions, a stride per dimension, an offset, and a
+// store. The index arithmetic is here rather than in Scheme because an
+// image is read a million times and built once.
+
+struct ArrayParts {
+    dims: Rc<Vec<usize>>,
+    strides: Rc<Vec<isize>>,
+    offset: usize,
+    store: Value,
+}
+
+fn array_parts(who: &str, e: &Engine, v: Value) -> Result<ArrayParts, VmError> {
+    match v {
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Array { dims, strides, offset, store } => Ok(ArrayParts {
+                dims: Rc::clone(dims),
+                strides: Rc::clone(strides),
+                offset: *offset,
+                store: *store,
+            }),
+            _ => Err(err(format!("{who}: not an array: {}", write_str(e, v)))),
+        },
+        _ => Err(err(format!("{who}: not an array: {}", write_str(e, v)))),
+    }
+}
+
+/// The store index for the given subscripts, or an error naming which one
+/// was out of range.
+fn subscript(who: &str, p: &ArrayParts, subs: &[Value]) -> Result<usize, VmError> {
+    if subs.len() != p.dims.len() {
+        return Err(err(format!(
+            "{who}: this array has rank {}, but {} {} given",
+            p.dims.len(),
+            subs.len(),
+            if subs.len() == 1 { "subscript was" } else { "subscripts were" }
+        )));
+    }
+    let mut at = p.offset as isize;
+    for (i, s) in subs.iter().enumerate() {
+        let Value::Fixnum(n) = s else {
+            return Err(err(format!("{who}: a subscript must be an exact integer")));
+        };
+        if *n < 0 || *n as usize >= p.dims[i] {
+            return Err(err(format!(
+                "{who}: subscript {n} is out of range for dimension {i} of {}",
+                p.dims[i]
+            )));
+        }
+        at += p.strides[i] * *n as isize;
+    }
+    if at < 0 {
+        return Err(err(format!("{who}: the subscripts fall outside the store")));
+    }
+    Ok(at as usize)
+}
+
+fn p_array_is(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("array?", a)?;
+    Ok(Value::Bool(
+        matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::Array { .. })),
+    ))
+}
+
+fn p_array_rank(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("array-rank", a)?;
+    // SRFI 63: everything else has rank 0, so this does not refuse.
+    match v {
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Array { dims, .. } => Ok(Value::Fixnum(dims.len() as i64)),
+            _ => Ok(Value::Fixnum(0)),
+        },
+        _ => Ok(Value::Fixnum(0)),
+    }
+}
+
+fn p_array_dimensions(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("array-dimensions", a)?;
+    let p = array_parts("array-dimensions", e, v)?;
+    let items: Vec<Value> = p.dims.iter().map(|d| Value::Fixnum(*d as i64)).collect();
+    Ok(e.list(&items))
+}
+
+fn p_array_in_bounds(e: &mut Engine, a: &[Value]) -> PResult {
+    let Some((v, subs)) = a.split_first() else {
+        return Err(err("array-in-bounds?: expects an array and subscripts"));
+    };
+    let p = array_parts("array-in-bounds?", e, *v)?;
+    Ok(Value::Bool(subscript("array-in-bounds?", &p, subs).is_ok()))
+}
+
+fn p_array_ref(e: &mut Engine, a: &[Value]) -> PResult {
+    let Some((v, subs)) = a.split_first() else {
+        return Err(err("array-ref: expects an array and subscripts"));
+    };
+    let p = array_parts("array-ref", e, *v)?;
+    let at = subscript("array-ref", &p, subs)?;
+    e.store_ref(p.store, at)
+        .ok_or_else(|| err(format!("array-ref: the store has no element {at}")))
+}
+
+/// `(%array-set! array value subscript …)` -- the value comes second, which
+/// is SRFI 63's order (and SLIB's), not SRFI 25's.
+fn p_array_set(e: &mut Engine, a: &[Value]) -> PResult {
+    let [v, x, subs @ ..] = a else {
+        return Err(err("array-set!: expects an array, a value and subscripts"));
+    };
+    let p = array_parts("array-set!", e, *v)?;
+    let at = subscript("array-set!", &p, subs)?;
+    e.store_set(p.store, at, *x)
+        .map(|()| Value::Unspecified)
+        .map_err(|m| err(format!("array-set!: {m}")))
+}
+
+fn dims_of(who: &str, e: &Engine, v: Value) -> Result<Vec<usize>, VmError> {
+    let mut out = Vec::new();
+    let mut cur = v;
+    loop {
+        match cur {
+            Value::Null => break,
+            Value::Obj(r) => match *e.obj(r) {
+                Obj::Pair(car, cdr) => {
+                    match car {
+                        Value::Fixnum(n) if n >= 0 => out.push(n as usize),
+                        _ => return Err(err(format!("{who}: a dimension must be a non-negative integer"))),
+                    }
+                    cur = cdr;
+                }
+                _ => return Err(err(format!("{who}: the dimensions must be a list"))),
+            },
+            _ => return Err(err(format!("{who}: the dimensions must be a list"))),
+        }
+    }
+    Ok(out)
+}
+
+/// `(%make-array store '(d1 d2 …))` -- row-major over the whole store.
+fn p_make_array(e: &mut Engine, a: &[Value]) -> PResult {
+    let [store, dims] = a else {
+        return Err(err("%make-array: expects a store and a dimension list"));
+    };
+    let dims = dims_of("%make-array", e, *dims)?;
+    let want: usize = dims.iter().product();
+    let have = e
+        .store_len(*store)
+        .ok_or_else(|| err("%make-array: not a usable array store"))?;
+    if have < want {
+        return Err(err(format!(
+            "%make-array: a store of {have} cannot hold {want} elements"
+        )));
+    }
+    Ok(e.array(*store, dims))
+}
+
+/// `(%make-array-view store '(d …) '(s …) offset)` -- what
+/// `make-shared-array` builds once it has solved its mapper.
+fn p_make_array_view(e: &mut Engine, a: &[Value]) -> PResult {
+    let [store, dims, strides, offset] = a else {
+        return Err(err("%make-array-view: expects a store, dimensions, strides and an offset"));
+    };
+    let dims = dims_of("%make-array-view", e, *dims)?;
+    let mut st = Vec::new();
+    let mut cur = *strides;
+    loop {
+        match cur {
+            Value::Null => break,
+            Value::Obj(r) => match *e.obj(r) {
+                Obj::Pair(Value::Fixnum(n), cdr) => {
+                    st.push(n as isize);
+                    cur = cdr;
+                }
+                _ => return Err(err("%make-array-view: a stride must be an exact integer")),
+            },
+            _ => return Err(err("%make-array-view: the strides must be a list")),
+        }
+    }
+    let Value::Fixnum(off) = offset else {
+        return Err(err("%make-array-view: the offset must be an exact integer"));
+    };
+    if *off < 0 {
+        return Err(err("%make-array-view: a negative offset"));
+    }
+    if st.len() != dims.len() {
+        return Err(err("%make-array-view: one stride per dimension"));
+    }
+    if e.store_len(*store).is_none() {
+        return Err(err("%make-array-view: not a usable array store"));
+    }
+    // Every corner must land inside the store, so a bad mapper is caught
+    // here rather than at some later read.
+    let have = e.store_len(*store).expect("checked");
+    let n: usize = dims.iter().product();
+    for k in 0..n {
+        match crate::heap::flat_index(&dims, &st, *off as usize, k) {
+            Some(at) if at < have => {}
+            _ => {
+                return Err(err(
+                    "%make-array-view: these dimensions and strides reach outside the store",
+                ));
+            }
+        }
+    }
+    Ok(e.array_view(*store, dims, st, *off as usize))
+}
+
+fn p_array_store(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("%array-store", a)?;
+    Ok(array_parts("%array-store", e, v)?.store)
+}
+
+fn p_array_strides(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("%array-strides", a)?;
+    let p = array_parts("%array-strides", e, v)?;
+    let items: Vec<Value> = p.strides.iter().map(|s| Value::Fixnum(*s as i64)).collect();
+    Ok(e.list(&items))
+}
+
+fn p_array_offset(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("%array-offset", a)?;
+    Ok(Value::Fixnum(array_parts("%array-offset", e, v)?.offset as i64))
+}
+
 // ── records ─────────────────────────────────────────────────────────────
 //
 // A record is its own heap type, so it is disjoint from every other one
@@ -3535,6 +3968,28 @@ pub fn install(vm: &mut Vm) {
     vm.define_vm_prim("char-ready?", |vm, a| with_in_port(vm, a, 0, is_char_ready));
     vm.define_prim("%stdout-port", stdout_port);
     vm.define_prim("%stdin-port", stdin_port);
+    vm.define_prim("numvector?", p_numvector_is);
+    vm.define_prim("numvector-tag", p_numvector_tag);
+    vm.define_prim("make-numvector", p_make_numvector);
+    vm.define_prim("numvector-length", p_numvector_length);
+    vm.define_prim("numvector-ref", p_numvector_ref);
+    vm.define_prim("numvector-set!", p_numvector_set);
+    vm.define_prim("numvector-copy", p_numvector_copy);
+    vm.define_prim("numvector-copy!", p_numvector_copy_into);
+    vm.define_prim("numvector->list", p_numvector_to_list);
+    vm.define_prim("list->numvector", p_list_to_numvector);
+    vm.define_prim("numvector-fill!", p_numvector_fill);
+    vm.define_prim("array?", p_array_is);
+    vm.define_prim("array-rank", p_array_rank);
+    vm.define_prim("array-dimensions", p_array_dimensions);
+    vm.define_prim("array-in-bounds?", p_array_in_bounds);
+    vm.define_prim("array-ref", p_array_ref);
+    vm.define_prim("%array-set!", p_array_set);
+    vm.define_prim("%make-array", p_make_array);
+    vm.define_prim("%make-array-view", p_make_array_view);
+    vm.define_prim("%array-store", p_array_store);
+    vm.define_prim("%array-strides", p_array_strides);
+    vm.define_prim("%array-offset", p_array_offset);
     vm.define_prim("%record-type", p_record_type);
     vm.define_prim("%record-make", p_record_make);
     vm.define_prim("%record-is?", p_record_is);

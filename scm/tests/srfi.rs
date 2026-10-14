@@ -43,6 +43,58 @@ fn the_small_srfis_pass_on_both_tiers() {
 }
 
 #[test]
+fn srfi_4_numeric_vectors_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "4.scm"), "()", "(srfi 4) on {tier:?}");
+    }
+}
+
+#[test]
+fn srfi_63_arrays_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "63.scm"), "()", "(srfi 63) on {tier:?}");
+    }
+}
+
+#[test]
+fn a_numeric_vector_is_homogeneous_at_scale() {
+    // The memory claim -- eight bytes a sample rather than sixteen -- is
+    // not an object count, because a flonum is an immediate `Value` and a
+    // boxed vector of them is one object too. What *is* observable is
+    // that the storage is homogeneous: the element type is enforced on
+    // every write, at any size.
+    let mut vm = Vm::new();
+    vm.eval_str("(import (srfi 4)) (define big (make-f64vector 1000000 1.5))").unwrap();
+    let v = vm
+        .eval_str(
+            "(f64vector-set! big 999999 2.5)
+             (list (f64vector-length big) (f64vector-ref big 999999) (f64vector-ref big 0)
+                   (guard (e (#t 'refused)) (f64vector-set! big 0 'not-a-number)))",
+        )
+        .unwrap();
+    assert_eq!(write_str(&vm.engine, v), "(1000000 2.5 1.5 refused)");
+}
+
+#[test]
+fn an_array_view_shares_its_store() {
+    // `make-shared-array` must not copy. Identity of the store is the
+    // proof -- an allocation count is not, since a copied `f64vector`
+    // store would also be a single object.
+    let mut vm = Vm::new();
+    vm.eval_str("(import (srfi 63)) (define img (make-array a:flor64b 512 512))").unwrap();
+    vm.eval_str("(define t (make-shared-array img (lambda (i j) (list j i)) 512 512))").unwrap();
+    let v = vm
+        .eval_str(
+            "(array-set! t 2.5 1 0)
+             (list (eqv? (%array-store img) (%array-store t))
+                   (array-ref img 0 1) (array-ref t 1 0)
+                   (%array-strides img) (%array-strides t))",
+        )
+        .unwrap();
+    assert_eq!(write_str(&vm.engine, v), "(#t 2.5 2.5 (512 1) (1 512))");
+}
+
+#[test]
 fn every_embedded_library_loads_and_is_found_without_a_path() {
     // No library path, no files beside the binary: the embedded copy is
     // the one found, which is what a `scm build` bundle relies on.

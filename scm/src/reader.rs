@@ -635,6 +635,49 @@ impl Reader {
         Ok(e.sym(&out))
     }
 
+    /// The element-type name of a `#<tag>(` at the cursor, if that is what
+    /// is there: `#f64(` -> `f64`. Looks only at the text, so the caller
+    /// can use it to decide *whether* to take this branch at all.
+    fn numvector_tag(&self) -> Option<&'static str> {
+        for name in ["s8", "s16", "s32", "s64", "u16", "u32", "u64", "f32", "f64"] {
+            let mut i = 1;
+            let mut matched = true;
+            for want in name.chars() {
+                if self.peek_at(i).map(|c| c.to_ascii_lowercase()) != Some(want) {
+                    matched = false;
+                    break;
+                }
+                i += 1;
+            }
+            if matched && self.peek_at(i) == Some('(') {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// `#f64(1.0 2.0)`. `Ok(None)` when the text is not one of these, so
+    /// the caller can report what it expected.
+    fn numvector(&mut self, e: &mut Engine) -> RResult<Option<Value>> {
+        let Some(name) = self.numvector_tag() else {
+            return Ok(None);
+        };
+        let start = self.pos;
+        self.pos += 2 + name.len();
+        let items = self.list_items(e, ')')?;
+        let tag = crate::heap::NumTag::from_name(name).expect("from the same list");
+        let mut v = match crate::heap::NumVec::make(tag, items.len(), Value::Fixnum(0)) {
+            Ok(v) => v,
+            Err(m) => return self.invalid(start, m),
+        };
+        for (i, x) in items.iter().enumerate() {
+            if let Err(m) = v.set(i, *x) {
+                return self.invalid(start, m);
+            }
+        }
+        Ok(Some(e.numvector(v)))
+    }
+
     fn hash(&mut self, e: &mut Engine) -> RResult<Value> {
         let start = self.pos;
         match self.peek_at(1) {
@@ -649,8 +692,24 @@ impl Reader {
                 if self.peek_at(2) == Some('8') && self.peek_at(3) == Some('(') {
                     self.pos += 4;
                     self.bytevector(e)
+                } else if let Some(v) = self.numvector(e)? {
+                    Ok(v)
                 } else {
-                    self.invalid(start, "expected `#u8(`")
+                    self.invalid(start, "expected `#u8(`, `#u16(`, `#u32(` or `#u64(`")
+                }
+            }
+            // `#s8(`, `#s16(`, `#s32(`, `#s64(` -- the signed widths. A
+            // bare `#s` is nothing else, so there is no ambiguity.
+            Some('s') | Some('S') => match self.numvector(e)? {
+                Some(v) => Ok(v),
+                None => self.invalid(start, "expected `#s8(`, `#s16(`, `#s32(` or `#s64(`"),
+            },
+            // `#f32(` and `#f64(` come before `#f`: the longest match wins,
+            // or every float vector would read as the boolean false.
+            Some('f') | Some('F') if self.numvector_tag().is_some() => {
+                match self.numvector(e)? {
+                    Some(v) => Ok(v),
+                    None => self.invalid(start, "expected `#f32(` or `#f64(`"),
                 }
             }
             Some(c) if c == 't' || c == 'f' => {

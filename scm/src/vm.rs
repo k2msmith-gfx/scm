@@ -1652,6 +1652,8 @@ impl Vm {
                 | Obj::Env { .. }
                 | Obj::Record { .. }
                 | Obj::RecordType { .. }
+                | Obj::NumVector(_)
+                | Obj::Array { .. }
                 | Obj::Parameter { .. }
                 | Obj::Rng(_)
                 | Obj::Continuation { .. }

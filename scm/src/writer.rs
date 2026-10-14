@@ -238,6 +238,39 @@ fn emit(
                     }
                 }
             }
+            // The shape and the element type. SRFI 63 does not specify how
+            // an array prints, and printing the elements would need the
+            // shared-structure machinery that covers pairs and vectors
+            // only -- an array of vectors can contain itself.
+            Obj::Array { dims, store, .. } => {
+                let shape: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
+                let kind = match store {
+                    Value::Obj(r) => match e.obj(*r) {
+                        Obj::NumVector(nv) => nv.tag().name().to_string(),
+                        Obj::Bytevector(_) => "u8".to_string(),
+                        Obj::Str(_) => "char".to_string(),
+                        _ => "any".to_string(),
+                    },
+                    _ => "any".to_string(),
+                };
+                let shape = if shape.is_empty() { "0".to_string() } else { shape.join("x") };
+                out.push_str(&format!("#<array {shape} {kind}>"));
+            }
+            // `#f64(1.0 2.0)`, which the reader accepts back (SRFI 4).
+            Obj::NumVector(v) => {
+                out.push_str(&format!("#{}(", v.tag().name()));
+                for i in 0..v.len() {
+                    if i > 0 {
+                        out.push(' ');
+                    }
+                    match v.get(i) {
+                        Some(Value::Flonum(x)) => out.push_str(&flonum(x)),
+                        Some(Value::Fixnum(n)) => out.push_str(&n.to_string()),
+                        _ => out.push('?'),
+                    }
+                }
+                out.push(')');
+            }
             Obj::Bytevector(bytes) => {
                 out.push_str("#u8(");
                 for (i, b) in bytes.iter().enumerate() {

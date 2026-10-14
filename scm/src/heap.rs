@@ -54,6 +54,235 @@ pub enum ErrorKind {
 /// A port. Textual ports carry characters, binary ports carry bytes, and
 /// R7RS keeps them apart deliberately -- `read-char` on a binary port is an
 /// error, not a reinterpretation.
+/// Which element type a homogeneous numeric vector holds (SRFI 4).
+///
+/// `u8` is absent on purpose: R7RS's bytevector **is** the u8 vector, and
+/// two representations of one thing is how they drift apart. `(srfi 4)`'s
+/// `u8vector` names are the bytevector operations.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NumTag {
+    S8,
+    S16,
+    U16,
+    S32,
+    U32,
+    S64,
+    U64,
+    F32,
+    F64,
+}
+
+impl NumTag {
+    pub fn name(self) -> &'static str {
+        match self {
+            NumTag::S8 => "s8",
+            NumTag::S16 => "s16",
+            NumTag::U16 => "u16",
+            NumTag::S32 => "s32",
+            NumTag::U32 => "u32",
+            NumTag::S64 => "s64",
+            NumTag::U64 => "u64",
+            NumTag::F32 => "f32",
+            NumTag::F64 => "f64",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<NumTag> {
+        Some(match s {
+            "s8" => NumTag::S8,
+            "s16" => NumTag::S16,
+            "u16" => NumTag::U16,
+            "s32" => NumTag::S32,
+            "u32" => NumTag::U32,
+            "s64" => NumTag::S64,
+            "u64" => NumTag::U64,
+            "f32" => NumTag::F32,
+            "f64" => NumTag::F64,
+            _ => return None,
+        })
+    }
+
+    pub fn is_float(self) -> bool {
+        matches!(self, NumTag::F32 | NumTag::F64)
+    }
+}
+
+/// A homogeneous numeric vector: the elements are stored **unboxed**, which
+/// is the whole reason it exists. A `Vec<Value>` of a million flonums costs
+/// sixteen bytes and a tag check per element; an `f64` image or height field
+/// costs eight bytes and nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NumVec {
+    S8(Vec<i8>),
+    S16(Vec<i16>),
+    U16(Vec<u16>),
+    S32(Vec<i32>),
+    U32(Vec<u32>),
+    S64(Vec<i64>),
+    U64(Vec<u64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+impl NumVec {
+    pub fn tag(&self) -> NumTag {
+        match self {
+            NumVec::S8(_) => NumTag::S8,
+            NumVec::S16(_) => NumTag::S16,
+            NumVec::U16(_) => NumTag::U16,
+            NumVec::S32(_) => NumTag::S32,
+            NumVec::U32(_) => NumTag::U32,
+            NumVec::S64(_) => NumTag::S64,
+            NumVec::U64(_) => NumTag::U64,
+            NumVec::F32(_) => NumTag::F32,
+            NumVec::F64(_) => NumTag::F64,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            NumVec::S8(v) => v.len(),
+            NumVec::S16(v) => v.len(),
+            NumVec::U16(v) => v.len(),
+            NumVec::S32(v) => v.len(),
+            NumVec::U32(v) => v.len(),
+            NumVec::S64(v) => v.len(),
+            NumVec::U64(v) => v.len(),
+            NumVec::F32(v) => v.len(),
+            NumVec::F64(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Element `i` as a Scheme number: exact for the integer types,
+    /// inexact for the float ones.
+    pub fn get(&self, i: usize) -> Option<Value> {
+        Some(match self {
+            NumVec::S8(v) => Value::Fixnum(*v.get(i)? as i64),
+            NumVec::S16(v) => Value::Fixnum(*v.get(i)? as i64),
+            NumVec::U16(v) => Value::Fixnum(*v.get(i)? as i64),
+            NumVec::S32(v) => Value::Fixnum(*v.get(i)? as i64),
+            NumVec::U32(v) => Value::Fixnum(*v.get(i)? as i64),
+            NumVec::S64(v) => Value::Fixnum(*v.get(i)?),
+            // A u64 past i64::MAX has no exact representation here (§2.3
+            // declines bignums), so say so rather than wrap into a
+            // negative number.
+            NumVec::U64(v) => {
+                let x = *v.get(i)?;
+                match i64::try_from(x) {
+                    Ok(n) => Value::Fixnum(n),
+                    Err(_) => Value::Flonum(x as f64),
+                }
+            }
+            NumVec::F32(v) => Value::Flonum(*v.get(i)? as f64),
+            NumVec::F64(v) => Value::Flonum(*v.get(i)?),
+        })
+    }
+
+    /// Store `x` at `i`. The error names the type and the value, because
+    /// "out of range for s8" is the whole content of the complaint.
+    pub fn set(&mut self, i: usize, x: Value) -> Result<(), String> {
+        let tag = self.tag();
+        if i >= self.len() {
+            return Err(format!("index {i} is out of range for a {}vector of length {}", tag.name(), self.len()));
+        }
+        if tag.is_float() {
+            let f = match x {
+                Value::Flonum(f) => f,
+                Value::Fixnum(n) => n as f64,
+                _ => return Err(format!("a {}vector holds numbers, not {x:?}", tag.name())),
+            };
+            match self {
+                NumVec::F32(v) => v[i] = f as f32,
+                NumVec::F64(v) => v[i] = f,
+                _ => unreachable!("float tag"),
+            }
+            return Ok(());
+        }
+        // The integer types take an exact integer in range. A flonum is
+        // refused rather than truncated: losing the fraction silently is
+        // how a wrong answer gets stored.
+        let Value::Fixnum(n) = x else {
+            let what = match x {
+                Value::Flonum(f) => format!("the inexact {f}"),
+                other => format!("{other:?}"),
+            };
+            return Err(format!("a {}vector holds exact integers, not {what}", tag.name()));
+        };
+        macro_rules! store {
+            ($v:expr, $t:ty) => {{
+                match <$t>::try_from(n) {
+                    Ok(y) => {
+                        $v[i] = y;
+                        Ok(())
+                    }
+                    Err(_) => Err(format!("{n} is out of range for a {}vector", tag.name())),
+                }
+            }};
+        }
+        match self {
+            NumVec::S8(v) => store!(v, i8),
+            NumVec::S16(v) => store!(v, i16),
+            NumVec::U16(v) => store!(v, u16),
+            NumVec::S32(v) => store!(v, i32),
+            NumVec::U32(v) => store!(v, u32),
+            NumVec::S64(v) => {
+                v[i] = n;
+                Ok(())
+            }
+            NumVec::U64(v) => store!(v, u64),
+            NumVec::F32(_) | NumVec::F64(_) => unreachable!("handled above"),
+        }
+    }
+
+    /// `n` elements, every one `fill`.
+    pub fn make(tag: NumTag, n: usize, fill: Value) -> Result<NumVec, String> {
+        let mut v = match tag {
+            NumTag::S8 => NumVec::S8(vec![0; n]),
+            NumTag::S16 => NumVec::S16(vec![0; n]),
+            NumTag::U16 => NumVec::U16(vec![0; n]),
+            NumTag::S32 => NumVec::S32(vec![0; n]),
+            NumTag::U32 => NumVec::U32(vec![0; n]),
+            NumTag::S64 => NumVec::S64(vec![0; n]),
+            NumTag::U64 => NumVec::U64(vec![0; n]),
+            NumTag::F32 => NumVec::F32(vec![0.0; n]),
+            NumTag::F64 => NumVec::F64(vec![0.0; n]),
+        };
+        // One range check for the fill, then a fast fill.
+        if n > 0 && !matches!(fill, Value::Fixnum(0)) {
+            v.set(0, fill)?;
+            let first = v.get(0).expect("just set");
+            for i in 1..n {
+                v.set(i, first)?;
+            }
+        }
+        Ok(v)
+    }
+
+    /// A copy of `start..end`.
+    pub fn slice(&self, start: usize, end: usize) -> NumVec {
+        macro_rules! cut {
+            ($c:path, $v:expr) => {
+                $c($v[start..end].to_vec())
+            };
+        }
+        match self {
+            NumVec::S8(v) => cut!(NumVec::S8, v),
+            NumVec::S16(v) => cut!(NumVec::S16, v),
+            NumVec::U16(v) => cut!(NumVec::U16, v),
+            NumVec::S32(v) => cut!(NumVec::S32, v),
+            NumVec::U32(v) => cut!(NumVec::U32, v),
+            NumVec::S64(v) => cut!(NumVec::S64, v),
+            NumVec::U64(v) => cut!(NumVec::U64, v),
+            NumVec::F32(v) => cut!(NumVec::F32, v),
+            NumVec::F64(v) => cut!(NumVec::F64, v),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum PortKind {
     /// An in-memory input port over a string.
@@ -171,6 +400,23 @@ pub enum Obj {
     Env {
         parent: Option<ObjRef>,
         slots: Vec<(SymId, Value)>,
+    },
+    /// A homogeneous numeric vector (SRFI 4), stored unboxed.
+    NumVector(NumVec),
+    /// A multidimensional array (SRFI 63) as a **view** over a backing
+    /// store: an index `(i j …)` lands at `offset + i*strides[0] +
+    /// j*strides[1] + …`. Strides rather than a shape alone is what makes
+    /// `make-shared-array` a view -- a row, a column, a transpose or a
+    /// subrectangle shares the store instead of copying it -- and the
+    /// arithmetic happens here rather than in Scheme.
+    ///
+    /// `store` is a numeric vector, a bytevector, a vector or a string,
+    /// which is every prototype `(srfi 63)` offers.
+    Array {
+        dims: Rc<Vec<usize>>,
+        strides: Rc<Vec<isize>>,
+        offset: usize,
+        store: Value,
     },
     /// A record type descriptor, from `define-record-type`. Two types with
     /// the same name are distinct objects, which is what R7RS wants and
@@ -569,6 +815,12 @@ impl Engine {
                     }
                     Obj::Port { .. } => {}
                     Obj::Values(vs) => work.extend(vs.iter().copied()),
+                    Obj::Array { store, .. } => {
+                        visited += 1;
+                        if is_obj(store) {
+                            work.push(*store);
+                        }
+                    }
                     Obj::Record { rtype, fields } => {
                         visited += fields.len() + 1;
                         if is_obj(rtype) {
@@ -576,9 +828,10 @@ impl Engine {
                         }
                         work.extend(fields.iter().copied().filter(is_obj));
                     }
-                    // A type descriptor holds interned names and nothing
-                    // collectable.
-                    Obj::RecordType { .. } => {}
+                    // A type descriptor holds interned names, and a
+                    // numeric vector holds unboxed numbers: neither has
+                    // anything collectable inside.
+                    Obj::RecordType { .. } | Obj::NumVector(_) => {}
                     // A macro's patterns and templates are heap data, so
                     // they must be traced -- this is the `macro_roots` bug
                     // again, and gc stress is what caught it the first time.
@@ -738,6 +991,114 @@ impl Engine {
         })
     }
 
+    pub fn numvector(&mut self, v: NumVec) -> Value {
+        self.alloc(Obj::NumVector(v))
+    }
+
+    /// An array view over `store`, row-major with no offset.
+    pub fn array(&mut self, store: Value, dims: Vec<usize>) -> Value {
+        let strides = row_major_strides(&dims);
+        self.alloc(Obj::Array {
+            dims: Rc::new(dims),
+            strides: Rc::new(strides),
+            offset: 0,
+            store,
+        })
+    }
+
+    /// An array view with strides and an offset given: `make-shared-array`.
+    pub fn array_view(
+        &mut self,
+        store: Value,
+        dims: Vec<usize>,
+        strides: Vec<isize>,
+        offset: usize,
+    ) -> Value {
+        self.alloc(Obj::Array {
+            dims: Rc::new(dims),
+            strides: Rc::new(strides),
+            offset,
+            store,
+        })
+    }
+
+    /// Element `k` of the array at `r`, counting in row-major order over
+    /// its *logical* shape -- so it is the same element on both sides of a
+    /// comparison however either one is strided.
+    pub fn array_element(&self, r: ObjRef, k: usize) -> Option<Value> {
+        let Obj::Array { dims, strides, offset, store } = self.obj(r) else {
+            return None;
+        };
+        let at = flat_index(dims, strides, *offset, k)?;
+        self.store_ref(*store, at)
+    }
+
+    /// Element `i` of whatever backs an array.
+    pub fn store_ref(&self, store: Value, i: usize) -> Option<Value> {
+        match store {
+            Value::Obj(r) => match self.obj(r) {
+                Obj::NumVector(nv) => nv.get(i),
+                Obj::Bytevector(b) => b.get(i).map(|x| Value::Fixnum(*x as i64)),
+                Obj::Vector { items, .. } => items.get(i).copied(),
+                Obj::Str(cs) => cs.get(i).copied().map(Value::Char),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// How many elements the store holds.
+    pub fn store_len(&self, store: Value) -> Option<usize> {
+        match store {
+            Value::Obj(r) => match self.obj(r) {
+                Obj::NumVector(nv) => Some(nv.len()),
+                Obj::Bytevector(b) => Some(b.len()),
+                Obj::Vector { items, .. } => Some(items.len()),
+                Obj::Str(cs) => Some(cs.len()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Store `x` at `i` in whatever backs an array.
+    pub fn store_set(&mut self, store: Value, i: usize, x: Value) -> Result<(), String> {
+        let Value::Obj(r) = store else {
+            return Err("not an array store".into());
+        };
+        match self.obj_mut(r) {
+            Obj::NumVector(nv) => nv.set(i, x),
+            Obj::Bytevector(b) => match x {
+                Value::Fixnum(n) if (0..=255).contains(&n) => {
+                    if i >= b.len() {
+                        return Err(format!("index {i} is out of range"));
+                    }
+                    b[i] = n as u8;
+                    Ok(())
+                }
+                _ => Err("a bytevector holds octets".into()),
+            },
+            Obj::Vector { items, .. } => {
+                if i >= items.len() {
+                    return Err(format!("index {i} is out of range"));
+                }
+                items[i] = x;
+                Ok(())
+            }
+            Obj::Str(cs) => match x {
+                Value::Char(c) => {
+                    if i >= cs.len() {
+                        return Err(format!("index {i} is out of range"));
+                    }
+                    cs[i] = c;
+                    Ok(())
+                }
+                _ => Err("a string holds characters".into()),
+            },
+            _ => Err("not an array store".into()),
+        }
+    }
+
     pub fn record_type(&mut self, name: SymId, fields: Vec<SymId>) -> Value {
         self.alloc(Obj::RecordType { name, fields: Rc::new(fields) })
     }
@@ -877,6 +1238,34 @@ impl Engine {
                                 return Some(false);
                             }
                         }
+                        // Same element type and same elements, as for a
+                        // bytevector: these are aggregates of numbers and
+                        // `equal?` recurses into aggregates.
+                        (Obj::NumVector(a), Obj::NumVector(b)) => {
+                            if a != b {
+                                return Some(false);
+                            }
+                        }
+                        // SRFI 63 extends `equal?` to arrays: same shape
+                        // and `equal?` elements, whatever each one's store
+                        // or strides. Two views of one store compare equal
+                        // if they see the same elements, which is the
+                        // point of comparing a transpose with a copy.
+                        (
+                            Obj::Array { dims: d1, .. },
+                            Obj::Array { dims: d2, .. },
+                        ) => {
+                            if d1 != d2 {
+                                return Some(false);
+                            }
+                            let n: usize = d1.iter().product();
+                            for k in 0..n {
+                                match (self.array_element(ra, k), self.array_element(rb, k)) {
+                                    (Some(x), Some(y)) => work.push((x, y)),
+                                    _ => return Some(false),
+                                }
+                            }
+                        }
                         // Environments and closures compare by identity, and
                         // `ra == rb` above already settled that.
                         _ => return Some(false),
@@ -892,4 +1281,36 @@ impl Engine {
         }
         Some(true)
     }
+}
+
+
+/// Row-major strides for `dims`: the last dimension is contiguous.
+pub fn row_major_strides(dims: &[usize]) -> Vec<isize> {
+    let mut strides = vec![0isize; dims.len()];
+    let mut acc: isize = 1;
+    for i in (0..dims.len()).rev() {
+        strides[i] = acc;
+        acc *= dims[i] as isize;
+    }
+    strides
+}
+
+/// Where the `k`-th element in row-major order over `dims` lands in the
+/// store, given `strides` and `offset`. `None` if it would fall outside.
+pub fn flat_index(dims: &[usize], strides: &[isize], offset: usize, k: usize) -> Option<usize> {
+    let mut rest = k;
+    let mut at = offset as isize;
+    for i in (0..dims.len()).rev() {
+        let d = dims[i];
+        if d == 0 {
+            return None;
+        }
+        let idx = rest % d;
+        rest /= d;
+        at += strides[i] * idx as isize;
+    }
+    if rest != 0 || at < 0 {
+        return None;
+    }
+    Some(at as usize)
 }
