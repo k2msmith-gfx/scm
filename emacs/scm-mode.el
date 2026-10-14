@@ -210,14 +210,25 @@ Scheme's #t and #f outside strings become t and nil."
 
 ;;;; Evaluation
 
-(defun scm--show-result (r &optional echo)
-  "Print response R in the REPL; with ECHO, also in the echo area."
+(defun scm--defined-name (code)
+  "The name CODE defines, if it is a `define' form."
+  (when (string-match "\\`[ \t\n]*(define\\(?:-record-type\\)?[ \t\n]+(?[ \t\n]*\\([^][ \t\n()]+\\)" code)
+    (match-string 1 code)))
+
+(defun scm--show-result (r &optional echo code)
+  "Print response R in the REPL; with ECHO, also in the echo area.
+CODE is what was evaluated, so a definition can be echoed by name as
+SLIME does, instead of as the unspecified value it returns."
   (let ((output (or (plist-get r :output) ""))
         (status (plist-get r :status)))
     ;; Unquoted wire values read as symbols: `ok', `error', `incomplete'.
     (pcase status
       ('ok (scm--repl-insert-result output (plist-get r :value))
-       (when echo (message "%s" (plist-get r :value))))
+       (when echo
+         (let ((value (plist-get r :value)))
+           (cond ((not (equal value "#<unspecified>")) (message "%s" value))
+                 ((and code (scm--defined-name code)) (message "%s" (scm--defined-name code)))
+                 (t (message "; No value"))))))
       ('error
        (scm--repl-insert-error output (plist-get r :message) (plist-get r :backtrace))
        (when echo (message "scm: %s" (plist-get r :message))))
@@ -228,7 +239,7 @@ Scheme's #t and #f outside strings become t and nil."
   (scm-ensure-connected
    (lambda ()
      (scm--request 'eval (append (list :code code) (when source (list :source source)))
-                   (lambda (r) (scm--show-result r echo))))))
+                   (lambda (r) (scm--show-result r echo code))))))
 
 (defun scm-eval-last-sexp ()
   "Evaluate the sexp before point; the value goes to the echo area and the REPL."
