@@ -33,6 +33,7 @@ tranches below are the order they were added in.
 | `(scm test)` | `check`, `check-raises`, `test-failures` | Scheme |
 | `(scm hash-table)` | the table `(srfi 69)` and `(srfi 125)` share | Scheme, on **native hash functions** |
 | `(scm numvector)` | `(srfi 160)`'s operations, written once | Scheme, on **native unboxed storage** |
+| `(scm linalg)` | vec3/vec4/mat4/quaternion — **not an SRFI**, see [linalg.md](linalg.md) | Scheme, two layers |
 
 Written against each specification rather than copied from its reference
 implementation, so every procedure is one this project can test and change.
@@ -584,7 +585,9 @@ range generator, which could not terminate otherwise.
 
 ## What is still absent
 
-`(srfi 13)`/`(srfi 130)` strings; `(srfi 14)` char sets; `(srfi 133)`, the operations on *boxed*
+noise functions, the other thing procedural 3D needs that no SRFI
+covers (and the best fit for the leaf compiler); `(srfi 13)`/`(srfi 130)`
+strings; `(srfi 14)` char sets; `(srfi 133)`, the operations on *boxed*
 vectors, which is 160's counterpart for the case where the elements are not
 numbers; and the control and testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
 `(srfi 63)` supersedes it.

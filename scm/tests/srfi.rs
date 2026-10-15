@@ -1,4 +1,4 @@
-//! The SRFI libraries, gated.
+//! The shipped libraries, gated.
 //!
 //! Each program in `tests/srfi/` imports `(scm test)` and the library it
 //! exercises, and its value is the list of failures -- so `()` is a pass
@@ -133,6 +133,17 @@ fn the_eager_comprehensions_pass_on_both_tiers() {
 fn the_generators_and_accumulators_pass_on_both_tiers() {
     for tier in [Tier::T0, Tier::T1] {
         assert_eq!(run(tier, "158.scm"), "()", "(srfi 158) on {tier:?}");
+    }
+}
+
+/// `(scm linalg)` is not an SRFI -- no SRFI covers linear algebra -- but it
+/// is gated the same way. The checks that matter are the ones catching a
+/// silently wrong picture: the cross product's handedness, ray's Euler
+/// order, a normal under non-uniform scale, and the two layers agreeing.
+#[test]
+fn the_linear_algebra_library_passes_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "linalg.scm"), "()", "(scm linalg) on {tier:?}");
     }
 }
 
