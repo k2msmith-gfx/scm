@@ -26,6 +26,7 @@ tranches below are the order they were added in.
 | `(srfi 128)` | comparators | Scheme |
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
 | `(srfi 133)` | vector operations on boxed elements, 42 procedures | Scheme; **16 re-exported from the prelude** |
+| `(srfi 14)` | char-sets, 62 bindings | Scheme, on a **native bytevector**; Latin-1 |
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
 | `(srfi 158)` | generators and accumulators | Scheme |
 | `(srfi 194)` | random data generators, 30 of 32 | Scheme, on `(srfi 27)` |
@@ -688,8 +689,127 @@ element-at-a-time version quietly corrupts the overlap. Two overlapping
 cases are asserted, one of them shifted so that a naive implementation
 gives a visibly wrong answer rather than a coincidentally right one.
 
+## Tranche eleven: char-sets, and a bound chosen three times over
+
+2026-10-15. `(srfi 14)`.
+
+This one was not next in the queue. `(srfi 13)` was, and `(srfi 13)` turns
+out to need char-sets for twelve of its procedures — including
+`string-trim`, whose *default* criterion is `char-set:whitespace`, so it
+reaches for SRFI 14 even when the caller passes nothing. So 14 came first.
+
+### Latin-1, with three independent reasons
+
+Char-sets here hold code points 0 to 255. That is a real restriction and
+worth being able to defend, which it is, three times over:
+
+- **The SRFI says so.** `char-set:full` and `char-set-complement` are
+  defined relative to "the implementation's character range", and the
+  specification warns that an implementation with a Unicode-wide
+  character type will find those operations expensive.
+- **scm already says so.** The `full-unicode` feature is unclaimed
+  ([plan §2.2](plan.md)), so the declared character range is already
+  narrower than the `char` type.
+- **The reference implementation says so**, in its own words: "Is Latin-1
+  specific. Would certainly have to be rewritten for Unicode."
+
+A set is a 256-byte bytevector, one byte per code point — the reference's
+own structure with the improvement its notes ask for ("Should be rewritten
+to use bit strings or byte vecs"), and scm's bytevectors are native and
+unboxed.
+
+### The bound has three different answers
+
+The interesting part of a bound is what happens at it, and the three cases
+want three different answers rather than one rule:
+
+| operation on a character past 255 | answer | why |
+|---|---|---|
+| `char-set-contains?` | `#f` | it is not a member; that is not an error |
+| `char-set-adjoin`, `char-set`, `string->char-set` | **raises** | it cannot be stored, and dropping it silently is worse |
+| `char-set-delete` | no-op | it was not there, and the result is right either way |
+
+`ucs-range->char-set` is the fourth case and the SRFI already decided it:
+a range running past the bound is clipped **silently**, unless the
+optional `error?` argument asks to be told.
+
+The cost is that scm's characters really are Unicode scalar values, so
+`(char-set-contains? char-set:letter #\λ)` is `#f` while
+`(char-alphabetic? #\λ)` is `#t`. The way out is in the library's own
+surface: every `(srfi 13)` procedure that takes a char-set takes a
+*predicate* instead, and scm's `char-alphabetic?` and friends are
+Unicode-correct over the whole range. **Pass a predicate when Unicode
+matters.**
+
+### The `!` variants are non-destructive, which is what makes the constants safe
+
+Sixteen of the 62 bindings are linear-update variants. They are all the
+non-destructive versions, which is what `(srfi 1)` does here and for the
+same reason: the SRFI permits an implementation to reuse its argument's
+storage or not, and "not" cannot surprise a caller who kept a reference.
+
+Here it buys something specific. The reference implementation warns about
+a hazard it cannot fix — "it would be very, very bad if a client's buggy
+code corrupted these constants" — because `(char-set-adjoin! char-set:digit
+#\z)` would mutate a shared global for the rest of the program. With
+non-destructive variants that cannot happen, and the test asserts it
+directly: the set comes back with eleven characters and `char-set:digit`
+still has ten.
+
+### A third fold order
+
+`char-set-fold` applies `(kons char state)` — the **character first**.
+This project now ships three folds with three different orders, which is
+worth writing down in one place:
+
+| | order |
+|---|---|
+| `(srfi 1)` `fold` | `(f elem acc)` |
+| `(srfi 133)` `vector-fold` | `(kons state elt)` |
+| `(srfi 14)` `char-set-fold` | `(kons char state)` |
+
+`char-set-every` is a second asymmetry: it answers `#t`, where
+`(srfi 133)`'s `vector-every` answers the last value the predicate gave.
+`char-set-any` does answer the predicate's value. Both agree with 133 on
+the empty case — `#t` and `#f`.
+
+`char-set-unfold`'s first two arguments are a third: their order was
+reversed in the SRFI's original signature and **corrected by erratum**,
+the examples and the reference having always used the corrected one. `p`
+is the *stop* predicate, so reading it as "keep going" produces the empty
+set rather than an error.
+
+### Where the standard sets disagree with scm's own predicates
+
+The seventeen standard sets are the reference implementation's Latin-1
+data copied verbatim, which for Latin-1 *is* the specification of what
+they hold. Deriving them from scm's native predicates instead would give
+different sets — so the two disagree, inside the representable range, in
+exactly three places, and the tests pin each:
+
+| set | native predicate | disagrees on |
+|---|---|---|
+| `char-set:digit` | `char-numeric?` | `² ³ ¹ ¼ ½ ¾` |
+| `char-set:lower-case` | `char-lower-case?` | `ª º` |
+| `char-set:whitespace` | `char-whitespace?` | U+0085 `NEL` |
+
+None is a bug in either party. `char-set:digit` is the *decimal* digits
+where Rust's `is_numeric` is Unicode `Nd`+`Nl`+`No`. `char-lower-case?`
+follows the Unicode Lowercase property, which picks up the two ordinal
+indicators through `Other_Lowercase`, while the reference files them under
+`char-set:letter` only. And `char-whitespace?` counts NEL, a C1 control
+the reference's list omits.
+
+That last one was tempting to "fix", and the reason not to is instructive:
+`char-set:printing` is defined as whitespace union graphic, so adding NEL
+to make the predicates agree would put a control character among the
+printing characters. The verbatim data is kept and the divergence is
+tested instead. `char-set:letter` and `char-set:upper-case` agree with
+their predicates exactly, which the tests also assert — so a change on
+either side shows up here rather than as a surprise in `(srfi 13)`.
+
 ## What is still absent
 
-`(srfi 13)`/`(srfi 130)` strings; `(srfi 14)` char sets; and the control and
-testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
-`(srfi 63)` supersedes it.
+`(srfi 13)`/`(srfi 130)` strings; and the control and testing SRFIs.
+`(srfi 47)` will not be added: it is withdrawn and `(srfi 63)` supersedes
+it.

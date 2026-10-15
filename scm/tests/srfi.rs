@@ -136,6 +136,26 @@ fn the_generators_and_accumulators_pass_on_both_tiers() {
     }
 }
 
+/// `(srfi 14)` char-sets, which `(srfi 13)` needs for twelve of its
+/// procedures. Char-sets here are **Latin-1**, which the SRFI allows (it
+/// makes `char-set:full` relative to the implementation's range), scm's
+/// unclaimed `full-unicode` feature already implies, and the reference
+/// implementation does itself. That bound has three different answers and
+/// the test pins each: membership past it is `#f`, adding past it raises,
+/// deleting past it is a no-op. The sixteen `!` variants are
+/// **non-destructive**, as `(srfi 1)`'s are and for the same reason, so
+/// the test asserts directly that a client cannot corrupt a shared
+/// constant. It also pins where the reference's verbatim Latin-1 data
+/// diverges from scm's own Unicode-correct predicates -- six characters
+/// for `digit`, two for `lower-case`, one for `whitespace` -- so that a
+/// change to either side fails here rather than surprising `(srfi 13)`.
+#[test]
+fn srfi_14_char_sets_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "14.scm"), "()", "(srfi 14) on {tier:?}");
+    }
+}
+
 /// `(srfi 133)` is `(srfi 160)`'s counterpart for boxed elements, and
 /// sixteen of its forty-two exports are R7RS base procedures the prelude
 /// already defines to the SRFI's specification -- so they are re-exported
