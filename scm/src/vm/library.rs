@@ -48,6 +48,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     ("(scm hash-table)", include_str!("../../lib/scm/hash-table.sld")),
     ("(scm numvector)", include_str!("../../lib/scm/numvector.sld")),
     ("(scm linalg)", include_str!("../../lib/scm/linalg.sld")),
+    ("(scm noise)", include_str!("../../lib/scm/noise.sld")),
     ("(srfi 160 base)", include_str!("../../lib/srfi/160/base.sld")),
     ("(srfi 160 s8)", include_str!("../../lib/srfi/160/s8.sld")),
     ("(srfi 160 u8)", include_str!("../../lib/srfi/160/u8.sld")),

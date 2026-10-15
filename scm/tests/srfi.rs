@@ -147,6 +147,19 @@ fn the_linear_algebra_library_passes_on_both_tiers() {
     }
 }
 
+/// `(scm noise)` has no right answer to compare against, so the gate is
+/// on properties: deterministic, continuous across lattice boundaries, in
+/// the range it claims, exactly zero on the lattice for gradient noise,
+/// and exactly wrapping for the tiled variant. That every procedure also
+/// compiles, and agrees with the compiled form, is asserted in
+/// `scm-llvm/tests/leaf_noise.rs`.
+#[test]
+fn the_noise_library_passes_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "noise.scm"), "()", "(scm noise) on {tier:?}");
+    }
+}
+
 #[test]
 fn equal_hash_agrees_with_equal_and_terminates_on_a_cycle() {
     // The one contract a hash table rests on: if two things are `equal?`
