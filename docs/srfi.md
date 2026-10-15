@@ -25,6 +25,7 @@ tranches below are the order they were added in.
 | `(srfi 125)` | intermediate hash tables, ~45 procedures | Scheme, same table as `(srfi 69)` |
 | `(srfi 128)` | comparators | Scheme |
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
+| `(srfi 133)` | vector operations on boxed elements, 42 procedures | Scheme; **16 re-exported from the prelude** |
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
 | `(srfi 158)` | generators and accumulators | Scheme |
 | `(srfi 194)` | random data generators, 30 of 32 | Scheme, on `(srfi 27)` |
@@ -38,6 +39,9 @@ tranches below are the order they were added in.
 
 Written against each specification rather than copied from its reference
 implementation, so every procedure is one this project can test and change.
+Where a specification is genuinely silent the reference implementation is
+read to settle the question rather than guessed at, and the three places
+that happened in `(srfi 133)` are named below.
 Each is embedded with `include_str!`, so `scm` needs no library directory
 beside it and a `scm build` bundle carries them; **a file of the same name
 on `SCM_LIBRARY_PATH` wins**, which is both the override and the loop for
@@ -584,9 +588,108 @@ value that recurs after a gap. And **`generator-find` and `generator-any`
 stop rather than drain**, checked by counting calls against an unbounded
 range generator, which could not terminate otherwise.
 
+## Tranche ten: the boxed vectors, and sixteen procedures not written
+
+2026-10-15. `(srfi 133)`.
+
+This is `(srfi 160)`'s counterpart for the case where the elements are not
+numbers: the same surface, over ordinary boxed vectors. Forty-two
+procedures, of which **twenty-six are written here and sixteen are not**.
+
+### Re-exporting is the implementation
+
+Sixteen of the forty-two are R7RS base procedures: `make-vector`,
+`vector`, `vector?`, `vector-ref`, `vector-length`, `vector-set!`,
+`vector-copy`, `vector-copy!`, `vector-fill!`, `vector-append`,
+`vector->list`, `list->vector`, `string->vector`, `vector->string`,
+`vector-map` and `vector-for-each`. The prelude already defines every one
+of them to this SRFI's specification, optional `start`/`end` arguments
+included, and `vector-map`/`vector-for-each` already take any number of
+vectors and stop at the shortest.
+
+So the library defines none of them. `(export vector-ref)` with no local
+definition falls back to the global binding — the case
+[libraries.md](libraries.md) built the fallback for — and importing
+`(srfi 133)` supplies all forty-two. The alternative was sixteen
+reimplementations whose only possible contribution is drifting from the
+ones the rest of the system uses. What the test file checks instead is
+that the import really supplies them, with the optional arguments
+present: a fallback that silently did not fire would otherwise look
+exactly like success.
+
+### Three argument orders, each pinned by a test that would fail reversed
+
+This SRFI is unusually easy to implement backwards, in three places, and
+each one is silent — the code runs and returns a plausible wrong answer.
+
+**`kons` takes the state first.** `(vector-fold kons knil vec)` applies
+`(kons state elt)`, which is the opposite of SRFI 1's `fold`, where it is
+`(f elem acc)`. Both libraries are shipped here, so the two orders are
+live in the same system. The test folds with `cons` and asserts `(3 2 1)`
+— the order that comes out the other way round is `(1 2 3)`, which is
+exactly what a reader would expect of a left fold and exactly what this
+SRFI does not do. `vector-fold-right` visits right to left but still
+takes the state first.
+
+**`cmp` takes the element first.** `vector-binary-search` applies
+`(cmp element value)`, and with the arguments swapped every sign inverts,
+so the search walks away from the target and returns `#f`. The tests
+search for the first, middle and last elements of a sorted vector with
+`(lambda (a b) (- a b))`; all three would be `#f` under the other order,
+and a single "absent" case would not have caught it.
+
+**`vector-unfold-right` fills from the end.** The first element `f`
+yields lands in the *last* slot, so the obvious test
+(`(values x (+ x 1))` from 0) gives `#(4 3 2 1 0)` and not
+`#(0 1 2 3 4)`. The SRFI's own idiom for it is reversing a vector, which
+is also asserted.
+
+### Three things the prose does not say, settled from the reference
+
+Unlike `(srfi 125)`, this SRFI has a reference implementation reachable
+from here — `gh api repos/scheme-requests-for-implementation/srfi-133`
+— and three questions the specification leaves open were settled by
+reading it rather than by choosing.
+
+**An empty vector gives `#f` for `vector-any` and `#t` for
+`vector-every`.** The prose defines both in terms of "the first" and "the
+last" set of elements and says nothing about there being none. The
+reference's loops open with `(and (not (= i len)) …)` and
+`(or (= i len) …)` respectively, which answers it. Both are asserted here,
+because they are the cases a caller reaches by accident.
+
+**`vector-unfold` accepts zero seeds**, and then `f` is applied to the
+index alone and returns the element alone, rather than returning one
+value by a different protocol. The signature's `initial-seed ...` admits
+zero and the reference has a separate `tabulate!` case that does this.
+
+**`vector-partition`'s second value** is described by the specification as
+the number of elements satisfying the predicate and by the reference's
+own comment as the index of the leftmost element that does not. These are
+the same number, since the satisfying elements come first — the test
+asserts both readings of it, including that indexing the result at the
+count lands on the first failing element.
+
+### Two places this deliberately differs
+
+`vector-partition` makes **one** pass, applying the predicate exactly once
+per element. The reference applies it twice, once through its internal
+`vector-count`, which any predicate with a side effect would see and
+which nothing in the specification asks for.
+
+`vector-binary-search` accepts the optional `start`/`end` that the
+reference implementation takes and the signature in the specification's
+body omits — a superset, and the range form is tested.
+
+`vector-reverse-copy!` copies from a snapshot of the source range, so
+`to` and `from` may be the same vector with overlapping ranges. That is
+what reversing a slice in place *is*, the SRFI permits it, and the
+element-at-a-time version quietly corrupts the overlap. Two overlapping
+cases are asserted, one of them shifted so that a naive implementation
+gives a visibly wrong answer rather than a coincidentally right one.
+
 ## What is still absent
 
-`(srfi 13)`/`(srfi 130)` strings; `(srfi 14)` char sets; `(srfi 133)`, the operations on *boxed*
-vectors, which is 160's counterpart for the case where the elements are not
-numbers; and the control and testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
+`(srfi 13)`/`(srfi 130)` strings; `(srfi 14)` char sets; and the control and
+testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
 `(srfi 63)` supersedes it.

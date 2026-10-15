@@ -136,6 +136,21 @@ fn the_generators_and_accumulators_pass_on_both_tiers() {
     }
 }
 
+/// `(srfi 133)` is `(srfi 160)`'s counterpart for boxed elements, and
+/// sixteen of its forty-two exports are R7RS base procedures the prelude
+/// already defines to the SRFI's specification -- so they are re-exported
+/// rather than rewritten, and the test checks that importing the library
+/// really supplies them. The rest of the checks pin the three argument
+/// orders this SRFI is easy to get backwards (`kons` takes the state
+/// first, `cmp` the element first, `vector-unfold-right` fills from the
+/// end) and the two empty-vector answers its prose leaves open.
+#[test]
+fn srfi_133_vector_operations_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "133.scm"), "()", "(srfi 133) on {tier:?}");
+    }
+}
+
 /// `(scm linalg)` is not an SRFI -- no SRFI covers linear algebra -- but it
 /// is gated the same way. The checks that matter are the ones catching a
 /// silently wrong picture: the cross product's handedness, ray's Euler
