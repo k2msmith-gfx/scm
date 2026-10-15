@@ -116,6 +116,31 @@ the same kind of flag.
 This matters for §3.1: two of the four cuts ray's plan proposes are not
 deviations at all.
 
+### PROPOSED 2026-10-15: revisit the integer half, not the tower
+
+§2.3 declined the whole tower before there was evidence either way. There
+is evidence now, and it points at a narrower change than "the numeric
+tower": **unbounded exact integers, and not exact rationals.**
+
+Nine places have surfaced where the bound showed through
+([numeric-tower.md](numeric-tower.md) §2), but read honestly they are not
+nine bugs — three are hashes where the reduced-modulus code is correct
+merely unconventional, three are genuine capability gaps and all three are
+about the 64th bit, one is complex numbers, one is resolved, and **one is
+an argument against rationals**: Steel's `8/3` silently turned `lorenz`
+into bignum arithmetic, and `(/ 8 3)` returning a flonum is a deliberate
+Janet-compatibility decision (§4.7) that `ratios` would reverse for every
+ray scene.
+
+Three things measured in the code make the integer half cheaper than it
+looks: the leaf compiler is `f64` throughout so the hot path never sees an
+exact integer; `code.rs` has **zero** `Fixnum` occurrences, so T1 has no
+inline arithmetic fast path to extend; and a bignum needs no new `Value`
+tag, belonging in the heap as `Obj::Bignum` behind the existing
+`Value::Obj`. The work is `prim.rs`, the reader and the writer.
+
+Proposed as **S18**, sized 0.6, in §9. **Not decided.**
+
 ### 2.4 The verb counts, re-measured
 
 From `api/ray/api.jsonl`, 218 verbs:
@@ -1419,6 +1444,7 @@ ray's plan; those numbers are estimates.
 | **S17** | **done 2026-10-15** — [linalg.md](linalg.md). **`(scm linalg)`**: vec3/vec4/mat4/quaternion, ~95 procedures. The first library here that is not a standards implementation, because **no SRFI covers linear algebra** — so every convention is a decision, and each was read out of ray's source rather than assumed: glam's column-major mat4, `x y z w` quaternions, and the `Rx·Ry·Rz` Euler order that cost ray two wrong renders, which is now in the procedure's *name* and pinned by a test asserting it is **not** the other order. **Two layers**, because `leaf_shapes.rs` measures the leaf compiler as accepting only scalar parameters and a one- or three-`f64` result: the vector layer is readable and the `*` component layer is compilable, the former defined in terms of the latter so they cannot drift. Measured **406×** on a 200k-iteration kernel, same answer to the last digit. | 0.7 | **met**: passes on T0 and T1; the shipped library's component layer compiles and its vector layer is refused, both asserted; handedness, Euler order, inverse-transpose normals, shortest-path slerp, gimbal lock and 180° quaternion extraction all pinned |
 | **S17b** | **done 2026-10-15** — [noise.md](noise.md). **`(scm noise)`**: 25 procedures — hashes, value/Perlin/simplex/Worley bases, and fbm, turbulence and ridged sums. **Every one is leaf-compilable and `leaf_noise.rs` asserts it by name**, because the whole point is removing ray's workaround: `orange.janet` bakes noise into small tables since "fbm is four octaves of four hashes — sixteen math/sin per call". Measured on the corpus's own shape, a 256×256 sheet at four octaves: **6.8 ms compiled against 932 ms interpreted, 138×**, and **83.5 ns for one texel called from Rust** — which is the difference between baking a table and sampling per texel. Found a fourth leaf limit: a loop may only be called in tail position, so the nested neighbour search works for `worley-2` and fails for `worley-2-f2`, whose accumulator has two parts; all three now run one flat loop. Gradients are selected arithmetically, there being no bitwise operation in the subset and no way for a leaf to see a private table. | 0.6 | **met**: properties pass on T0 and T1 — gradient noise exactly zero on the lattice, continuity across boundaries, exact tiling, fbm range held over 1–8 octaves — and the compiled field matches the interpreted one to 1e-12 over a swept grid |
 | **S14** ◇ | **done 2026-10-13** (the self-contained half). **`scm build FILE [-o OUT]`**: the running `scm` copied with the program and a 16-byte trailer appended; at startup a binary reads its own tail and runs what it finds. No linker, no LLVM, and on macOS the ad-hoc signature tolerates the trailer, so no `codesign` either. The program is embedded as source and compiled by T1 at startup, within the boot budget. **The other half of "AOT" — the program as machine code — needs T2's codegen as an object-file sink, and stays with the S13 decision.** Found on the way: a script that called `exit` lost its captured output, and `exit` did not flush stdout. | 0.8 (0.2 spent) | **met**: `scm_build_makes_a_binary_that_runs_without_a_toolchain` builds and runs the bundle with an empty `PATH`, with arguments, stdin and the exit status the program's |
+| **S18** | **PROPOSED 2026-10-15, not decided** — [numeric-tower.md](numeric-tower.md). **Unbounded exact integers.** `Obj::Bignum` behind the existing `Value::Obj` tag, so no native tag number moves; `arith()`'s already-checked overflow branch widens instead of raising; normalisation back to `Fixnum` whenever a result fits, without which `eqv?` and `equal-hash` disagree with themselves; reader, writer, `number->string`/`string->number`, mixed-exactness comparisons, `equal-hash`, `(srfi 151)`. Claim `exact-closed`; teach the fuzzer big literals; rewrite the three reduced-modulus hashes conventionally. **Rationals and complex numbers stay declined on the evidence, not for budget** — `(/ 8 3)` returning a flonum is deliberate Janet compatibility (§4.7) and Steel's `8/3` silently turned `lorenz` into bignum arithmetic. Touches neither tier: the leaf compiler is `f64` throughout and T1 has no inline fixnum arithmetic. | 0.6 | `(* 1000000000 1000000000)` is exact and prints exactly; big literals round-trip through read/write; T0/T1/T2 agree under the fuzzer; `exact-closed` claimed and true; **the benchmark suite does not regress** on the fixnum-heavy programs |
 
 ### Track B — ray adopts scm (a separate project)
 
