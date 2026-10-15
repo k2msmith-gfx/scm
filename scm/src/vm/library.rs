@@ -45,12 +45,14 @@ pub struct Library {
 /// the library path wins, which is how one is overridden or developed.
 pub const EMBEDDED: &[(&str, &str)] = &[
     ("(scm test)", include_str!("../../lib/scm/test.sld")),
+    ("(scm hash-table)", include_str!("../../lib/scm/hash-table.sld")),
     ("(srfi 1)", include_str!("../../lib/srfi/1.sld")),
     ("(srfi 2)", include_str!("../../lib/srfi/2.sld")),
     ("(srfi 4)", include_str!("../../lib/srfi/4.sld")),
     ("(srfi 8)", include_str!("../../lib/srfi/8.sld")),
     ("(srfi 63)", include_str!("../../lib/srfi/63.sld")),
     ("(srfi 69)", include_str!("../../lib/srfi/69.sld")),
+    ("(srfi 125)", include_str!("../../lib/srfi/125.sld")),
     ("(srfi 128)", include_str!("../../lib/srfi/128.sld")),
     ("(srfi 151)", include_str!("../../lib/srfi/151.sld")),
     ("(srfi 26)", include_str!("../../lib/srfi/26.sld")),

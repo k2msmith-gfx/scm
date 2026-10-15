@@ -70,6 +70,15 @@ fn the_hash_table_and_comparator_srfis_pass_on_both_tiers() {
     }
 }
 
+/// `(srfi 125)` is the second interface onto the same table type, so this
+/// also checks that a table made through one works through the other.
+#[test]
+fn the_intermediate_hash_table_srfi_passes_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "125.scm"), "()", "(srfi 125) on {tier:?}");
+    }
+}
+
 #[test]
 fn equal_hash_agrees_with_equal_and_terminates_on_a_cycle() {
     // The one contract a hash table rests on: if two things are `equal?`

@@ -5,8 +5,8 @@
 
 The general-purpose goal needs these: R7RS-small alone is a language, not a
 toolkit, and code written for other Schemes imports SRFIs before it does
-anything else. `define-library` (S15) made them possible to ship; this is
-the first tranche.
+anything else. `define-library` (S15) made them possible to ship; the
+tranches below are the order they were added in.
 
 ## What is in
 
@@ -20,10 +20,12 @@ the first tranche.
 | `(srfi 63)` | arrays and shared arrays | **native views**, Scheme prototypes |
 | `(srfi 69)` | basic hash tables | Scheme, on **native hash functions** |
 | `(srfi 111)` | boxes | Scheme, on records |
+| `(srfi 125)` | intermediate hash tables, ~45 procedures | Scheme, same table as `(srfi 69)` |
 | `(srfi 128)` | comparators | Scheme |
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
 | `(scm test)` | `check`, `check-raises`, `test-failures` | Scheme |
+| `(scm hash-table)` | the table `(srfi 69)` and `(srfi 125)` share | Scheme, on **native hash functions** |
 
 Written against each specification rather than copied from its reference
 implementation, so every procedure is one this project can test and change.
@@ -244,10 +246,62 @@ arbitrarily large integers instead; in one that wraps, it would have
 wrapped. This implementation does neither, so the arithmetic had to be
 written to fit.
 
+## Tranche four: the intermediate hash tables
+
+2026-10-14. `(srfi 125)`.
+
+### One table, two interfaces
+
+`(srfi 69)` and `(srfi 125)` are two interfaces onto one data type, so the
+table moved into `(scm hash-table)` and each of them now exports a view of
+it. That is not only tidier. SRFI 125 says it is compatible with SRFI 69,
+and a table made through either has to work through the other, which two
+separate implementations could not give. Nothing in SRFI 69's interface
+changed.
+
+What 125 adds over 69 is the whole-table work: `fold`, `map`, `map!`,
+`map->list`, `for-each`, `prune!`, `find`, `count`, `pop!`, `intern!`, the
+two-value `entries`, and the four set operations `union!`,
+`intersection!`, `difference!` and `xor!`. Keys are a `(srfi 128)`
+comparator rather than a loose pair of procedures, and the deprecated
+form that takes a bare equality predicate is accepted too.
+
+### Three things this SRFI does that surprise people
+
+**A table can be immutable, and two constructors give you one.** A table
+from `hash-table` or from `hash-table-copy` with no second argument is
+immutable, and mutating it raises. `make-hash-table`,
+`alist->hash-table`, `hash-table-unfold` and `hash-table-empty-copy` all
+give mutable tables. The flag is named `mutable` because it is an opt-in.
+Since mutability is fixed when the record is made, an immutable table
+cannot be built and then frozen; the core grew a copy constructor that
+builds the result immutable from birth, which is also what
+`hash-table-copy` needs.
+
+**`hash-table-walk` and `hash-table-for-each` are the same operation with
+their arguments in opposite orders.** `for-each` takes the procedure
+first, `walk` takes the table first because it is SRFI 69's name and keeps
+SRFI 69's order. That is the entire reason both exist, and getting it
+wrong is silent: the procedure is simply called with a table.
+
+**`hash-table-fold` reads its own arguments two ways.** It is
+`(hash-table-fold table proc seed)`, but when the first argument is a
+procedure the arguments are taken in SRFI 69's order instead. The SRFI
+asks for this by name, and dispatching on `procedure?` is unambiguous
+because a table is never a procedure.
+
+### Deleting while walking
+
+`prune!`, and so `intersection!` and `difference!` with it, cannot delete
+during the fold: the walk is standing on the bucket chain that a delete
+rewrites. Each of them collects the doomed keys first and deletes
+afterwards. `xor!` has the same shape for a different reason -- it
+gathers the additions before changing anything, so that a key just added
+from the second table is not then pruned as one the two had in common.
+
 ## What is still absent
 
-`(srfi 125)`, the intermediate hash tables, which are a large API over
-`(srfi 128)` and `(srfi 69)`'s machinery; `(srfi 13)`/`(srfi 130)`
+`(srfi 13)`/`(srfi 130)`
 strings; `(srfi 14)` char sets; `(srfi 133)` vectors and `(srfi 160)`'s
 per-type numeric-vector operations -- of those two, 160 is the one that
 matters for graphics, since 133 operates on boxed vectors; and the control
