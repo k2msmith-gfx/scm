@@ -27,6 +27,7 @@ tranches below are the order they were added in.
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
 | `(srfi 133)` | vector operations on boxed elements, 42 procedures | Scheme; **16 re-exported from the prelude** |
 | `(srfi 14)` | char-sets, 62 bindings | Scheme, on a **native bytevector**; Latin-1 |
+| `(srfi 13)` | the string library, ~87 procedures | Scheme, on `(srfi 14)` |
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
 | `(srfi 158)` | generators and accumulators | Scheme |
 | `(srfi 194)` | random data generators, 30 of 32 | Scheme, on `(srfi 27)` |
@@ -808,8 +809,127 @@ tested instead. `char-set:letter` and `char-set:upper-case` agree with
 their predicates exactly, which the tests also assert — so a change on
 either side shows up here rather than as a surprise in `(srfi 13)`.
 
+## Tranche twelve: the string library, and a SRFI that disagrees with itself
+
+2026-10-15. `(srfi 13)`.
+
+The library `(srfi 14)` was brought forward for. It is the largest here —
+about 87 procedures — and the oldest in spirit: it predates R7RS, which
+shows up in three separate ways.
+
+### It needs char-sets, and the way past them is a predicate
+
+Twelve procedures take a "char/char-set/pred" criterion, and
+`string-trim` *defaults* to `char-set:whitespace`, so the dependency is
+not optional even for a caller who passes nothing. One internal helper,
+`%pred`, turns any of the three into a predicate, and it is the whole of
+the SRFI 14 dependency.
+
+Because char-sets here are Latin-1, that helper is also the escape hatch:
+a **predicate criterion never goes through SRFI 14 at all**, so
+`(string-index "aλb" char-alphabetic? 1 2)` finds the λ where
+`(string-index "aλb" char-set:letter 1 2)` cannot. Both are asserted, side
+by side, so the trade is visible rather than folklore.
+
+### Two names collide with R7RS, and narrowing them would be a regression
+
+`string-map` and `string-for-each` exist in both standards with different
+shapes: R7RS takes any number of strings and stops at the shortest, SRFI
+13 takes one string and an optional `[start end]`. Defining the SRFI's
+shape would mean that merely importing this library broke ordinary R7RS
+code.
+
+They are therefore **supersets of both shapes**, told apart by what
+follows the first string — another string means R7RS, an integer means
+SRFI 13. `(srfi 1)` does exactly this for `map` and `for-each`, and the
+tests assert both shapes of both procedures.
+
+### It disagrees with itself about where the criterion goes
+
+This is the thing most likely to bite, and it is not a defect in the
+implementation — both orders are as specified:
+
+| criterion first | string first |
+|---|---|
+| `string-every` | `string-index` |
+| `string-any` | `string-index-right` |
+| `string-filter` | `string-skip` |
+| `string-delete` | `string-skip-right` |
+| | `string-count` |
+| | `string-trim`, `-right`, `-both` |
+| | `string-tokenize` |
+
+So it is `(string-filter pred s)` but `(string-count s pred)`. The later
+string SRFIs regularised this; here every one of them is pinned by a test,
+and one test puts the two orders side by side.
+
+### `string-pad` truncates on the side it pads
+
+`string-pad` pads on the left to reach the target length — and when the
+string is *already* longer, it keeps the **rightmost** characters.
+`(string-pad "hello" 3)` is `"llo"`, not `"hel"`. `string-pad-right` is
+the mirror image. Getting this backwards silently keeps the wrong half of
+the string, which no type error will catch, so both directions are
+asserted.
+
+### The comparisons answer an index, and the spec's special case is not one
+
+`string<`, `string>`, `string<>` and the rest answer the index where the
+two strings diverge rather than `#t` — a true value that also tells you
+where. Only `string=` answers `#t`, having nothing useful to point at.
+
+The specification says `string-compare` applies its procedure to the
+mismatch index, and that "in the case of equality, this is `end1`". It is
+tempting to implement that as a separate rule, and the first version here
+did; it is wrong. The index is **always** `start1 + match`, one past the
+common prefix, and the equality case is the same rule seen from a
+different angle: when the ranges are equal the common prefix is all of
+range 1, so `start1 + match` already *is* `end1`.
+
+Treating it as a special case gets one asymmetric case wrong — when range
+2 is a proper prefix of range 1, as in `(string> "abc" "ab")`, it reports
+`end1` (3) where the strings actually run out at 2. That was caught by a
+test rather than by reading, which is the argument for writing the test
+before trusting the code: both directions of it are now pinned.
+
+### Three smaller things
+
+`string-unfold` has six arguments and the specification states the
+identity it must satisfy, which is worth quoting as the implementation's
+comment does: `base` is the leftmost part of the result and `make-final`,
+applied to the terminal seed, is the rightmost. `string-unfold-right` is
+the mirror image in both respects — `base` on the *right* — and that is
+what makes it the idiom for reversing a string.
+
+`string-join`'s `infix` and `strict-infix` grammars differ in exactly one
+place, the empty list, where `infix` answers `""` and `strict-infix`
+raises. That is the whole reason the second one exists: `infix` is not
+invertible there.
+
+The `/shared` procedures — `substring/shared`, `string-append/shared`,
+`string-concatenate/shared`, `string-concatenate-reverse/shared` — are
+*permitted* to share storage, not required to. scm's strings are
+`Vec<char>` with no shared-slice representation, so each copies, which
+conforms; a caller relying on `eq?`-ness would be relying on something the
+SRFI never promised.
+
+And unlike `(srfi 1)` and `(srfi 14)`, **the `!` procedures here really do
+mutate**. Those two libraries' `!` procedures are *linear-update*
+variants, which the SRFI explicitly lets an implementation make pure.
+`string-upcase!`, `string-reverse!`, `string-map!` and `string-xcopy!` are
+specified as mutators returning an unspecified value — a caller has no
+other way to get the result — so they mutate, and the tests check that
+they do.
+
+`string-lib-internals` — `string-parse-start+end`, `let-string-start+end`,
+`make-kmp-restart-vector`, `kmp-step`, `string-kmp-partial-search` — is a
+**separate library** in the SRFI and is not provided. Its purpose is to
+let *other* libraries parse SRFI 13-style argument lists; nothing here
+needs to export that, and `string-contains` uses a plain scan, KMP being
+worth its restart vector only for long self-similar patterns.
+
 ## What is still absent
 
-`(srfi 13)`/`(srfi 130)` strings; and the control and testing SRFIs.
-`(srfi 47)` will not be added: it is withdrawn and `(srfi 63)` supersedes
-it.
+`(srfi 130)`, which is SRFI 13 again with cursors instead of indices; and
+the control and testing SRFIs. `(srfi 47)` will not be added: it is
+withdrawn and `(srfi 63)` supersedes it.

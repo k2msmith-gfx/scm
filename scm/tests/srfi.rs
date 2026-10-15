@@ -136,6 +136,23 @@ fn the_generators_and_accumulators_pass_on_both_tiers() {
     }
 }
 
+/// `(srfi 13)` strings -- the library `(srfi 14)` was brought forward for.
+/// It predates R7RS and is inconsistent with *itself* about argument
+/// order, so most of this test pins orders: the criterion comes first in
+/// `string-every`/`-any`/`-filter`/`-delete` and second in
+/// `string-index`/`-skip`/`-count`/`-trim`/`-tokenize`; `string-pad`
+/// truncates on the side it pads; `string-fold` takes the character
+/// first; and the comparisons answer a mismatch index rather than `#t`.
+/// `string-map` and `string-for-each` are defined as supersets of both
+/// their R7RS and their SRFI 13 shapes, so importing this library does
+/// not take the R7RS behaviour away, and both shapes are asserted.
+#[test]
+fn srfi_13_strings_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "13.scm"), "()", "(srfi 13) on {tier:?}");
+    }
+}
+
 /// `(srfi 14)` char-sets, which `(srfi 13)` needs for twelve of its
 /// procedures. Char-sets here are **Latin-1**, which the SRFI allows (it
 /// makes `char-set:full` relative to the implementation's range), scm's

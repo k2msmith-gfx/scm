@@ -78,6 +78,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     ("(srfi 132)", include_str!("../../lib/srfi/132.sld")),
     ("(srfi 133)", include_str!("../../lib/srfi/133.sld")),
     ("(srfi 14)", include_str!("../../lib/srfi/14.sld")),
+    ("(srfi 13)", include_str!("../../lib/srfi/13.sld")),
 ];
 
 /// Every embedded library's name, for `(scm libraries)` and the gate.
