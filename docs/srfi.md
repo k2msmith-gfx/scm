@@ -26,6 +26,7 @@ tranches below are the order they were added in.
 | `(srfi 128)` | comparators | Scheme |
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
+| `(srfi 158)` | generators and accumulators | Scheme |
 | `(srfi 194)` | random data generators, 30 of 32 | Scheme, on `(srfi 27)` |
 | `(srfi 160 base)` | `(srfi 4)` under SRFI 160's name | the same bindings |
 | `(srfi 160 <type>)` | ~57 operations for each of ten element types | Scheme, written once |
@@ -535,11 +536,55 @@ answer: `any?-ec` over 100 values must call its test four times to find
 `(> i 2)`, and `first-ec` once. An unbounded `:integers` generator proves
 the point, since the comprehension could not terminate otherwise.
 
+## Tranche nine: generators, and the consumer the earlier tranches lacked
+
+2026-10-15. `(srfi 158)`.
+
+A generator is a thunk that yields its next value and then the
+end-of-file object for ever after. That is the whole protocol, which is
+why two earlier libraries were already producing generators with nothing
+to consume them: `(srfi 160)` ships a `make-@vector-generator` for each of
+ten element types, and every one of `(srfi 194)`'s samplers is a
+generator. The test file asserts those pipelines rather than only the
+library in isolation.
+
+For procedural work the point is that a pipeline costs no intermediate
+lists. Scattering points, filtering them against a surface and keeping the
+first few that pass should not build the discarded million first, and
+pulling one value at a time means it does not. The test pulls from a
+hundred thousand and keeps four.
+
+### `make-coroutine-generator` is eager, and capped
+
+The SRFI's version suspends the producer at each `yield` and resumes it on
+the next call, which needs a **re-entrant** continuation. Plan §3.1 makes
+continuations escape-only, so it cannot be done.
+
+What is here runs the producer to completion when the generator is *made*,
+collects what it yields, and hands the values out. Two real consequences.
+Side effects happen at construction rather than at consumption. And a
+producer that never returns cannot work — so rather than hanging, it
+**raises** once it has yielded `%coroutine-limit` values, with a message
+saying why and what to use instead. A hang with no output is the worst
+failure to debug, so it is converted into one that explains itself. The
+limit is a parameter, so a program that genuinely needs more can say so.
+
+`make-for-each-generator` is built on it and is unaffected, because a
+`for-each` over a collection always terminates.
+
+### What the tests insist on
+
+Three properties that a working-looking implementation can miss.
+**Exhaustion is permanent**, so a drained generator keeps returning the
+end-of-file object rather than restarting. **`gdelete-neighbor-dups`
+removes only consecutive duplicates**, which the test pins by keeping a
+value that recurs after a gap. And **`generator-find` and `generator-any`
+stop rather than drain**, checked by counting calls against an unbounded
+range generator, which could not terminate otherwise.
+
 ## What is still absent
 
-`(srfi 158)` generators and accumulators, which is the next one and the
-library that would consume what `(srfi 160)`'s `make-@vector-generator`
-produces; `(srfi 13)`/`(srfi 130)` strings; `(srfi 14)` char sets; `(srfi 133)`, the operations on *boxed*
+`(srfi 13)`/`(srfi 130)` strings; `(srfi 14)` char sets; `(srfi 133)`, the operations on *boxed*
 vectors, which is 160's counterpart for the case where the elements are not
 numbers; and the control and testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
 `(srfi 63)` supersedes it.

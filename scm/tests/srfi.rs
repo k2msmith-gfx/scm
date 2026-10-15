@@ -124,6 +124,18 @@ fn the_eager_comprehensions_pass_on_both_tiers() {
     }
 }
 
+/// `(srfi 158)` is also what finally consumes what two earlier libraries
+/// were already producing: `(srfi 160)`'s `make-@vector-generator` and
+/// `(srfi 194)`'s samplers are generators in this sense, and until this
+/// library there was nothing to pull them with. The test asserts those
+/// pipelines, not just the library in isolation.
+#[test]
+fn the_generators_and_accumulators_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "158.scm"), "()", "(srfi 158) on {tier:?}");
+    }
+}
+
 #[test]
 fn equal_hash_agrees_with_equal_and_terminates_on_a_cycle() {
     // The one contract a hash table rests on: if two things are `equal?`
