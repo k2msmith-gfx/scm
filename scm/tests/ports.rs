@@ -164,9 +164,14 @@ fn the_round_trip_holds_through_ports_too() {
                        (round-trip "#(1 2)")
                        (round-trip "1.0")
                        (round-trip ":at"))"##;
+    // `[1 2]` does not come back as itself, and that is the policy rather
+    // than a gap: brackets are an accepted *input* spelling and the writer
+    // emits one canonical form (plan §4.9), so both vector spellings
+    // round-trip to `#(1 2)`. What has to hold is that reading the output
+    // again gives the same value, which it does.
     assert_eq!(
         eval(src),
-        r##"("(1 2.5 \"s\" #\\a)" "[1 2]" "#(1 2)" "1.0" ":at")"##
+        r##"("(1 2.5 \"s\" #\\a)" "#(1 2)" "#(1 2)" "1.0" ":at")"##
     );
 }
 

@@ -103,11 +103,13 @@ fn define_set_and_globals_are_cells() {
 #[test]
 fn brackets_construct_and_hash_vectors_do_not() {
     // The payoff of the reader's `bracket` flag (plan §4.5): same elements,
-    // different meaning.
-    assert_eq!(eval("(define r 2) [0 (* 2 r) 0]"), "[0 4 0]");
+    // different meaning. The difference is in the *value* -- one has been
+    // evaluated, the other has not -- and not in how it prints, because
+    // both print canonically (plan §4.9).
+    assert_eq!(eval("(define r 2) [0 (* 2 r) 0]"), "#(0 4 0)");
     assert_eq!(eval("'#(0 (* 2 r) 0)"), "#(0 (* 2 r) 0)");
     assert_eq!(eval("#(1 2 3)"), "#(1 2 3)");
-    assert_eq!(eval("[]"), "[]");
+    assert_eq!(eval("[]"), "#()");
     assert_eq!(eval("(vector-ref [10 20 30] 1)"), "20");
     assert_eq!(eval("(vector-length [1 2 3])"), "3");
 }

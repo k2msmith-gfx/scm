@@ -883,6 +883,38 @@ Three smaller consequences of the same requirement:
 And it raises the stakes on §9's S9: conformance breadth stops being a badge
 and becomes how often a generated script works first time.
 
+#### A vector prints as `#(…)`, whichever spelling built it
+
+**Added 2026-10-14.** Until now the writer was the one place that broke the
+policy just stated. The reader's `bracket` flag was printed as well as kept,
+so a vector reproduced the spelling it was born with:
+
+```scheme
+(equal? (vector 1 2) #(1 2))   ;; => #t
+(write (vector 1 2))           ;; => [1 2]
+(write #(1 2))                 ;; => #(1 2)
+```
+
+Two defects in one. **Two `equal?` values printed differently**, on nothing
+more than how each was made — every constructor defaulted to brackets,
+including `vector`, `make-vector`, `vector-copy`, `vector-append`,
+`list->vector` and `string->vector`, while a `#(…)` literal kept its own
+shape. And **the output was not R7RS**, which requires `#(…)` from `write`;
+no other Scheme reads `[1 2]` as a vector, so nothing scm printed could be
+read anywhere else. The conformance suite never caught it because the suite
+compares values, not printed text.
+
+So the writer now always emits `#(…)`. The flag stays on the value, because
+it still decides what §4.5 is about — whether the elements get evaluated —
+and `let` and the other binding forms still need it to tell a binding from a
+vector. It is simply not part of the value, so it is not printed.
+
+The cost is that `[1 2]` no longer round-trips as text. That is the policy and
+not a gap: brackets are an accepted *input* spelling, `#(…)` is the canonical
+output, and what the round trip has to preserve is the **value**, which it
+does. If ray ever wants bracket output for positions, that belongs in a
+printer parameter rather than in the value.
+
 ### 4.6 The corpus is converted, not preserved
 
 **Clarified 2026-10-12: syntax compatibility with Janet is not a constraint.**

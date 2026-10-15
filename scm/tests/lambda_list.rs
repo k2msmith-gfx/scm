@@ -222,7 +222,7 @@ fn a_verb_shaped_like_rays() {
 "#;
     assert_eq!(
         eval(src),
-        "(([0 1 0] 0.8 #f :anonymous) ([1 2 3] 1.0 #f :anonymous) ([0 0 0] 2 #f :ball))"
+        "((#(0 1 0) 0.8 #f :anonymous) (#(1 2 3) 1.0 #f :anonymous) (#(0 0 0) 2 #f :ball))"
     );
 }
 

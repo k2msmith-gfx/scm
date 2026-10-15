@@ -86,10 +86,10 @@ fn in_place_copies_and_conversions() {
     );
     assert_eq!(
         eval("(let ([v (make-vector 4 0)]) (vector-copy! v 1 [7 8]) v)"),
-        "[0 7 8 0]"
+        "#(0 7 8 0)"
     );
-    assert_eq!(eval("(vector-append [1] [2 3])"), "[1 2 3]");
-    assert_eq!(eval(r#"(string->vector "ab")"#), "[#\\a #\\b]");
+    assert_eq!(eval("(vector-append [1] [2 3])"), "#(1 2 3)");
+    assert_eq!(eval(r#"(string->vector "ab")"#), "#(#\\a #\\b)");
     assert_eq!(eval(r#"(vector->string [#\a #\b])"#), "\"ab\"");
     assert_eq!(eval("(list-copy '(1 2 3))"), "(1 2 3)");
 }
@@ -125,7 +125,7 @@ fn write_terminates_on_a_cycle() {
     assert_eq!(
         eval("(let ([v (make-vector 1 0)]) (vector-set! v 0 v)
                 (with-output-to-string (lambda () (write v))))"),
-        "\"#0=[#0#]\""
+        "\"#0=#(#0#)\""
     );
     assert_eq!(
         eval("(let ([p (cons 1 2)]) (set-car! p p)

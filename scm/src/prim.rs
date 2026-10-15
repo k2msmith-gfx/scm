@@ -377,8 +377,9 @@ fn step(e: &Engine, v: Value) -> Step {
 }
 
 fn vector(e: &mut Engine, a: &[Value]) -> PResult {
-    // `(vector …)` and `[…]` build the same thing, and it prints with
-    // brackets because that is how ray writes a position.
+    // `(vector …)` and `[…]` build the same thing. The flag records that
+    // the elements were evaluated, which is true of whatever a constructor
+    // makes; it no longer affects how the value prints (plan §4.9).
     Ok(e.vector(a.to_vec(), true))
 }
 

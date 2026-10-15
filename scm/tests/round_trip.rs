@@ -71,6 +71,9 @@ fn structures_round_trip() {
         "(1 2 . 3)",
         "(a (b (c)))",
         "#(1 2 3)",
+        // Either spelling reads to the same value, and the round trip is on
+        // values rather than text -- so these two print alike (plan §4.9)
+        // and still come back `equal?` to what they were.
         "[1 2 3]",
         "[[1 2] [3 4]]",
         "#u8(0 1 255)",
@@ -85,17 +88,23 @@ fn structures_round_trip() {
 }
 
 #[test]
-fn brackets_and_hash_vectors_stay_distinct() {
-    // Not decoration: `[a b c]` evaluates its elements and `#(a b c)` does
-    // not, so a writer that printed one as the other would change what a
-    // saved scene means (plan §4.5).
+fn both_vector_spellings_print_canonically() {
+    // The reader does keep the two spellings apart, because `[a b c]`
+    // evaluates its elements and `#(a b c)` does not (plan §4.5). But that
+    // difference is about *evaluation* and is not part of the value, so the
+    // writer emits one canonical spelling for both: plan §4.9's policy is
+    // several accepted input spellings and one canonical output, and `#(…)`
+    // is the only one another Scheme can read. `interpret.rs` tests the
+    // evaluation difference that remains.
     let mut e = Engine::new();
     let brack = scm::read_one("[1 2 3]", &mut e).unwrap().unwrap();
     let hash = scm::read_one("#(1 2 3)", &mut e).unwrap().unwrap();
-    assert_eq!(write_str(&e, brack), "[1 2 3]");
+    assert_eq!(write_str(&e, brack), "#(1 2 3)");
     assert_eq!(write_str(&e, hash), "#(1 2 3)");
-    // Same elements, so `equal?` -- the flag is about evaluation, not identity.
+    // Same elements, so `equal?` -- and two `equal?` values have to print
+    // alike, which is the bug this canonical form fixes.
     assert!(e.equal(brack, hash));
+    assert_eq!(write_str(&e, brack), write_str(&e, hash));
 }
 
 #[test]
@@ -288,7 +297,7 @@ fn a_scene_in_the_shape_ray_writes() {
     // still unevaluated data here, but they are *there* as a call.
     let mut e = Engine::new();
     let vs = Reader::read_all("[(- 0.58) 2]", &mut e).unwrap();
-    assert_eq!(write_str(&e, vs[0]), "[(- 0.58) 2]");
+    assert_eq!(write_str(&e, vs[0]), "#((- 0.58) 2)");
 }
 
 // ---- the question a REPL and an editor both ask -------------------------

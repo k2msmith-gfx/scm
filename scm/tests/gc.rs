@@ -39,7 +39,7 @@ fn the_whole_interpreter_survives_collecting_constantly() {
         .len()
             > 1000
     );
-    assert_eq!(eval_stressed("(define r 2) [0 (* 2 r) 0]"), "[0 4 0]");
+    assert_eq!(eval_stressed("(define r 2) [0 (* 2 r) 0]"), "#(0 4 0)");
     assert_eq!(
         eval_stressed("(define (adder n) (lambda (x) (+ x n))) ((adder 3) 4)"),
         "7"

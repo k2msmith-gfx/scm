@@ -47,13 +47,25 @@ fn unquote_splicing_splices() {
 }
 
 #[test]
-fn vectors_keep_the_brackets_they_were_written_with() {
-    // Plan §4.5: `[…]` and `#(…)` mean different things, so a template must
-    // rebuild the kind it started as.
-    assert_eq!(eval("(define x 5) `[1 ,x]"), "[1 5]");
+fn a_vector_template_rebuilds_a_vector() {
+    // Either spelling of the template gives a vector, and both print
+    // canonically (plan §4.9).
+    assert_eq!(eval("(define x 5) `[1 ,x]"), "#(1 5)");
     assert_eq!(eval("(define x 5) `#(1 ,x)"), "#(1 5)");
-    assert_eq!(eval("(define l (list 2 3)) `[1 ,@l]"), "[1 2 3]");
-    assert_eq!(eval("`[[1] [2]]"), "[[1] [2]]");
+    assert_eq!(eval("(define l (list 2 3)) `[1 ,@l]"), "#(1 2 3)");
+    assert_eq!(eval("`[[1] [2]]"), "#(#(1) #(2))");
+    // The bracket flag is no longer visible in the output, so here is where
+    // it gets checked instead: a template may build a *binding*, and `let`
+    // takes a binding only from a list or a bracket vector (plan §4.9). If
+    // expansion lost the flag, this would hand `let` a vector where a
+    // binding belongs.
+    assert_eq!(
+        eval(
+            "(define-syntax bind (syntax-rules () ((_ n v b) (let ([n v]) b))))
+             (bind x 5 (* x 2))"
+        ),
+        "10"
+    );
 }
 
 #[test]

@@ -31,14 +31,14 @@ fn eval_err(src: &str) -> String {
 
 #[test]
 fn vector_basics() {
-    assert_eq!(eval("(make-vector 3 0)"), "[0 0 0]");
-    assert_eq!(eval("(make-vector 2)"), "[#f #f]");
-    assert_eq!(eval("(let ([v [1 2 3]]) (vector-set! v 1 'x) v)"), "[1 x 3]");
+    assert_eq!(eval("(make-vector 3 0)"), "#(0 0 0)");
+    assert_eq!(eval("(make-vector 2)"), "#(#f #f)");
+    assert_eq!(eval("(let ([v [1 2 3]]) (vector-set! v 1 'x) v)"), "#(1 x 3)");
     assert_eq!(eval("(vector->list [1 2 3])"), "(1 2 3)");
-    assert_eq!(eval("(list->vector '(1 2 3))"), "[1 2 3]");
-    assert_eq!(eval("(vector-copy [1 2])"), "[1 2]");
-    assert_eq!(eval("(let ([v [1 2]]) (vector-fill! v 9) v)"), "[9 9]");
-    assert_eq!(eval("(vector-map (lambda (x) (* x x)) [1 2 3])"), "[1 4 9]");
+    assert_eq!(eval("(list->vector '(1 2 3))"), "#(1 2 3)");
+    assert_eq!(eval("(vector-copy [1 2])"), "#(1 2)");
+    assert_eq!(eval("(let ([v [1 2]]) (vector-fill! v 9) v)"), "#(9 9)");
+    assert_eq!(eval("(vector-map (lambda (x) (* x x)) [1 2 3])"), "#(1 4 9)");
     assert_eq!(eval("(vector? [1 2])"), "#t");
     assert_eq!(eval("(vector? '(1 2))"), "#f");
     assert_eq!(eval("(vector? #(1 2))"), "#t");
@@ -52,7 +52,7 @@ fn vectors_grow() {
     // wrapper, which is what the survey had recommended.
     assert_eq!(
         eval("(let ([v (make-vector 0)]) (vector-push! v 1) (vector-push! v 2) v)"),
-        "[1 2]"
+        "#(1 2)"
     );
     // The idiom the conversion will produce, one-for-one with `array/push`.
     assert_eq!(
@@ -61,7 +61,7 @@ fn vectors_grow() {
                 (vector-length pts))"),
         "4"
     );
-    assert_eq!(eval("(vector-push! (make-vector 0) 1 2 3)"), "[1 2 3]");
+    assert_eq!(eval("(vector-push! (make-vector 0) 1 2 3)"), "#(1 2 3)");
     assert_eq!(eval("(let ([v [1 2]]) (vector-pop! v))"), "2");
     assert!(eval_err("(vector-pop! (make-vector 0))").contains("empty vector"));
     // It is still the same type, so `vector?` and the rest keep working.

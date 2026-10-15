@@ -37,8 +37,8 @@ fn string_copy_takes_the_range_r7rs_gives_it() {
 
 #[test]
 fn the_other_two_conversions_take_it_too() {
-    assert_eq!(eval(r##"(string->vector "abcd" 1 3)"##), "[#\\b #\\c]");
-    assert_eq!(eval(r##"(string->vector "ab")"##), "[#\\a #\\b]");
+    assert_eq!(eval(r##"(string->vector "abcd" 1 3)"##), "#(#\\b #\\c)");
+    assert_eq!(eval(r##"(string->vector "ab")"##), "#(#\\a #\\b)");
     assert_eq!(eval(r"(vector->string (vector #\a #\b #\c) 1)"), "\"bc\"");
     assert_eq!(eval(r"(vector->string (vector #\a #\b #\c) 0 2)"), "\"ab\"");
 }
@@ -46,11 +46,11 @@ fn the_other_two_conversions_take_it_too() {
 #[test]
 fn vector_map_and_for_each_take_several_vectors() {
     // R7RS, and they stop at the shortest -- like `map`.
-    assert_eq!(eval("(vector-map (lambda (x) (* x 10)) (vector 1 2 3))"), "[10 20 30]");
-    assert_eq!(eval("(vector-map + (vector 1 2) (vector 10 20))"), "[11 22]");
+    assert_eq!(eval("(vector-map (lambda (x) (* x 10)) (vector 1 2 3))"), "#(10 20 30)");
+    assert_eq!(eval("(vector-map + (vector 1 2) (vector 10 20))"), "#(11 22)");
     assert_eq!(
         eval("(vector-map list (vector 1 2 9) (vector 3 4))"),
-        "[(1 3) (2 4)]"
+        "#((1 3) (2 4))"
     );
     assert_eq!(
         eval(

@@ -224,13 +224,17 @@ fn emit(
                     out.extend(chars.iter());
                 }
             }
-            Obj::Vector { items, bracket } => {
-                // The flag is not decoration: `[1 2 3]` evaluates its elements
-                // and `#(1 2 3)` does not, so printing one as the other would
-                // change the meaning of a saved scene (plan §4.5).
-                out.push_str(if *bracket { "[" } else { "#(" });
-                let close = if *bracket { "]" } else { ")" };
-                stack.push(Job::Text(close));
+            Obj::Vector { items, .. } => {
+                // Always `#(…)`, whatever spelling built the value. The
+                // bracket flag still distinguishes a constructor from a
+                // literal when the form is *evaluated* (plan §4.5), but it is
+                // not part of the value, and plan §4.9's policy is several
+                // accepted input spellings and one canonical output. Printing
+                // it would make two `equal?` vectors print differently
+                // depending on how each was born, and emit text no other
+                // Scheme can read.
+                out.push_str("#(");
+                stack.push(Job::Text(")"));
                 for (i, &item) in items.iter().enumerate().rev() {
                     stack.push(Job::Val(item, quoted));
                     if i > 0 {
@@ -572,7 +576,7 @@ fn pretty_into(e: &Engine, v: Value, width: usize, indent: usize, out: &mut Stri
     let items: Option<(&str, Vec<Value>)> = match v {
         Value::Obj(r) => match e.obj(r) {
             Obj::Pair(..) => proper_items(e, v).map(|items| ("(", items)),
-            Obj::Vector { items, bracket } => Some((if *bracket { "[" } else { "#(" }, items.clone())),
+            Obj::Vector { items, .. } => Some(("#(", items.clone())),
             _ => None,
         },
         _ => None,
@@ -590,7 +594,7 @@ fn pretty_into(e: &Engine, v: Value, width: usize, indent: usize, out: &mut Stri
         }
         pretty_into(e, *item, width, if i == 0 { indent + open.len() } else { inner }, out);
     }
-    out.push_str(if open == "[" { "]" } else { ")" });
+    out.push(')');
 }
 
 fn proper_items(e: &Engine, mut v: Value) -> Option<Vec<Value>> {

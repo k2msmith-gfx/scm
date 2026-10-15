@@ -159,7 +159,7 @@ fn bracket_bindings_work_everywhere() {
 fn a_bracket_in_an_expression_position_is_still_a_vector() {
     // Position decides, so this is unambiguous and both meanings coexist.
     assert_eq!(eval("(let ([v [1 2 3]]) (vector-ref v 1))"), "2");
-    assert_eq!(eval("(let ([v [1 2 3]]) v)"), "[1 2 3]");
+    assert_eq!(eval("(let ([v [1 2 3]]) v)"), "#(1 2 3)");
 }
 
 // ---- the derived forms -------------------------------------------------
