@@ -99,6 +99,19 @@ fn the_random_source_srfi_passes_on_both_tiers() {
     }
 }
 
+/// `(srfi 194)`'s ranges are the easy half. This asserts the
+/// *distributions*, because a biased sampler in a renderer is a faint
+/// wrong answer rather than a crash: the sphere generator's z-component
+/// has to be uniform, the ball's points uniform by volume, and Poisson's
+/// variance equal to its mean. It runs under a fixed seed, so it is
+/// deterministic rather than flaky.
+#[test]
+fn the_random_data_generators_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "194.scm"), "()", "(srfi 194) on {tier:?}");
+    }
+}
+
 #[test]
 fn equal_hash_agrees_with_equal_and_terminates_on_a_cycle() {
     // The one contract a hash table rests on: if two things are `equal?`

@@ -25,6 +25,7 @@ tranches below are the order they were added in.
 | `(srfi 128)` | comparators | Scheme |
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
+| `(srfi 194)` | random data generators, 30 of 32 | Scheme, on `(srfi 27)` |
 | `(srfi 160 base)` | `(srfi 4)` under SRFI 160's name | the same bindings |
 | `(srfi 160 <type>)` | ~57 operations for each of ten element types | Scheme, written once |
 | `(scm test)` | `check`, `check-raises`, `test-failures` | Scheme |
@@ -403,6 +404,67 @@ the native `random-real` gives `[0,1)`. The library therefore builds its
 own from a 53-bit integer draw and redraws zero. It cannot simply wrap the
 native one, because a library body's definitions are mutually recursive, so
 naming `random-real` inside the library that exports it calls itself.
+
+## Tranche seven: the samplers a renderer needs
+
+2026-10-15. `(srfi 194)`, 30 of its 32 procedures.
+
+This is the SRFI that earns its place in a renderer. Sampling a direction
+on a sphere is the inner loop of a path tracer and scattering instances
+over a surface is the inner loop of a modeller. Both are easy to get
+subtly wrong, and a biased sampler is a faint wrong answer rather than a
+crash.
+
+**The specification was fetched rather than recalled.** Writing `(srfi
+125)` from memory got the mutability defaults uncertain, and this library
+has 32 entry points, so the surface and the semantics came from the
+document. That caught `make-bernoulli-generator` yielding **1 and 0**
+rather than booleans, which matters because a run of them has to sum to a
+binomial variate, and `make-random-real-generator`'s interval being
+**closed** where `(srfi 27)`'s is open.
+
+### Two places where the obvious implementation is wrong
+
+**A direction is normalised gaussians, not normalised uniforms.** Taking
+three uniforms and dividing by the length concentrates points toward the
+cube's corners. Every length check still passes, so the test asserts the
+property that actually distinguishes them: for a sphere in 3-space the
+z-component is uniform on [-1,1], by Archimedes, so ten equal bands each
+hold a tenth of the points. The naive version fails that and nothing else.
+
+**A point inside a ball scales its radius by u^(1/n), not by u.** Volume
+grows as r^n, so a linear radius piles the points at the centre. The test
+checks that an eighth of the points in three dimensions fall inside half
+the radius rather than half of them.
+
+### Poisson in log space, and three linear-time generators
+
+`make-poisson-generator` sums exponential interarrivals rather than
+multiplying uniforms. The product form needs `exp(-L)`, which underflows
+to zero for a mean past about 745 and would then loop forever. The log
+form is exact at any mean, at a cost linear in it, and the test takes 200
+draws at a mean of 900 to prove the point.
+
+Three generators are linear where a cleverer method exists, and this is a
+deliberate trade for exactness and for code anyone can check:
+`make-binomial-generator` sums n Bernoulli draws, and
+`make-categorical-generator` and `make-zipf-generator` build a cumulative
+table once and then binary-search it, which makes Zipf exact for any `s`
+and any `q` where the usual rejection methods assume `q` is zero.
+
+### What is not here
+
+`make-random-rectangular-generator` and `make-random-polar-generator`
+yield **complex** numbers and there are none (plan §2.3), so 30 of 32.
+`make-random-u64-generator` stops at 2^63-1 for the same reason the rest
+of the numeric tower keeps surfacing. `make-random-s64-generator` does
+span the full signed word, built in two halves because the unsigned
+intermediate 2^63 has no exact integer to pass through and its literal
+does not even read.
+
+One judgement call recorded in the library: the specification says a
+random string's length is bounded by the *string's* length, which would
+leave the `k` argument with nothing to do, so `k` bounds it.
 
 ## What is still absent
 
