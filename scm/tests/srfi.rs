@@ -136,6 +136,25 @@ fn the_generators_and_accumulators_pass_on_both_tiers() {
     }
 }
 
+/// `(srfi 130)` is `(srfi 13)` with cursors, and **cursors here are
+/// indices**: the SRFI requires only that they be "either disjoint from
+/// indexes or identical to indexes", and the abstraction exists for
+/// strings stored as UTF-8, where the nth character is not at byte n.
+/// scm's strings are `Vec<char>`, so a cursor buys nothing and the
+/// conversions are the identity. What the test is really for is what that
+/// changes: the searches answer a **cursor rather than `#f`**, so
+/// `string-index` gives the end cursor and `string-index-right` the
+/// successor of what it found; and `string-trim` defaults to
+/// `char-whitespace?` where `(srfi 13)`'s defaults to a Latin-1 char-set,
+/// so the two libraries genuinely trim differently. Both are imported,
+/// prefixed, and the differences asserted side by side.
+#[test]
+fn srfi_130_cursor_strings_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "130.scm"), "()", "(srfi 130) on {tier:?}");
+    }
+}
+
 /// `(srfi 13)` strings -- the library `(srfi 14)` was brought forward for.
 /// It predates R7RS and is inconsistent with *itself* about argument
 /// order, so most of this test pins orders: the criterion comes first in

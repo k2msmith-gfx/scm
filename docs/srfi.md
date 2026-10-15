@@ -28,6 +28,7 @@ tranches below are the order they were added in.
 | `(srfi 133)` | vector operations on boxed elements, 42 procedures | Scheme; **16 re-exported from the prelude** |
 | `(srfi 14)` | char-sets, 62 bindings | Scheme, on a **native bytevector**; Latin-1 |
 | `(srfi 13)` | the string library, ~87 procedures | Scheme, on `(srfi 14)` |
+| `(srfi 130)` | the same, with cursors — 59 bindings | Scheme, on `(srfi 13)`; **cursors are indices** |
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
 | `(srfi 158)` | generators and accumulators | Scheme |
 | `(srfi 194)` | random data generators, 30 of 32 | Scheme, on `(srfi 27)` |
@@ -928,8 +929,121 @@ let *other* libraries parse SRFI 13-style argument lists; nothing here
 needs to export that, and `string-contains` uses a plain scan, KMP being
 worth its restart vector only for long self-similar patterns.
 
+## Tranche thirteen: cursors, and an abstraction that costs nothing here
+
+2026-10-15. `(srfi 130)`.
+
+SRFI 13 again, with three changes of direction: subranges are given by
+*cursors* rather than indices, the searches answer a cursor instead of
+`#f`, and the comparison, case-mapping and mutation operations are gone.
+
+### Cursors are indices, and the SRFI says that is allowed
+
+The specification requires only that cursors be "either disjoint from
+indexes or identical to indexes", and permits an implementation to make
+them identical where "there is no benefit in implementing them
+separately". That is this case, and it is worth being clear about *why*
+rather than treating it as a licence to do less work.
+
+The abstraction exists for implementations that store strings as UTF-8 or
+UTF-16, where the *n*th character is not at byte *n*, so `string-ref` by
+index costs a scan from one end and a cursor is the thing you can keep in
+hand and advance in constant time. scm's strings are `Vec<char>`
+(plan §4.3) — four bytes per character, chosen so that `string-ref` is
+already O(1). A cursor has nothing left to buy.
+
+So a cursor is an exact non-negative integer, `string-cursor->index` and
+`string-index->cursor` are the identity, `string-cursor-diff` is
+subtraction, and the fifteen cursor procedures are one line each. The
+reference implementation's own portable layer does exactly this. Two
+consequences are tested rather than assumed: cursors must be disjoint
+from `#f`, and integers are; and a `start`/`end` argument may be written
+as either a cursor or an index, because here there is nothing to tell
+apart.
+
+### What the cursor convention actually changes: "not found"
+
+This is the part that touches every caller, and it is not a free
+translation of SRFI 13.
+
+A cursor must be disjoint from `#f`, so a search cannot report failure
+that way. Instead:
+
+| | found | not found |
+|---|---|---|
+| `string-index` | the match's cursor | the **`end`** cursor |
+| `string-index-right` | the **successor** of the match | the **`start`** cursor |
+| `string-skip` | the non-match's cursor | the `end` cursor |
+| `string-skip-right` | the successor | the `start` cursor |
+
+The successor convention on the rightward searches is what makes them
+usable: what comes back is a cursor you can cut a substring *at*, keeping
+the match, which is why `(substring/cursors s 0 (string-index-right s …))`
+is the natural idiom. SRFI 13 returns the matched character's own index,
+one less.
+
+It also has a cost worth stating, and the tests state it: **a match at the
+very end of the range and no match at all give the same cursor.** A caller
+who must distinguish them compares against `end` first. That is the price
+of having no spare value.
+
+The exception is `string-contains` and `string-contains-right`, which the
+specification does let answer `#f`. The pair looks inconsistent beside
+`string-index` and is not: a substring can be found *at* the end cursor,
+so "found there" and "not found" need two different answers and there is
+no cursor left over. The two also disagree about the empty pattern —
+`string-contains` finds it at `start1`, `string-contains-right` at `end1`
+— which is just leftmost and rightmost being different places.
+
+### `string-trim` really does trim differently
+
+`(srfi 130)`'s `string-trim` defaults to `char-whitespace?` where
+`(srfi 13)`'s defaults to `(srfi 14)`'s `char-set:whitespace`. That is not
+a restatement of the same thing in other words. Char-sets here are
+Latin-1, and Latin-1's whitespace list omits U+0085 `NEL` — so
+`(srfi 13)` leaves a leading NEL in place and `(srfi 130)` trims it. The
+test imports both libraries, prefixed, and asserts each behaviour, so the
+difference is recorded rather than discovered later.
+
+This is the third library in a row where the Latin-1 bound of
+[tranche eleven](#tranche-eleven-char-sets-and-a-bound-chosen-three-times-over)
+has shown through, and the resolution is the same each time: a predicate
+is Unicode-correct over scm's whole character range, a char-set is not.
+
+### Built on SRFI 13, and one collision fewer
+
+Twenty-eight of these procedures are SRFI 13's unchanged, imported by name
+and re-exported rather than written a second time — the same reasoning as
+`(srfi 133)`'s sixteen re-exports. Eight more are imported under private
+names and adjusted, so there is still one implementation of each piece of
+work: the trims pass an explicit predicate, the four searches change the
+sentinel, and `string-replicate` is `xsubstring` with `to` made mandatory
+and `from > to` made an error. `string-remove` is `string-delete` under a
+new name, which `rename` does at the import.
+
+A welcome side effect of the dropped operations: `(srfi 130)` exports
+neither `string-map` nor `string-for-each`, so unlike `(srfi 13)` it
+collides with R7RS nowhere, and the test asserts that R7RS's n-ary
+`string-map` still works after importing it. `string-for-each`'s
+replacement, `string-for-each-cursor`, hands the procedure the cursor
+rather than the character.
+
+### `string-split` is not `string-tokenize`
+
+They look like the same operation and are opposites. `string-tokenize`
+keeps the maximal runs that *match* a criterion, so it never returns an
+empty piece. `string-split` cuts at a fixed delimiter *string* and keeps
+what lies between, so adjacent delimiters give empty pieces — and
+`'prefix` and `'suffix` exist precisely to drop the empty piece a leading
+or trailing delimiter would otherwise leave. Its `limit` counts **splits**
+rather than pieces, so the result holds at most `limit + 1` of them and
+the last keeps whatever remains, delimiters included. An empty delimiter
+splits into characters.
+
 ## What is still absent
 
-`(srfi 130)`, which is SRFI 13 again with cursors instead of indices; and
-the control and testing SRFIs. `(srfi 47)` will not be added: it is
-withdrawn and `(srfi 63)` supersedes it.
+The control and testing SRFIs: 34/35, 41, 45, 113, 117, 121, 64, 19, 48,
+98, 115. `(srfi 47)` will not be added: it is withdrawn and `(srfi 63)`
+supersedes it. `(srfi 152)` is the third string library in this family and
+is the one that finally regularises SRFI 13's argument orders; it is not
+here yet.
