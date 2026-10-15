@@ -79,6 +79,16 @@ fn the_intermediate_hash_table_srfi_passes_on_both_tiers() {
     }
 }
 
+/// `(srfi 160)`'s operations are written once and aliased per element type,
+/// so this covers the whole set on `f64` and then checks that another type
+/// and the bytevector-backed `u8` behave the same through their own names.
+#[test]
+fn the_numeric_vector_operations_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "160.scm"), "()", "(srfi 160) on {tier:?}");
+    }
+}
+
 #[test]
 fn equal_hash_agrees_with_equal_and_terminates_on_a_cycle() {
     // The one contract a hash table rests on: if two things are `equal?`

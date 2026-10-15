@@ -24,8 +24,11 @@ tranches below are the order they were added in.
 | `(srfi 128)` | comparators | Scheme |
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
+| `(srfi 160 base)` | `(srfi 4)` under SRFI 160's name | the same bindings |
+| `(srfi 160 <type>)` | ~57 operations for each of ten element types | Scheme, written once |
 | `(scm test)` | `check`, `check-raises`, `test-failures` | Scheme |
 | `(scm hash-table)` | the table `(srfi 69)` and `(srfi 125)` share | Scheme, on **native hash functions** |
+| `(scm numvector)` | `(srfi 160)`'s operations, written once | Scheme, on **native unboxed storage** |
 
 Written against each specification rather than copied from its reference
 implementation, so every procedure is one this project can test and change.
@@ -299,11 +302,67 @@ afterwards. `xor!` has the same shape for a different reason -- it
 gathers the additions before changing anything, so that a key just added
 from the second table is not then pruned as one the two had in common.
 
+## Tranche five: the numeric vector operations
+
+2026-10-14. `(srfi 160)`, which is ten libraries and a base.
+
+### Six hundred procedures, written sixty times
+
+SRFI 160 specifies about sixty operations for *each* of its element types:
+`f64vector-map`, `s32vector-map`, `u8vector-map`, and so on down. Written
+out literally that is six hundred procedures differing only in a name.
+
+They do not have to be. **A numeric vector carries its own element type**,
+which `numvector-tag` reports, so a result vector can be made the same type
+as its input without anyone naming the type -- and then each operation is
+written once in `(scm numvector)` and each per-type library is aliases onto
+it. `f64vector-map` and `s32vector-map` are not two procedures that behave
+alike; they are one procedure under two names, so there is one place for a
+bug to be and one place to fix it.
+
+Nine operations per type genuinely need telling, because they have no input
+vector to ask: the constructors `@vector-unfold`, `-unfold-right`,
+`-append`, `-concatenate` and `-append-subvectors`, the conversions
+`reverse-list->@vector` and `vector->@vector`, the element predicate `@?`
+and the comparator. `(f64vector-append)` with no arguments still has to
+produce an f64vector, which is the whole reason that list is not shorter.
+
+So a per-type library is a name list and nine one-line wrappers. That is
+boring on purpose: the names are the only thing the ten files disagree
+about.
+
+### `u8vector` is the bytevector, and now the generic operations know it
+
+`(srfi 4)` already had `u8vector` *be* R7RS's bytevector, which is right --
+there should not be two representations of a vector of octets -- but it
+meant `NumTag` had no `u8` and the generic `numvector-*` primitives
+refused a bytevector. `(srfi 160 u8)` would then have been the one element
+type with no operations, and it is not an obscure one: **an 8-bit image
+buffer is exactly a vector of octets**, which is the shape ray cares about
+most after `f64`.
+
+So the generic primitives now accept either representation. The heap's
+`store_ref`, `store_len` and `store_set` already read and write both, for
+SRFI 63's arrays, so the primitives were rewritten over those three and one
+helper decides which of the two a value is. `make-numvector` with `'u8`
+builds a bytevector, `numvector-tag` of a bytevector answers `u8`, and
+`(numvector? bv 'u8)` is true. Nothing in SRFI 4's interface changed.
+
+### Two absences, and one range that is not the SRFI's
+
+**`c64` and `c128` are not implemented.** They are vectors of complex
+numbers and plan §2.3 declines the numeric tower, so there is no element to
+store. Eight integer types and two float types are here.
+
+**`u64`'s element predicate stops at 2^63-1**, not 2^64-1, because the top
+half of the range has no fixnum to compare against. `u64?` is therefore
+narrower than the SRFI's, and this is the numeric tower showing up again --
+the third time in two tranches.
+
 ## What is still absent
 
 `(srfi 13)`/`(srfi 130)`
-strings; `(srfi 14)` char sets; `(srfi 133)` vectors and `(srfi 160)`'s
-per-type numeric-vector operations -- of those two, 160 is the one that
-matters for graphics, since 133 operates on boxed vectors; and the control
-and testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
+strings; `(srfi 14)` char sets; `(srfi 133)`, the operations on *boxed*
+vectors, which is 160's counterpart for the case where the elements are not
+numbers; and the control and testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
 `(srfi 63)` supersedes it.

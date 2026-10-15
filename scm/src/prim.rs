@@ -2347,15 +2347,6 @@ fn p_number_hash(_e: &mut Engine, a: &[Value]) -> PResult {
 // operation does not care (`f64vector-ref` *is* `numvector-ref`), which
 // costs a hot loop nothing over a direct primitive.
 
-fn numvec_ref<'a>(who: &str, e: &'a Engine, v: Value) -> Result<&'a NumVec, VmError> {
-    match v {
-        Value::Obj(r) => match e.obj(r) {
-            Obj::NumVector(nv) => Ok(nv),
-            _ => Err(err(format!("{who}: not a numeric vector: {}", write_str(e, v)))),
-        },
-        _ => Err(err(format!("{who}: not a numeric vector: {}", write_str(e, v)))),
-    }
-}
 
 fn tag_of(who: &str, e: &Engine, v: Value) -> Result<NumTag, VmError> {
     let Value::Symbol(s) = v else {
@@ -2392,14 +2383,61 @@ fn bounds(who: &str, a: &[Value], at: usize, len: usize) -> Result<(usize, usize
     Ok((start, end))
 }
 
+/// A homogeneous numeric vector is either an `Obj::NumVector` or, when the
+/// elements are octets, R7RS's bytevector: `u8vector` **is** `bytevector`
+/// (see `(srfi 4)`), and `NumTag` has no `u8` because of it. So every
+/// generic operation below has to take either -- an 8-bit image buffer is
+/// exactly the second shape, and `(srfi 160 u8)` would otherwise be the one
+/// element type with no operations.
+///
+/// `Ok(Some(tag))` is a numeric vector of that element type and `Ok(None)`
+/// is a bytevector, which is to say `u8`. The heap's `store_ref`,
+/// `store_len` and `store_set` already read and write both, for SRFI 63's
+/// arrays; all that is needed here is to refuse the stores that are strings
+/// or ordinary vectors.
+fn numvec_kind(who: &str, e: &Engine, v: Value) -> Result<Option<NumTag>, VmError> {
+    if let Value::Obj(r) = v {
+        match e.obj(r) {
+            Obj::NumVector(nv) => return Ok(Some(nv.tag())),
+            Obj::Bytevector(_) => return Ok(None),
+            _ => {}
+        }
+    }
+    Err(err(format!("{who}: not a numeric vector: {}", write_str(e, v))))
+}
+
+fn nv_len(who: &str, e: &Engine, v: Value) -> Result<usize, VmError> {
+    numvec_kind(who, e, v)?;
+    Ok(e.store_len(v).expect("a numeric vector has a length"))
+}
+
+fn nv_get(e: &Engine, v: Value, i: usize) -> Value {
+    e.store_ref(v, i).expect("index checked by the caller")
+}
+
+/// The element-type symbol of either representation.
+fn nv_tag_name(who: &str, e: &Engine, v: Value) -> Result<&'static str, VmError> {
+    Ok(match numvec_kind(who, e, v)? {
+        Some(tag) => tag.name(),
+        None => "u8",
+    })
+}
+
 /// `(numvector? x)` -- is it one at all; `(numvector? x 'f64)` -- is it one
 /// of that element type.
 fn p_numvector_is(e: &mut Engine, a: &[Value]) -> PResult {
     Ok(Value::Bool(match a {
-        [v] => matches!(v, Value::Obj(r) if matches!(e.obj(*r), Obj::NumVector(_))),
+        [v] => numvec_kind("numvector?", e, *v).is_ok(),
         [v, t] => {
-            let want = tag_of("numvector?", e, *t)?;
-            matches!(v, Value::Obj(r) if matches!(e.obj(*r), Obj::NumVector(nv) if nv.tag() == want))
+            let Value::Symbol(sym) = *t else {
+                return Err(err("numvector?: expects an element-type symbol like 'f64"));
+            };
+            let want = e.interner.sym_name(sym).to_string();
+            match numvec_kind("numvector?", e, *v) {
+                Ok(Some(tag)) => tag.name() == want,
+                Ok(None) => want == "u8",
+                Err(_) => false,
+            }
         }
         _ => return Err(err("numvector?: expects a value and an optional element type")),
     }))
@@ -2407,16 +2445,28 @@ fn p_numvector_is(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn p_numvector_tag(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("numvector-tag", a)?;
-    let tag = numvec_ref("numvector-tag", e, v)?.tag();
-    Ok(e.sym(tag.name()))
+    let name = nv_tag_name("numvector-tag", e, v)?;
+    Ok(e.sym(name))
 }
 
 /// `(make-numvector 'f64 n [fill])`
 fn p_make_numvector(e: &mut Engine, a: &[Value]) -> PResult {
-    let (tag, n) = match a {
-        [t, Value::Fixnum(n), ..] if *n >= 0 => (tag_of("make-numvector", e, *t)?, *n as usize),
+    let (t, n) = match a {
+        [t, Value::Fixnum(n), ..] if *n >= 0 => (*t, *n as usize),
         _ => return Err(err("make-numvector: expects an element type and a non-negative length")),
     };
+    // `u8` is the bytevector, so it is built rather than tagged.
+    if let Value::Symbol(sym) = t
+        && e.interner.sym_name(sym) == "u8"
+    {
+        let fill = match a.get(2) {
+            None => 0u8,
+            Some(Value::Fixnum(x)) if (0..=255).contains(x) => *x as u8,
+            Some(_) => return Err(err("make-numvector: a u8vector holds octets")),
+        };
+        return Ok(e.bytevector(vec![fill; n]));
+    }
+    let tag = tag_of("make-numvector", e, t)?;
     let fill = a.get(2).copied().unwrap_or(if tag.is_float() {
         Value::Flonum(0.0)
     } else {
@@ -2428,37 +2478,45 @@ fn p_make_numvector(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn p_numvector_length(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("numvector-length", a)?;
-    Ok(Value::Fixnum(numvec_ref("numvector-length", e, v)?.len() as i64))
+    Ok(Value::Fixnum(nv_len("numvector-length", e, v)? as i64))
 }
 
 fn p_numvector_ref(e: &mut Engine, a: &[Value]) -> PResult {
     let [v, i] = a else {
         return Err(err("numvector-ref: expects a vector and an index"));
     };
-    let nv = numvec_ref("numvector-ref", e, *v)?;
-    let i = index_of("numvector-ref", *i, nv.len())?;
-    Ok(nv.get(i).expect("checked"))
+    let len = nv_len("numvector-ref", e, *v)?;
+    let i = index_of("numvector-ref", *i, len)?;
+    Ok(nv_get(e, *v, i))
 }
 
 fn p_numvector_set(e: &mut Engine, a: &[Value]) -> PResult {
     let [v, i, x] = a else {
         return Err(err("numvector-set!: expects a vector, an index and a number"));
     };
-    let len = numvec_ref("numvector-set!", e, *v)?.len();
+    let len = nv_len("numvector-set!", e, *v)?;
     let i = index_of("numvector-set!", *i, len)?;
-    let Value::Obj(r) = *v else { unreachable!("checked") };
-    match e.obj_mut(r) {
-        Obj::NumVector(nv) => nv.set(i, *x).map(|()| Value::Unspecified).map_err(err),
-        _ => unreachable!("checked"),
-    }
+    e.store_set(*v, i, *x).map(|()| Value::Unspecified).map_err(err)
 }
 
 fn p_numvector_copy(e: &mut Engine, a: &[Value]) -> PResult {
     let v = *a.first().ok_or_else(|| err("numvector-copy: expects a vector"))?;
-    let nv = numvec_ref("numvector-copy", e, v)?;
-    let (start, end) = bounds("numvector-copy", a, 1, nv.len())?;
-    let out = nv.slice(start, end);
-    Ok(e.numvector(out))
+    let len = nv_len("numvector-copy", e, v)?;
+    let (start, end) = bounds("numvector-copy", a, 1, len)?;
+    match v {
+        Value::Obj(r) => match e.obj(r) {
+            Obj::NumVector(nv) => {
+                let out = nv.slice(start, end);
+                Ok(e.numvector(out))
+            }
+            Obj::Bytevector(b) => {
+                let out = b[start..end].to_vec();
+                Ok(e.bytevector(out))
+            }
+            _ => unreachable!("checked"),
+        },
+        _ => unreachable!("checked"),
+    }
 }
 
 /// `(numvector-copy! to at from [start end])`
@@ -2467,9 +2525,9 @@ fn p_numvector_copy_into(e: &mut Engine, a: &[Value]) -> PResult {
         [to, Value::Fixnum(at), from, ..] if *at >= 0 => (*to, *at as usize, *from),
         _ => return Err(err("numvector-copy!: expects a target, an index and a source")),
     };
-    let src = numvec_ref("numvector-copy!", e, from)?;
-    let (start, end) = bounds("numvector-copy!", a, 3, src.len())?;
-    let dst_len = numvec_ref("numvector-copy!", e, to)?.len();
+    let src_len = nv_len("numvector-copy!", e, from)?;
+    let (start, end) = bounds("numvector-copy!", a, 3, src_len)?;
+    let dst_len = nv_len("numvector-copy!", e, to)?;
     let n = end - start;
     if at + n > dst_len {
         return Err(err(format!(
@@ -2477,24 +2535,18 @@ fn p_numvector_copy_into(e: &mut Engine, a: &[Value]) -> PResult {
         )));
     }
     // Read the source out first: the target may be the same vector.
-    let taken: Vec<Value> = (start..end).map(|i| src.get(i).expect("in range")).collect();
-    let Value::Obj(r) = to else { unreachable!("checked") };
-    match e.obj_mut(r) {
-        Obj::NumVector(nv) => {
-            for (k, x) in taken.into_iter().enumerate() {
-                nv.set(at + k, x).map_err(err)?;
-            }
-            Ok(Value::Unspecified)
-        }
-        _ => unreachable!("checked"),
+    let taken: Vec<Value> = (start..end).map(|i| nv_get(e, from, i)).collect();
+    for (k, x) in taken.into_iter().enumerate() {
+        e.store_set(to, at + k, x).map_err(err)?;
     }
+    Ok(Value::Unspecified)
 }
 
 fn p_numvector_to_list(e: &mut Engine, a: &[Value]) -> PResult {
     let v = *a.first().ok_or_else(|| err("numvector->list: expects a vector"))?;
-    let nv = numvec_ref("numvector->list", e, v)?;
-    let (start, end) = bounds("numvector->list", a, 1, nv.len())?;
-    let items: Vec<Value> = (start..end).map(|i| nv.get(i).expect("in range")).collect();
+    let len = nv_len("numvector->list", e, v)?;
+    let (start, end) = bounds("numvector->list", a, 1, len)?;
+    let items: Vec<Value> = (start..end).map(|i| nv_get(e, v, i)).collect();
     Ok(e.list(&items))
 }
 
@@ -2503,7 +2555,12 @@ fn p_list_to_numvector(e: &mut Engine, a: &[Value]) -> PResult {
     let [t, lst] = a else {
         return Err(err("list->numvector: expects an element type and a list"));
     };
-    let tag = tag_of("list->numvector", e, *t)?;
+    let u8_wanted = matches!(*t, Value::Symbol(sym) if e.interner.sym_name(sym) == "u8");
+    let tag = if u8_wanted {
+        NumTag::F64 // unused; the u8 case builds a bytevector below
+    } else {
+        tag_of("list->numvector", e, *t)?
+    };
     let mut items = Vec::new();
     let mut cur = *lst;
     loop {
@@ -2522,6 +2579,16 @@ fn p_list_to_numvector(e: &mut Engine, a: &[Value]) -> PResult {
             _ => return Err(err("list->numvector: an improper list")),
         }
     }
+    if u8_wanted {
+        let mut bytes = Vec::with_capacity(items.len());
+        for x in items {
+            match x {
+                Value::Fixnum(n) if (0..=255).contains(&n) => bytes.push(n as u8),
+                _ => return Err(err("list->numvector: a u8vector holds octets")),
+            }
+        }
+        return Ok(e.bytevector(bytes));
+    }
     let mut v = NumVec::make(tag, items.len(), Value::Fixnum(0)).map_err(err)?;
     for (i, x) in items.into_iter().enumerate() {
         v.set(i, x).map_err(err)?;
@@ -2535,18 +2602,12 @@ fn p_numvector_fill(e: &mut Engine, a: &[Value]) -> PResult {
         [v, x, ..] => (*v, *x),
         _ => return Err(err("numvector-fill!: expects a vector and a number")),
     };
-    let len = numvec_ref("numvector-fill!", e, v)?.len();
+    let len = nv_len("numvector-fill!", e, v)?;
     let (start, end) = bounds("numvector-fill!", a, 2, len)?;
-    let Value::Obj(r) = v else { unreachable!("checked") };
-    match e.obj_mut(r) {
-        Obj::NumVector(nv) => {
-            for i in start..end {
-                nv.set(i, x).map_err(err)?;
-            }
-            Ok(Value::Unspecified)
-        }
-        _ => unreachable!("checked"),
+    for i in start..end {
+        e.store_set(v, i, x).map_err(err)?;
     }
+    Ok(Value::Unspecified)
 }
 
 // ── arrays (SRFI 63) ────────────────────────────────────────────────────
