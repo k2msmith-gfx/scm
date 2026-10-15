@@ -112,6 +112,18 @@ fn the_random_data_generators_pass_on_both_tiers() {
     }
 }
 
+/// `(srfi 42)` is also the check that two of scm's own decisions coexist:
+/// its generators are spelled `:list` and `:range`, which plan §4 makes
+/// **keywords** rather than identifiers, so they can be neither macro
+/// names nor `syntax-rules` literals. They work because a keyword in a
+/// pattern matches as a constant and a generator is only ever a qualifier.
+#[test]
+fn the_eager_comprehensions_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "42.scm"), "()", "(srfi 42) on {tier:?}");
+    }
+}
+
 #[test]
 fn equal_hash_agrees_with_equal_and_terminates_on_a_cycle() {
     // The one contract a hash table rests on: if two things are `equal?`

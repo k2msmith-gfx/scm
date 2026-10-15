@@ -18,6 +18,7 @@ tranches below are the order they were added in.
 | `(srfi 8)` | `receive` | Scheme |
 | `(srfi 26)` | `cut`, `cute` | Scheme |
 | `(srfi 27)` | sources of random bits | **native state**, Scheme interface |
+| `(srfi 42)` | eager comprehensions | Scheme, `syntax-rules` throughout |
 | `(srfi 63)` | arrays and shared arrays | **native views**, Scheme prototypes |
 | `(srfi 69)` | basic hash tables | Scheme, on **native hash functions** |
 | `(srfi 111)` | boxes | Scheme, on records |
@@ -466,10 +467,79 @@ One judgement call recorded in the library: the specification says a
 random string's length is bounded by the *string's* length, which would
 leave the `k` argument with nothing to do, so `k` bounds it.
 
+## Tranche eight: comprehensions, and two decisions that nearly collided
+
+2026-10-15. `(srfi 42)`.
+
+The standard answer to Janet's `seq`, which the scene-language survey
+counted 253 times as the second most common non-trivial form. A grid of
+instances, a lattice, a swept profile: all of them are
+`(list-ec (: i n) …)`.
+
+### The collision, and why nothing had to change
+
+Every generator in this SRFI is spelled `:list`, `:range`, `:while`. Under
+plan §4 those read as **keywords**, not identifiers. A keyword cannot be a
+macro name, and `syntax-rules` rejects one as a literal. Two deliberate
+decisions, pointing straight at each other.
+
+Neither had to move. A generator is only ever a *qualifier* inside a
+comprehension, and **a keyword in a pattern already matches as a
+constant** — so the comprehension macros recognise the generator forms
+directly and nothing named `:list` is bound anywhere. No reader change, no
+`syntax-rules` change, and the test file asserts that `(keyword? ':list)`
+is still true afterwards.
+
+Three names could not survive, because they are used in *operator*
+position where a keyword is an error. `:generator-proc` is **absent**:
+turning a comprehension inside out into a pull-driven procedure also wants
+a re-entrant continuation, and plan §3.1 makes continuations escape-only.
+`:-dispatch-ref` and `:-dispatch-set!` are spelled **`dispatch-ref`** and
+**`dispatch-set!`**, same procedures, a spelling that reads as an
+identifier.
+
+### One normal form, because of `:parallel`
+
+Every generator normalises to
+
+    (%loop (outer …) ((var init step) …) continue? (inner …))
+
+which is a `do` loop in pieces. That indirection exists for one reason:
+`:parallel` runs generators in **lockstep**, and lockstep is *appending*
+the pieces of each generator, where nesting two loops could only give the
+cross product. Generators hand their normal form to a continuation
+*macro*, since a macro cannot return a value.
+
+`:while` and `:until` wrap their generator's loop in an escape
+continuation, because the guard has to sit inside the per-iteration
+bindings — the test reads the variable the generator binds — and must end
+only that loop, leaving outer generators running. The test asserts exactly
+that, and that `:until` includes the iteration where its test first holds
+while `:while` excludes it.
+
+### Two bugs worth recording
+
+**`:` is a plain symbol where every other generator head is a keyword.**
+Undeclared, a symbol in a pattern is a pattern *variable*, so the rule for
+`:` matched every generator form and quietly rewrote `:parallel` into a
+dispatch. It has to be a declared literal; the keyword-headed rules do not.
+
+**The index rule belongs in the normaliser, not the walker.** `(v (index
+i))` is handled by one rule that serves every generator, but `:parallel`
+normalises its own sub-generators without going back through the walker,
+so an index inside a `:parallel` reached the `:list` rule intact and became
+a `let` binding whose variable was a list.
+
+Early exit is tested by counting iterations rather than by trusting the
+answer: `any?-ec` over 100 values must call its test four times to find
+`(> i 2)`, and `first-ec` once. An unbounded `:integers` generator proves
+the point, since the comprehension could not terminate otherwise.
+
 ## What is still absent
 
-`(srfi 13)`/`(srfi 130)`
-strings; `(srfi 14)` char sets; `(srfi 133)`, the operations on *boxed*
+`(srfi 158)` generators and accumulators, which is the next one and the
+library that would consume what `(srfi 160)`'s `make-@vector-generator`
+produces; `(srfi 13)`/`(srfi 130)` strings; `(srfi 14)` char sets; `(srfi 133)`, the operations on *boxed*
 vectors, which is 160's counterpart for the case where the elements are not
 numbers; and the control and testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
 `(srfi 63)` supersedes it.
