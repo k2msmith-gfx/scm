@@ -57,6 +57,48 @@ fn srfi_63_arrays_pass_on_both_tiers() {
 }
 
 #[test]
+fn srfi_151_bitwise_passes_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "151.scm"), "()", "(srfi 151) on {tier:?}");
+    }
+}
+
+#[test]
+fn the_hash_table_and_comparator_srfis_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "hash.scm"), "()", "(srfi 69/128) on {tier:?}");
+    }
+}
+
+#[test]
+fn equal_hash_agrees_with_equal_and_terminates_on_a_cycle() {
+    // The one contract a hash table rests on: if two things are `equal?`
+    // they hash alike. `equal-hash` therefore walks exactly what `equal?`
+    // recurses into, and bounds its work so a cycle -- which `equal?` is
+    // required to survive -- does not hang it.
+    let mut vm = Vm::new();
+    let v = vm
+        .eval_str(
+            r#"(define (same? a b) (and (equal? a b) (= (equal-hash a) (equal-hash b))))
+               (list (same? (list 1 2 (vector 3 "s")) (list 1 2 (vector 3 "s")))
+                     (same? #u8(1 2) #u8(1 2))
+                     (same? #f64(1 2) #f64(1 2))
+                     (same? (string-copy "s") (string-copy "s"))
+                     ;; 1 and 1.0 are not `equal?`, so they need not hash alike.
+                     (equal? 1 1.0)
+                     ;; -0.0 and 0.0 are `equal?` here, so they must hash alike.
+                     (= (equal-hash -0.0) (equal-hash 0.0))
+                     ;; A cycle returns a number rather than hanging.
+                     (let ((a (list 1 2)) (b (list 1 2)))
+                       (set-cdr! (cdr a) a)
+                       (set-cdr! (cdr b) b)
+                       (and (equal? a b) (= (equal-hash a) (equal-hash b)))))"#,
+        )
+        .unwrap();
+    assert_eq!(write_str(&vm.engine, v), "(#t #t #t #t #f #t #t)");
+}
+
+#[test]
 fn a_numeric_vector_is_homogeneous_at_scale() {
     // The memory claim -- eight bytes a sample rather than sixteen -- is
     // not an object count, because a flonum is an immediate `Value` and a

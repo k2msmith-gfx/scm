@@ -18,8 +18,11 @@ the first tranche.
 | `(srfi 8)` | `receive` | Scheme |
 | `(srfi 26)` | `cut`, `cute` | Scheme |
 | `(srfi 63)` | arrays and shared arrays | **native views**, Scheme prototypes |
+| `(srfi 69)` | basic hash tables | Scheme, on **native hash functions** |
 | `(srfi 111)` | boxes | Scheme, on records |
+| `(srfi 128)` | comparators | Scheme |
 | `(srfi 132)` | the sort libraries | Scheme, merge sort |
+| `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
 | `(scm test)` | `check`, `check-raises`, `test-failures` | Scheme |
 
 Written against each specification rather than copied from its reference
@@ -160,3 +163,93 @@ numeric vectors**, so a texel function that samples an `f64vector` falls
 outside the compiled subset. That is the next thing worth doing for the
 array work to pay off in a render, and it is a `scm-llvm` change rather
 than a library one.
+
+## Tranche three: bits, hashes and comparators
+
+2026-10-14. `(srfi 151)`, `(srfi 69)` and `(srfi 128)`.
+
+### Bitwise: an `i64` already is two's complement
+
+`bitwise-and`, `-ior`, `-xor`, `-not`, `arithmetic-shift`, `bit-count`,
+`integer-length` and `first-set-bit` are native; the other three dozen
+operations are the ordinary identities on top of them, in Scheme.
+
+The infinite-precision model this SRFI assumes is free for everything that
+fits in a word, because an `i64` *is* two's complement: `(bitwise-and -1
+7)` is 7 and `(bitwise-not -1)` is 0 without any special case. Two places
+it is not free:
+
+- **A left shift off the end of the word raises.** `(arithmetic-shift 1
+  63)` is 2^63, which plan §2.3 has no bignum for, and §4.5 says an
+  overflow is an error rather than a silent widening. Bit twiddling is
+  exactly where a quiet wrap would be a wrong answer, so it is reported.
+- **A right shift saturates at the sign**, so `(arithmetic-shift -1 -100)`
+  is -1. That *is* the infinite model's answer and needs no bignum.
+
+`bit-count` of a negative number is the population count of its
+complement, which is this SRFI's rule and the one that keeps the answer
+finite under the infinite model.
+
+### Hash tables in Scheme, hash functions in Rust
+
+A table is a record holding a vector of buckets, each an association list.
+A lookup hashes the key to a bucket and walks it with the table's own
+equality; the table doubles when it has more entries than buckets, so the
+walk stays short.
+
+**Why not a native table.** A native one would be perhaps five times
+faster, but SRFI 69 lets a caller supply *any* equality predicate, and a
+native table would have to re-enter the interpreter for every probe -- so
+its fast path would be fast only for the four standard equivalences and
+its general path slower than this. What is native is where the work
+actually is: `equal-hash` walks structure in Rust. A native table for the
+standard equivalences is the upgrade if profiling ever asks, and nothing
+in this interface would change.
+
+**The one contract**: if two objects are `equal?` they hash alike. So
+`equal-hash` walks exactly what `equal?` recurses into -- pairs, vectors,
+strings, bytevectors, numeric vectors and arrays -- and hashes everything
+else by identity, as `equal?` compares it. It also has to terminate on a
+cycle, which `equal?` is required to, so the walk carries a work budget:
+the traversal is deterministic, so two equal structures spend the budget
+identically and arrive at the same number. A table given `eq?` or `eqv?`
+gets the identity hash instead, because a structural hash of a key that is
+later mutated would lose an entry `eq?` can still find.
+
+### Comparators, and where the missing bignums showed up
+
+`(srfi 128)` is the four-part bundle -- type test, equality, ordering,
+hash -- that `(srfi 125)` and any sorted container take. The default total
+order across types is the SRFI's own: the empty list, pairs, booleans,
+characters, strings, symbols, numbers, vectors, bytevectors, then
+everything else, which is unordered among itself.
+
+Two decisions:
+
+- **`make-eq-comparator` and `make-eqv-comparator` are unordered.** A
+  comparator's four parts have to agree, and the default order is
+  consistent with `equal?` rather than with identity -- two distinct but
+  equal strings are unordered by it and not `eq?`. Offering an ordering
+  there would be offering a contradiction.
+- **`comparator-register-default!` is absent.** It mutates a global
+  ordering from anywhere in a program, and nothing here needs it.
+
+And a bug worth recording, because it is the numeric tower showing up
+where nobody looks for it. A combining hash is conventionally
+`(+ (* 31 h) x)`, and with an unreduced 62-bit hash that **overflows**,
+which here raises rather than wrapping. Every step is now reduced modulo
+2^25 -- `(hash-bound)` -- first, so the multiply stays nowhere near the
+word. In a Scheme with bignums the same code would have silently grown
+arbitrarily large integers instead; in one that wraps, it would have
+wrapped. This implementation does neither, so the arithmetic had to be
+written to fit.
+
+## What is still absent
+
+`(srfi 125)`, the intermediate hash tables, which are a large API over
+`(srfi 128)` and `(srfi 69)`'s machinery; `(srfi 13)`/`(srfi 130)`
+strings; `(srfi 14)` char sets; `(srfi 133)` vectors and `(srfi 160)`'s
+per-type numeric-vector operations -- of those two, 160 is the one that
+matters for graphics, since 133 operates on boxed vectors; and the control
+and testing SRFIs. `(srfi 47)` will not be added: it is withdrawn and
+`(srfi 63)` supersedes it.

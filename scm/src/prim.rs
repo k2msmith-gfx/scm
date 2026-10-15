@@ -2022,6 +2022,322 @@ fn stderr_port(e: &mut Engine, _a: &[Value]) -> PResult {
     Ok(e.port(PortKind::Stderr))
 }
 
+// ── bitwise operations (SRFI 151) ───────────────────────────────────────
+//
+// An `i64` *is* two's complement, so `and`, `ior`, `xor` and `not` give
+// SRFI 151's infinite-precision answers directly for every value that
+// fits. What does not fit is a left shift past the word: §4.5 says an
+// integer overflow is an error rather than a silent widening, so that is
+// what it is here -- the alternative would be a wrong answer in the one
+// place bit twiddling is usually counting on exactness.
+
+fn bits_arg(who: &str, v: Value) -> Result<i64, VmError> {
+    match v {
+        Value::Fixnum(n) => Ok(n),
+        other => Err(err(format!(
+            "{who}: expects exact integers, not {}",
+            match other {
+                Value::Flonum(f) => format!("the inexact {f}"),
+                _ => format!("{other:?}"),
+            }
+        ))),
+    }
+}
+
+/// `and`, `ior`, `xor` fold from an identity, so the no-argument case is
+/// the identity and one argument is itself -- which is what SRFI 151 says.
+fn fold_bits(who: &str, a: &[Value], identity: i64, f: fn(i64, i64) -> i64) -> PResult {
+    let mut acc = identity;
+    for v in a {
+        acc = f(acc, bits_arg(who, *v)?);
+    }
+    Ok(Value::Fixnum(acc))
+}
+
+fn p_bit_and(_e: &mut Engine, a: &[Value]) -> PResult {
+    fold_bits("bitwise-and", a, -1, |x, y| x & y)
+}
+
+fn p_bit_ior(_e: &mut Engine, a: &[Value]) -> PResult {
+    fold_bits("bitwise-ior", a, 0, |x, y| x | y)
+}
+
+fn p_bit_xor(_e: &mut Engine, a: &[Value]) -> PResult {
+    fold_bits("bitwise-xor", a, 0, |x, y| x ^ y)
+}
+
+fn p_bit_not(_e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("bitwise-not", a)?;
+    Ok(Value::Fixnum(!bits_arg("bitwise-not", v)?))
+}
+
+/// `(arithmetic-shift n count)` -- left for a positive count, an
+/// *arithmetic* right shift for a negative one, so the sign is preserved
+/// and shifting a negative number right far enough gives -1.
+fn p_shift(_e: &mut Engine, a: &[Value]) -> PResult {
+    let [n, count] = a else {
+        return Err(err("arithmetic-shift: expects a number and a count"));
+    };
+    let n = bits_arg("arithmetic-shift", *n)?;
+    let count = bits_arg("arithmetic-shift", *count)?;
+    if count >= 0 {
+        if count >= 64 {
+            // Only zero can survive a shift off the end of the word.
+            if n == 0 {
+                return Ok(Value::Fixnum(0));
+            }
+            return Err(err(format!(
+                "arithmetic-shift: {n} shifted left {count} does not fit in a 64-bit exact integer"
+            )));
+        }
+        let shifted = n << count;
+        // §4.5: overflow is an error. The round trip is the check.
+        if shifted >> count != n {
+            return Err(err(format!(
+                "arithmetic-shift: {n} shifted left {count} does not fit in a 64-bit exact integer"
+            )));
+        }
+        Ok(Value::Fixnum(shifted))
+    } else {
+        let by = (-count).min(63) as u32;
+        Ok(Value::Fixnum(n >> by))
+    }
+}
+
+/// The population count: of `n` when it is non-negative, of its complement
+/// when it is negative, which is SRFI 151's rule and the one that makes
+/// `bit-count` finite for a negative number under the infinite model.
+fn p_bit_count(_e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("bit-count", a)?;
+    let n = bits_arg("bit-count", v)?;
+    let bits = if n >= 0 { n.count_ones() } else { (!n).count_ones() };
+    Ok(Value::Fixnum(bits as i64))
+}
+
+/// How many bits the magnitude needs, excluding the sign.
+fn p_integer_length(_e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("integer-length", a)?;
+    let n = bits_arg("integer-length", v)?;
+    let m = if n >= 0 { n } else { !n };
+    Ok(Value::Fixnum(64 - m.leading_zeros() as i64))
+}
+
+/// The index of the lowest set bit, or -1 for zero.
+fn p_first_set_bit(_e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("first-set-bit", a)?;
+    let n = bits_arg("first-set-bit", v)?;
+    Ok(Value::Fixnum(if n == 0 {
+        -1
+    } else {
+        n.trailing_zeros() as i64
+    }))
+}
+
+// ── hash functions ──────────────────────────────────────────────────────
+//
+// The contract that matters: **if `(equal? a b)` then `(equal-hash a)` is
+// `(equal-hash b)`**. So `equal-hash` walks exactly what `equal?` recurses
+// into -- pairs, vectors, strings, bytevectors, numeric vectors and
+// arrays -- and compares everything else by identity, hashing it by
+// identity too.
+//
+// It must also terminate on a cycle, which `equal?` is required to. A
+// work budget does that: the walk is deterministic, so two equal
+// structures spend the budget the same way and arrive at the same number.
+
+const HASH_BUDGET: usize = 256;
+
+fn mix(h: u64, x: u64) -> u64 {
+    // A 64-bit avalanche step; the constants are splitmix64's.
+    let mut z = h ^ x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn hash_f64(x: f64) -> u64 {
+    // -0.0 and 0.0 are `=` but not `eqv?`, and `equal?` on flonums here
+    // compares by value -- so they must hash alike.
+    if x == 0.0 { 0 } else { x.to_bits() }
+}
+
+fn equal_hash(e: &Engine, v: Value, budget: &mut usize) -> u64 {
+    if *budget == 0 {
+        return 0;
+    }
+    *budget -= 1;
+    match v {
+        Value::Fixnum(n) => mix(1, n as u64),
+        Value::Flonum(x) => mix(2, hash_f64(x)),
+        Value::Bool(b) => mix(3, b as u64),
+        Value::Char(c) => mix(4, c as u64),
+        Value::Symbol(s) => mix(5, s.0 as u64),
+        Value::Keyword(k) => mix(6, k.0 as u64),
+        Value::Primitive(p) => mix(7, p.0 as u64),
+        Value::Null => mix(8, 0),
+        Value::Unspecified => mix(9, 0),
+        Value::Eof => mix(10, 0),
+        Value::Undefined => mix(11, 0),
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Pair(car, cdr) => {
+                let h = equal_hash(e, *car, budget);
+                mix(mix(12, h), equal_hash(e, *cdr, budget))
+            }
+            Obj::Str(cs) => {
+                let mut h = mix(13, cs.len() as u64);
+                for c in cs.iter() {
+                    h = mix(h, *c as u64);
+                }
+                h
+            }
+            Obj::Vector { items, .. } => {
+                let mut h = mix(14, items.len() as u64);
+                for x in items.iter() {
+                    h = mix(h, equal_hash(e, *x, budget));
+                    if *budget == 0 {
+                        break;
+                    }
+                }
+                h
+            }
+            Obj::Bytevector(b) => {
+                let mut h = mix(15, b.len() as u64);
+                for x in b.iter() {
+                    h = mix(h, *x as u64);
+                }
+                h
+            }
+            Obj::NumVector(nv) => {
+                let mut h = mix(16, nv.len() as u64);
+                // The tag is part of it: `#f64(1 2)` and `#f32(1 2)` are
+                // not `equal?`, so they need not hash alike -- but they
+                // must not be forced to, either.
+                h = mix(h, nv.tag() as u64);
+                for i in 0..nv.len() {
+                    h = match nv.get(i) {
+                        Some(Value::Flonum(x)) => mix(h, hash_f64(x)),
+                        Some(Value::Fixnum(n)) => mix(h, n as u64),
+                        _ => h,
+                    };
+                }
+                h
+            }
+            Obj::Array { dims, .. } => {
+                let mut h = mix(17, dims.len() as u64);
+                for d in dims.iter() {
+                    h = mix(h, *d as u64);
+                }
+                let n: usize = dims.iter().product();
+                for k in 0..n {
+                    match e.array_element(r, k) {
+                        Some(x) => h = mix(h, equal_hash(e, x, budget)),
+                        None => break,
+                    }
+                    if *budget == 0 {
+                        break;
+                    }
+                }
+                h
+            }
+            // Everything else `equal?` compares by identity, so its hash
+            // is its identity.
+            _ => mix(18, r.0 as u64),
+        },
+    }
+}
+
+/// An `eqv?`-respecting hash: by value for the immediates, by identity for
+/// everything on the heap. Never walks, so it is cheap and cycle-proof.
+fn eqv_hash(v: Value) -> u64 {
+    match v {
+        Value::Obj(r) => mix(18, r.0 as u64),
+        other => {
+            let mut budget = 1;
+            // The immediates' arms of `equal_hash` need no engine.
+            match other {
+                Value::Fixnum(n) => mix(1, n as u64),
+                Value::Flonum(x) => mix(2, hash_f64(x)),
+                Value::Bool(b) => mix(3, b as u64),
+                Value::Char(c) => mix(4, c as u64),
+                Value::Symbol(s) => mix(5, s.0 as u64),
+                Value::Keyword(k) => mix(6, k.0 as u64),
+                Value::Primitive(p) => mix(7, p.0 as u64),
+                _ => {
+                    budget += 1;
+                    mix(19, budget as u64)
+                }
+            }
+        }
+    }
+}
+
+/// Every hash primitive takes an optional bound and answers in
+/// `0..bound`, which is what SRFI 69 and SRFI 128 both ask for.
+fn bounded(a: &[Value], at: usize, h: u64) -> PResult {
+    match a.get(at) {
+        None => Ok(Value::Fixnum((h >> 1) as i64)),
+        Some(Value::Fixnum(b)) if *b > 0 => Ok(Value::Fixnum((h % *b as u64) as i64)),
+        Some(_) => Err(err("a hash bound must be a positive exact integer")),
+    }
+}
+
+fn p_equal_hash(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = *a.first().ok_or_else(|| err("equal-hash: expects a value"))?;
+    let mut budget = HASH_BUDGET;
+    bounded(a, 1, equal_hash(e, v, &mut budget))
+}
+
+fn p_eqv_hash(_e: &mut Engine, a: &[Value]) -> PResult {
+    let v = *a.first().ok_or_else(|| err("eqv-hash: expects a value"))?;
+    bounded(a, 1, eqv_hash(v))
+}
+
+fn p_string_hash(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = *a.first().ok_or_else(|| err("string-hash: expects a string"))?;
+    let cs = chars_of("string-hash", e, v)?;
+    let mut h = mix(13, cs.len() as u64);
+    for c in cs {
+        h = mix(h, c as u64);
+    }
+    bounded(a, 1, h)
+}
+
+fn p_string_ci_hash(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = *a.first().ok_or_else(|| err("string-ci-hash: expects a string"))?;
+    let cs = chars_of("string-ci-hash", e, v)?;
+    let folded: String = cs.iter().collect::<String>().to_lowercase();
+    let mut h = mix(13, folded.chars().count() as u64);
+    for c in folded.chars() {
+        h = mix(h, c as u64);
+    }
+    bounded(a, 1, h)
+}
+
+fn p_symbol_hash(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = *a.first().ok_or_else(|| err("symbol-hash: expects a symbol"))?;
+    let Value::Symbol(s) = v else {
+        return Err(err("symbol-hash: expects a symbol"));
+    };
+    // By the symbol's *name*, so a renamed template identifier hashes with
+    // what it resolves to.
+    let name = e.interner.sym_name(e.resolve(s)).to_string();
+    let mut h = mix(5, name.chars().count() as u64);
+    for c in name.chars() {
+        h = mix(h, c as u64);
+    }
+    bounded(a, 1, h)
+}
+
+fn p_number_hash(_e: &mut Engine, a: &[Value]) -> PResult {
+    let v = *a.first().ok_or_else(|| err("number-hash: expects a number"))?;
+    let h = match v {
+        Value::Fixnum(n) => mix(1, n as u64),
+        Value::Flonum(x) => mix(2, hash_f64(x)),
+        _ => return Err(err("number-hash: expects a number")),
+    };
+    bounded(a, 1, h)
+}
+
 // ── homogeneous numeric vectors (SRFI 4) ────────────────────────────────
 //
 // One set of primitives for every element type, because the vector knows
@@ -3968,6 +4284,20 @@ pub fn install(vm: &mut Vm) {
     vm.define_vm_prim("char-ready?", |vm, a| with_in_port(vm, a, 0, is_char_ready));
     vm.define_prim("%stdout-port", stdout_port);
     vm.define_prim("%stdin-port", stdin_port);
+    vm.define_prim("bitwise-and", p_bit_and);
+    vm.define_prim("bitwise-ior", p_bit_ior);
+    vm.define_prim("bitwise-xor", p_bit_xor);
+    vm.define_prim("bitwise-not", p_bit_not);
+    vm.define_prim("arithmetic-shift", p_shift);
+    vm.define_prim("bit-count", p_bit_count);
+    vm.define_prim("integer-length", p_integer_length);
+    vm.define_prim("first-set-bit", p_first_set_bit);
+    vm.define_prim("equal-hash", p_equal_hash);
+    vm.define_prim("eqv-hash", p_eqv_hash);
+    vm.define_prim("string-hash", p_string_hash);
+    vm.define_prim("string-ci-hash", p_string_ci_hash);
+    vm.define_prim("symbol-hash", p_symbol_hash);
+    vm.define_prim("number-hash", p_number_hash);
     vm.define_prim("numvector?", p_numvector_is);
     vm.define_prim("numvector-tag", p_numvector_tag);
     vm.define_prim("make-numvector", p_make_numvector);

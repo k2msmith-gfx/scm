@@ -64,8 +64,9 @@ See [docs/libraries.md](docs/libraries.md).
 
 Shipped, embedded in the binary: `(srfi 1)` lists, `(srfi 2)` `and-let*`,
 `(srfi 4)` homogeneous numeric vectors, `(srfi 8)` `receive`, `(srfi 26)`
-`cut`, `(srfi 63)` arrays, `(srfi 111)` boxes, `(srfi 132)` sorting, and
-`(scm test)`. See [docs/srfi.md](docs/srfi.md).
+`cut`, `(srfi 63)` arrays, `(srfi 69)` hash tables, `(srfi 111)` boxes,
+`(srfi 128)` comparators, `(srfi 132)` sorting, `(srfi 151)` bitwise
+operations, and `(scm test)`. See [docs/srfi.md](docs/srfi.md).
 
 `(srfi 4)` storage is native and unboxed -- four million `f64` cost 35 MB
 against 65 MB as boxed values -- with `#f64(1.0 2.5)` literals, and
