@@ -17,6 +17,7 @@ tranches below are the order they were added in.
 | `(srfi 4)` | homogeneous numeric vectors | **native, unboxed** |
 | `(srfi 8)` | `receive` | Scheme |
 | `(srfi 26)` | `cut`, `cute` | Scheme |
+| `(srfi 27)` | sources of random bits | **native state**, Scheme interface |
 | `(srfi 63)` | arrays and shared arrays | **native views**, Scheme prototypes |
 | `(srfi 69)` | basic hash tables | Scheme, on **native hash functions** |
 | `(srfi 111)` | boxes | Scheme, on records |
@@ -358,6 +359,50 @@ store. Eight integer types and two float types are here.
 half of the range has no fixnum to compare against. `u64?` is therefore
 narrower than the SRFI's, and this is the numeric tower showing up again --
 the third time in two tranches.
+
+## Tranche six: the reproducible generator
+
+2026-10-15. `(srfi 27)`, finished.
+
+Half of it was already native, because the survey said so: ray's corpus
+mentions `math/random` in six files but `:seed` in seventeen, and
+`grow-branches` is replayable only because a seed is threaded through it.
+So `random-integer`, `random-real` and `make-random-source` were built at
+S5 with the generator as a *value* behind a parameter.
+
+The half that was missing is the half that makes a run reproducible, and
+for procedural modelling that is the whole point:
+
+- **`random-source-state-ref` and `-state-set!`** save and restore the
+  generator. SplitMix64's state is one word, so the external state is
+  `#(splitmix64 n)` with that word as a signed integer, there being no
+  bignum to hold it unsigned. It is a datum, so it writes and reads back.
+  This is what lets a build regenerate one branch without regenerating
+  everything before it.
+- **`random-source-pseudo-randomize!`** gives independent substreams
+  indexed by a pair, so a tile or a frame can own its own stream and stay
+  replayable. The same pair always gives the same stream and it overrides
+  whatever seed the source held.
+- **`random-source-randomize!`** seeds from the clock, through the mixer
+  first because consecutive clock readings differ only in the low bits.
+  It is the one operation here that gives up reproducibility, which is why
+  it has to be asked for by name.
+- **`random-source-make-integers` and `-make-reals`**, the latter honouring
+  a `unit` as the resolution.
+
+Two deviations, both deliberate. **`random-integer` and `random-real` take
+an optional source**, where the SRFI ties them to `default-random-source`;
+scm puts the source in the `current-random-source` parameter so a seed can
+be scoped to one build, and a bare call reads that parameter, so SRFI code
+works unchanged. **`default-random-source` is the source that parameter
+starts with**, so randomizing it does affect a later bare call, unless
+something has parameterized the source, in which case the parameter wins.
+
+One correction the SRFI forced: its reals are in the **open** interval and
+the native `random-real` gives `[0,1)`. The library therefore builds its
+own from a 53-bit integer draw and redraws zero. It cannot simply wrap the
+native one, because a library body's definitions are mutually recursive, so
+naming `random-real` inside the library that exports it calls itself.
 
 ## What is still absent
 

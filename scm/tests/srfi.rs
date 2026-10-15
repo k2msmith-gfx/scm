@@ -89,6 +89,16 @@ fn the_numeric_vector_operations_pass_on_both_tiers() {
     }
 }
 
+/// `(srfi 27)`'s point is reproducibility rather than distribution: a
+/// procedural model has to be replayable, so the state must be savable,
+/// restorable and derivable from a seed.
+#[test]
+fn the_random_source_srfi_passes_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "27.scm"), "()", "(srfi 27) on {tier:?}");
+    }
+}
+
 #[test]
 fn equal_hash_agrees_with_equal_and_terminates_on_a_cycle() {
     // The one contract a hash table rests on: if two things are `equal?`

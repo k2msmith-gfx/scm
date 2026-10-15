@@ -1741,6 +1741,98 @@ fn random_integer(vm: &mut Vm, a: &[Value]) -> PResult {
     Ok(Value::Fixnum((n % bound) as i64))
 }
 
+/// `(random-source-state-ref s)` -- the whole generator state, as a datum
+/// that can be written and read back. SplitMix64's state is one word, so
+/// this is `#(splitmix64 n)` with `n` that word reinterpreted as a signed
+/// integer, there being no bignum to hold it unsigned (plan §2.3). The tag
+/// is there so a state from some future generator cannot be mistaken for
+/// this one.
+fn random_source_state_ref(vm: &mut Vm, a: &[Value]) -> PResult {
+    let v = one("random-source-state-ref", a)?;
+    let r = rng_ref("random-source-state-ref", vm, v)?;
+    let Obj::Rng(state) = *vm.engine.obj(r) else {
+        unreachable!("checked")
+    };
+    let tag = vm.engine.sym("splitmix64");
+    Ok(vm.engine.vector(vec![tag, Value::Fixnum(state as i64)], false))
+}
+
+/// `(random-source-state-set! s state)` -- restore a state from
+/// `random-source-state-ref`, which is how a procedural build replays one
+/// branch without regenerating everything before it.
+fn random_source_state_set(vm: &mut Vm, a: &[Value]) -> PResult {
+    let [src, state] = a else {
+        return Err(err("random-source-state-set!: expects a source and a state"));
+    };
+    let r = rng_ref("random-source-state-set!", vm, *src)?;
+    let word = match *state {
+        Value::Obj(sr) => match vm.engine.obj(sr) {
+            Obj::Vector { items, .. } if items.len() == 2 => match (items[0], items[1]) {
+                (Value::Symbol(sym), Value::Fixnum(n))
+                    if vm.engine.interner.sym_name(sym) == "splitmix64" =>
+                {
+                    n as u64
+                }
+                _ => return Err(err("random-source-state-set!: not a splitmix64 state")),
+            },
+            _ => return Err(err("random-source-state-set!: not a random source state")),
+        },
+        _ => return Err(err("random-source-state-set!: not a random source state")),
+    };
+    let Obj::Rng(slot) = vm.engine.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    *slot = word;
+    Ok(Value::Unspecified)
+}
+
+/// `(random-source-randomize! s)` -- seed from the clock, so two runs
+/// differ. This is the one operation in here that gives up
+/// reproducibility, which is why it has to be asked for by name.
+fn random_source_randomize(vm: &mut Vm, a: &[Value]) -> PResult {
+    let v = one("random-source-randomize!", a)?;
+    let r = rng_ref("random-source-randomize!", vm, v)?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x2545_F491_4F6C_DD1D);
+    let Obj::Rng(slot) = vm.engine.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    // Through the mixer first: consecutive clock readings differ in the low
+    // bits only, and SplitMix64's first output would inherit that.
+    let mut seed = nanos;
+    *slot = next_u64(&mut seed);
+    Ok(Value::Unspecified)
+}
+
+/// `(random-source-pseudo-randomize! s i j)` -- a state chosen
+/// deterministically by the pair, which is SRFI 27's way of asking for
+/// independent substreams. Two different pairs give far-apart states and
+/// the same pair always gives the same one, so a tile or a frame can own
+/// its own stream and still be replayable.
+fn random_source_pseudo_randomize(vm: &mut Vm, a: &[Value]) -> PResult {
+    let [src, i, j] = a else {
+        return Err(err(
+            "random-source-pseudo-randomize!: expects a source and two exact integers",
+        ));
+    };
+    let (Value::Fixnum(i), Value::Fixnum(j)) = (*i, *j) else {
+        return Err(err(
+            "random-source-pseudo-randomize!: expects a source and two exact integers",
+        ));
+    };
+    let r = rng_ref("random-source-pseudo-randomize!", vm, *src)?;
+    let mut a_seed = i as u64;
+    let mut b_seed = (j as u64).rotate_left(32);
+    let word = next_u64(&mut a_seed) ^ next_u64(&mut b_seed);
+    let Obj::Rng(slot) = vm.engine.obj_mut(r) else {
+        unreachable!("checked")
+    };
+    *slot = word;
+    Ok(Value::Unspecified)
+}
+
 fn is_random_source(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("random-source?", a)?;
     Ok(Value::Bool(
@@ -4463,6 +4555,13 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("random-source?", is_random_source);
     vm.define_vm_prim("random-real", random_real);
     vm.define_vm_prim("random-integer", random_integer);
+    vm.define_vm_prim("random-source-state-ref", random_source_state_ref);
+    vm.define_vm_prim("random-source-state-set!", random_source_state_set);
+    vm.define_vm_prim("random-source-randomize!", random_source_randomize);
+    vm.define_vm_prim(
+        "random-source-pseudo-randomize!",
+        random_source_pseudo_randomize,
+    );
     // quasiquote's runtime, under names nothing will shadow
     vm.define_prim("%qq-cons", qq_cons);
     vm.define_prim("%qq-append", qq_append);

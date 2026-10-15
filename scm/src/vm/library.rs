@@ -63,6 +63,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     ("(srfi 4)", include_str!("../../lib/srfi/4.sld")),
     ("(srfi 8)", include_str!("../../lib/srfi/8.sld")),
     ("(srfi 63)", include_str!("../../lib/srfi/63.sld")),
+    ("(srfi 27)", include_str!("../../lib/srfi/27.sld")),
     ("(srfi 69)", include_str!("../../lib/srfi/69.sld")),
     ("(srfi 125)", include_str!("../../lib/srfi/125.sld")),
     ("(srfi 128)", include_str!("../../lib/srfi/128.sld")),
