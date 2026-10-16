@@ -397,17 +397,53 @@ client of the protocol, so what it exercises is the protocol.
 
 ## The LLVM tiers
 
-    LLVM=$(nix build --no-link --print-out-paths 'nixpkgs#llvmPackages_21.llvm.dev')
-    LLVM_SYS_211_PREFIX=$LLVM cargo test -p scm-llvm
-
 `scm-llvm` is **not a default workspace member**: a root `cargo build`
-needs no LLVM, and `-p scm-llvm` without one fails loudly. It holds two
-things. The **leaf compiler** takes a pure numeric procedure to a native
-function and refuses anything else with a message naming the call
+needs no LLVM, and `-p scm-llvm` without one fails loudly rather than
+quietly building something lesser. It holds two things. The **leaf
+compiler** takes a pure numeric procedure to a native function and refuses
+anything else with a message naming the call
 ([docs/s11-leaf.md](docs/s11-leaf.md)); a leaf can be recompiled under a
 running render. The **general tier** compiles bytecode to native code at
 1.3× the VM, which [docs/s13-general-tier.md](docs/s13-general-tier.md)
 explains is the call protocol's ceiling rather than the code's.
+
+### What you need
+
+**LLVM 21.1.x with its development files** — `llvm-config`, headers and
+libraries, not just a `clang` binary. `llvm-sys` is pinned at `211`, so 21
+is the only major version that will do, and it must be findable either on
+`PATH` or through `LLVM_SYS_211_PREFIX`. Nothing else: the LLVM crates are
+the only dependencies anywhere in this workspace.
+
+    # nix (what this is developed against)
+    export LLVM_SYS_211_PREFIX=$(nix build --no-link --print-out-paths 'nixpkgs#llvmPackages_21.llvm.dev')
+
+    # macOS, Homebrew — llvm@21 is 21.1.8, keg-only
+    brew install llvm@21
+    export LLVM_SYS_211_PREFIX=$(brew --prefix llvm@21)
+
+    # Debian / Ubuntu, via apt.llvm.org
+    sudo apt install llvm-21-dev
+    export LLVM_SYS_211_PREFIX=/usr/lib/llvm-21
+
+    cargo test -p scm-llvm                      # the leaf compiler
+    cargo build --release -p scm-cli --features jit   # then SCM_TIER=t2 works
+
+Only the nix route is exercised on the development machine; the other two
+are the standard prefixes for an LLVM 21.1 development install, which is
+all `llvm-sys` asks for.
+
+Without any of them you get this, which is `llvm-sys` talking and not scm:
+
+    error: No suitable version of LLVM was found system-wide or pointed
+           to by LLVM_SYS_211_PREFIX.
+
+And one trap worth knowing: if that error persists **while the prefix is
+set and `llvm-config` works**, the build script's not-found verdict has
+been cached and `rerun-if-env-changed` sees no change, because the
+variable's value is the same and only the store path behind it moved. Fix
+with `cargo clean -p llvm-sys` — and note `clean -p` only cleans the
+profile you name, so `--release` separately.
 
 ## Testing
 

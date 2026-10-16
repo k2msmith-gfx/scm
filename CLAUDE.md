@@ -35,6 +35,11 @@ The LLVM crate is **not a default workspace member** and needs a prefix:
     export LLVM_SYS_211_PREFIX=$(nix build --no-link --print-out-paths 'nixpkgs#llvmPackages_21.llvm.dev')
     cargo test -p scm-llvm
 
+Any **LLVM 21.1.x with development files** will do -- `llvm-sys` is pinned
+at `211`, so only that major version. `brew --prefix llvm@21` (21.1.8) and
+`/usr/lib/llvm-21` from apt.llvm.org are the other two prefixes; the README
+lists all three.
+
 If `llvm-sys` says "No suitable version of LLVM was found" while the prefix
 is set and `llvm-config` works: its not-found verdict is **cached** and
 `rerun-if-env-changed` sees no change, because the variable's value is the
