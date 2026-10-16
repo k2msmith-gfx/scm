@@ -328,3 +328,19 @@ fn equal_terminates_on_cycles_and_is_linear_on_shared_trees() {
         "#t"
     );
 }
+
+#[test]
+fn char_case_declines_a_mapping_that_is_not_one_character() {
+    // R7RS: `char-upcase` returns the argument unchanged when its uppercase
+    // equivalent is not a single character. Rust's `to_uppercase` is the
+    // full Unicode mapping, so `ß` expands to `SS`, and taking the first
+    // character of that answered `#\S` -- neither the argument nor its
+    // uppercase. `string-upcase` is the operation allowed to lengthen.
+    assert_eq!(eval(r"(char-upcase #\ß)"), r"#\ß");
+    assert_eq!(eval(r"(char-foldcase #\ß)"), r"#\ß");
+    assert_eq!(eval(r#"(string-upcase "straße")"#), r#""STRASSE""#);
+    // The ordinary cases are untouched.
+    assert_eq!(eval(r"(char-upcase #\a)"), r"#\A");
+    assert_eq!(eval(r"(char-downcase #\A)"), r"#\a");
+    assert_eq!(eval(r"(char-upcase #\1)"), r"#\1");
+}

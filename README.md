@@ -117,6 +117,51 @@ digit value. Char-sets are Latin-1; for Unicode-correct matching the
 string procedures take a predicate, and `char-alphabetic?` and friends are
 correct over the whole range.
 
+## What Scheme code it will run
+
+The practical question, answered concretely rather than by pointing at a
+standard.
+
+**Other people's test suites run.** Chibi-Scheme's `r7rs-tests.scm`,
+written against the spec by someone with no interest in scm, runs
+unedited: **1112 assertions pass**. So does ecraven's `r7rs-benchmarks`
+corpus — 53 of its programs are inside the declared subset and **all 53
+produce the recorded answers** under both engines. That is the strongest
+claim available: code written by strangers, not examples written here.
+
+**All the `(scheme …)` libraries import**, because the standard bindings
+*are* the prelude, so importing one is a no-op:
+
+    (import (scheme base) (scheme write) (scheme char) (scheme inexact)
+            (scheme lazy) (scheme case-lambda) (scheme eval) (scheme read)
+            (scheme file) (scheme time) (scheme process-context) (scheme cxr))
+
+`define-record-type`, `syntax-rules` with nested ellipses, `guard` and
+`raise`, `dynamic-wind`, `parameterize`, `delay`/`force`/`make-promise`,
+`case-lambda`, string ports, bytevectors, `eval` with
+`interaction-environment` — all present and exercised by the suite above.
+
+**One sharp edge to know about**: an import of *any* `(scheme …)` name
+succeeds, including one scm does not implement. `(import (scheme complex))`
+is accepted and then `make-rectangular` is an unbound variable. You find
+the gap at the call site, not at the import.
+
+### What will not run
+
+| | |
+|---|---|
+| a **re-entrant** continuation | raises. Escaping works; resuming a dead extent does not. Generators that resume, `amb`, coroutines |
+| exact rationals | `1/2` is a read error, not a number. `(/ 8 3)` is a flonum |
+| complex numbers | `make-rectangular` and friends are absent |
+| `:at` as a *symbol* | it reads as a keyword unless `colon_keywords` is off |
+| Unicode case *folding* in `string-ci=?` | `full-unicode` is unclaimed; `char-upcase` declines a mapping that is not a single character, as R7RS requires |
+| bitwise ops on a bignum | they are 64 bits wide and say so rather than truncating |
+
+Everything on that list fails *loudly*. The design rule throughout is that
+a thing scm cannot do raises rather than returning a plausible wrong
+answer — which is why `(/ 8 3)` being a flonum is a decision and not a
+silent approximation.
+
 ## Libraries built in
 
 **36 libraries are embedded in the binary**, so `scm` needs no library
@@ -383,6 +428,60 @@ coverage of its own output.
 Against Steel on the ten benchmark programs both run: the bytecode VM is
 0.91×, the LLVM tier 1.06×, startup 7× faster, escape continuations 2.6×
 ([docs/vs-steel.md](docs/vs-steel.md)).
+
+## Benchmarks
+
+The corpus is **ecraven's `r7rs-benchmarks`**, cloned rather than vendored,
+and it is used as *two* instruments that answer different questions.
+
+    scm-conform/bench/run.py --fetch        # clone the suite
+    cargo test -p scm-conform --test benchmarks   # the language gate
+    scm-conform/bench/run.py --small        # timings at reduced sizes
+
+**As a language gate**, at reduced sizes, in `cargo test`: all **53**
+programs in the declared subset run and return the recorded answers, under
+both engines, with **zero** compiler declines. That is a correctness
+instrument, and it is the one that gates a commit.
+
+**As a performance instrument**, at the suite's published sizes with a
+120-second cap per program:
+
+| | T0 (interpreter) | T1 (bytecode) |
+|---|---|---|
+| finished within 120 s | 3 | **33** |
+| timed out | 41 | 20 |
+| outside the subset | 4 | 4 |
+
+T1 is **6.7×** T0 over the reduced suite as a whole (53.7 s → 8.0 s), 5.0×
+on `fib 30`, 17× on `nboyer`. The outliers are the ones that should be:
+`sum1` (1.0×) is reading a file, which is the reader's time, and `equal`
+(1.2×) compares in Rust either way.
+
+Against **Chibi-Scheme's published times** for the 29 programs that finish
+and have a Chibi figure, the geometric mean of T1 ÷ Chibi is **0.6×** — so
+T1 is somewhat ahead of Chibi, which is where a bytecode interpreter over
+boxed values should be. (T0 measured 13× slower than Chibi on `fib`.)
+Details in [docs/s12-bytecode.md](docs/s12-bytecode.md).
+
+Against **Steel**, on ten programs both implementations run:
+
+| | Steel ÷ T1 | Steel ÷ T2 |
+|---|---|---|
+| geometric mean, excluding startup | **0.91×** | **1.06×** |
+| startup | 7.5× | 7.8× |
+| an escape continuation per iteration | 2.6× | 2.7× |
+| `lists` — map over 100k, 20 times, plus `assv` | 0.5× | 0.6× |
+
+So: a little behind Steel on the bytecode tier, a little ahead with the
+LLVM tier on, much faster to start, and much faster on escape
+continuations. The honest weak spot is list-heavy allocation at 0.5×.
+[docs/vs-steel.md](docs/vs-steel.md) has the per-program table and the
+reading.
+
+The numbers that are *not* in this class are the leaf compiler's, because
+it is not competing in it: **138×–406×** over T1 on noise and vector
+kernels, and 3.3 ns for a bilinear image tap against 935 ns interpreted.
+It earns that by dropping everything a Scheme normally carries.
 
 ## Status and platform
 

@@ -1691,15 +1691,27 @@ fn char_numeric(_e: &mut Engine, a: &[Value]) -> PResult {
 fn char_white(_e: &mut Engine, a: &[Value]) -> PResult {
     char_pred("char-whitespace?", a, |c| c.is_whitespace())
 }
+/// R7RS: a character whose case mapping is **not a single character** comes
+/// back unchanged. Rust's `to_uppercase` is the full Unicode mapping, so
+/// `ß` expands to `SS` -- and taking the first character of that returned
+/// `#\S`, which is neither the argument nor its uppercase. `string-upcase`
+/// is the operation that may lengthen; `char-upcase` is not.
+fn single_case(c: char, mut mapped: impl Iterator<Item = char>) -> char {
+    match (mapped.next(), mapped.next()) {
+        (Some(one), None) => one,
+        _ => c,
+    }
+}
+
 fn char_upcase(_e: &mut Engine, a: &[Value]) -> PResult {
     match a {
-        [Value::Char(c)] => Ok(Value::Char(c.to_uppercase().next().unwrap_or(*c))),
+        [Value::Char(c)] => Ok(Value::Char(single_case(*c, c.to_uppercase()))),
         _ => Err(err("char-upcase: expects one character")),
     }
 }
 fn char_downcase(_e: &mut Engine, a: &[Value]) -> PResult {
     match a {
-        [Value::Char(c)] => Ok(Value::Char(c.to_lowercase().next().unwrap_or(*c))),
+        [Value::Char(c)] => Ok(Value::Char(single_case(*c, c.to_lowercase()))),
         _ => Err(err("char-downcase: expects one character")),
     }
 }
