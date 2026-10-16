@@ -175,11 +175,11 @@
               (else (loop (+ i 1))))))
 
     ;; `bound` defaults to 2^22 and 0 asks for that default, as the
-    ;; reference does. The accumulator is reduced at **every step**: a
-    ;; conventional `(* 37 h)` run over 256 code points overflows without
-    ;; a numeric tower, which is the trap `(srfi 128)`'s combiner hit
-    ;; (plan §2.3). Reducing modulo 2^32 keeps `37 * h` far inside an
-    ;; i64 and changes only the distribution, not the contract.
+    ;; reference does. The accumulator is reduced at **every step**, which
+    ;; is how a bounded hash is written rather than a workaround: with
+    ;; `exact-closed` claimed (S18) the unreduced form would work, but
+    ;; `(* 37 h)` over 256 code points would build a 1300-bit integer to
+    ;; throw away. Reducing modulo 2^32 keeps `37 * h` far inside an i64.
     (define (char-set-hash cs . opt)
       (let ((bound (if (and (pair? opt) (not (eqv? 0 (car opt))))
                        (car opt)

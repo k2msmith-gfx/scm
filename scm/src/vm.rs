@@ -1625,8 +1625,11 @@ impl Vm {
             Value::Null => Err(self.err("empty application: ()")),
 
             Value::Obj(r) => match self.engine.obj(r).clone() {
-                // Strings, bytevectors and `#(…)` vectors are constants.
-                Obj::Str(_) | Obj::Bytevector(_) => Ok(Step::Return(expr)),
+                // Strings, bytevectors, bignums and `#(…)` vectors are
+                // constants. A bignum gets here because a literal too wide
+                // for a fixnum is a heap object, and a number evaluates to
+                // itself whichever representation it arrived in.
+                Obj::Str(_) | Obj::Bytevector(_) | Obj::Bignum(_) => Ok(Step::Return(expr)),
                 Obj::Vector { items, bracket } => {
                     if !bracket {
                         return Ok(Step::Return(expr));

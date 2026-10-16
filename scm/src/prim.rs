@@ -8,9 +8,11 @@
 //!   * **`(/ 8 3)` is inexact**, because `ratios` is not claimed -- which is
 //!     the Steel trap avoided by construction rather than by discipline.
 
+use crate::bigint::BigInt;
 use crate::heap::{Engine, ErrorKind, NumTag, NumVec, Obj, PortKind};
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use crate::value::{ObjRef, SymId};
@@ -47,82 +49,206 @@ fn filled<T: Clone>(who: &str, n: i64, fill: T) -> Result<Vec<T>, VmError> {
 }
 
 /// A number as an `f64`, for when any argument is inexact.
-fn as_f64(v: Value) -> Option<f64> {
+///
+/// Takes the engine because a bignum lives in the heap. Every caller had
+/// to be threaded through for that, which is the point: `want_number`
+/// accepts bignums now, so a path that still read `Value::Fixnum` and
+/// `Value::Flonum` only would have met one and said "not a number" --
+/// or worse, hit an `.expect("checked")`.
+fn as_f64(e: &Engine, v: Value) -> Option<f64> {
     match v {
         Value::Fixnum(n) => Some(n as f64),
         Value::Flonum(x) => Some(x),
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Bignum(b) => Some(b.to_f64()),
+            _ => None,
+        },
         _ => None,
     }
 }
 
-fn want_number(who: &str, v: Value, e: &Engine) -> Result<(), VmError> {
-    if as_f64(v).is_none() {
-        return Err(err(format!("{who}: not a number: {}", write_str(e, v))));
+/// The exact integer behind a value, however it is stored. `None` for a
+/// flonum or a non-number.
+fn as_exact(e: &Engine, v: Value) -> Option<BigInt> {
+    match v {
+        Value::Fixnum(n) => Some(BigInt::from_i64(n)),
+        Value::Obj(r) => match e.obj(r) {
+            Obj::Bignum(b) => Some(b.clone()),
+            _ => None,
+        },
+        _ => None,
     }
-    Ok(())
 }
 
-fn all_exact(args: &[Value]) -> bool {
+/// The ceiling on an exact integer, in bits. Unbounded means "not bounded
+/// by the word size", not "allowed to exhaust the host": requirement 8
+/// says a script must not be able to kill its process, and S7 found four
+/// ways it could. `(expt 2 (expt 2 40))` is one more, so there is a limit
+/// and it reports rather than allocating until the OOM killer arrives.
+///
+/// 2^20 bits is about 315,000 decimal digits -- past anything a scene or a
+/// hash will want, and small enough that the quadratic multiply stays
+/// answerable.
+const MAX_EXACT_BITS: u64 = 1 << 20;
+
+fn too_big(who: &str) -> VmError {
+    err(format!(
+        "{who}: exact integer too large (over {MAX_EXACT_BITS} bits)"
+    ))
+}
+
+/// **One integer, one representation.** Every exact-integer result goes
+/// through here: a value that fits comes back a `Fixnum`, and only what
+/// does not becomes a heap bignum. Skipping this would let `5` exist as
+/// both, and then `eqv?`, `equal-hash` and every `match` on `Value`
+/// disagree with themselves.
+///
+/// It is also the one chokepoint for `MAX_EXACT_BITS`, so an operation
+/// that grows without bound is caught wherever it happens rather than at
+/// each site that might.
+fn norm(e: &mut Engine, who: &str, b: BigInt) -> PResult {
+    if b.to_i64().is_none() && b.bit_len() > MAX_EXACT_BITS {
+        return Err(too_big(who));
+    }
+    Ok(e.exact_integer(b))
+}
+
+/// Fold the exact-integer arguments with `bx`, mirroring the fixnum path's
+/// treatment of zero and one argument exactly.
+fn exact_fold(
+    who: &'static str,
+    e: &mut Engine,
+    args: &[Value],
+    ident: i64,
+    bx: fn(&BigInt, &BigInt) -> BigInt,
+) -> PResult {
+    let mut acc = match args.len() {
+        0 => return Ok(Value::Fixnum(ident)),
+        _ => BigInt::from_i64(ident),
+    };
+    let (first, rest) = if args.len() == 1 {
+        (None, args)
+    } else {
+        (Some(args[0]), &args[1..])
+    };
+    if let Some(f) = first {
+        acc = as_exact(e, f).expect("exact");
+    }
+    for &a in rest {
+        let x = as_exact(e, a).expect("exact");
+        acc = bx(&acc, &x);
+        if acc.bit_len() > MAX_EXACT_BITS {
+            return Err(too_big(who));
+        }
+    }
+    norm(e, who, acc)
+}
+
+fn is_exact_int(e: &Engine, v: Value) -> bool {
+    matches!(v, Value::Fixnum(_))
+        || matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::Bignum(_)))
+}
+
+/// Checked on every argument of every arithmetic operation, so the common
+/// case is kept to two tag tests that never touch the heap. Going through
+/// `as_f64` would be shorter and would make a bignum's heap read part of
+/// the fixnum path -- measured at about 3% on a fixnum-heavy loop, which
+/// is the whole budget S18 had.
+fn want_number(who: &str, v: Value, e: &Engine) -> Result<(), VmError> {
+    if matches!(v, Value::Fixnum(_) | Value::Flonum(_)) {
+        return Ok(());
+    }
+    if is_exact_int(e, v) {
+        return Ok(());
+    }
+    Err(err(format!("{who}: not a number: {}", write_str(e, v))))
+}
+
+/// Fixnums only -- the fast path's precondition. A bignum argument is
+/// exact but not a fixnum, so it takes the slower exact path.
+fn all_fixnum(args: &[Value]) -> bool {
     args.iter().all(|v| matches!(v, Value::Fixnum(_)))
 }
 
-/// `+`, `-` and `*` stay exact on exact inputs, and overflow is an error.
+fn all_exact_int(e: &Engine, args: &[Value]) -> bool {
+    args.iter().all(|&v| is_exact_int(e, v))
+}
+
+/// `+`, `-` and `*` stay exact on exact inputs, and **overflow widens**
+/// rather than raising: `exact-closed` is claimed now (plan §2.3,
+/// [numeric-tower.md](../../docs/numeric-tower.md)).
+///
+/// The fixnum path is unchanged and still first, which is the point. Every
+/// scene-sized calculation stays three `i64` operations and an allocation-free
+/// return; the bignum path is reached only when `checked_*` says the
+/// answer does not fit, and then the *whole* fold is redone exactly rather
+/// than being resumed, because `acc` has already lost the information.
 fn arith(
     who: &'static str,
-    e: &Engine,
+    e: &mut Engine,
     args: &[Value],
     ident: i64,
     fx: fn(i64, i64) -> Option<i64>,
+    bx: fn(&BigInt, &BigInt) -> BigInt,
     fl: fn(f64, f64) -> f64,
 ) -> PResult {
     for &a in args {
         want_number(who, a, e)?;
     }
-    if all_exact(args) {
+    if all_fixnum(args) {
         let mut acc = match args.len() {
             0 => return Ok(Value::Fixnum(ident)),
             1 => ident,
             _ => match args[0] {
                 Value::Fixnum(n) => n,
-                _ => unreachable!("all_exact"),
+                _ => unreachable!("all_fixnum"),
             },
         };
         let rest = if args.len() == 1 { args } else { &args[1..] };
+        let mut overflowed = false;
         for &a in rest {
             let Value::Fixnum(n) = a else {
-                unreachable!("all_exact")
+                unreachable!("all_fixnum")
             };
-            acc = fx(acc, n).ok_or_else(|| {
-                err(format!(
-                    "{who}: exact integer overflow (no bignums: the `exact-closed` feature is absent)"
-                ))
-            })?;
+            match fx(acc, n) {
+                Some(next) => acc = next,
+                None => {
+                    overflowed = true;
+                    break;
+                }
+            }
         }
-        return Ok(Value::Fixnum(acc));
+        if !overflowed {
+            return Ok(Value::Fixnum(acc));
+        }
+        return exact_fold(who, e, args, ident, bx);
+    }
+    if all_exact_int(e, args) {
+        return exact_fold(who, e, args, ident, bx);
     }
     let mut acc = match args.len() {
         0 => return Ok(Value::Fixnum(ident)),
         1 => ident as f64,
-        _ => as_f64(args[0]).expect("checked"),
+        _ => as_f64(e, args[0]).expect("checked"),
     };
     let rest = if args.len() == 1 { args } else { &args[1..] };
     for &a in rest {
-        acc = fl(acc, as_f64(a).expect("checked"));
+        acc = fl(acc, as_f64(e, a).expect("checked"));
     }
     Ok(Value::Flonum(acc))
 }
 
 fn add(e: &mut Engine, a: &[Value]) -> PResult {
-    arith("+", e, a, 0, i64::checked_add, |x, y| x + y)
+    arith("+", e, a, 0, i64::checked_add, BigInt::add, |x, y| x + y)
 }
 fn sub(e: &mut Engine, a: &[Value]) -> PResult {
     if a.is_empty() {
         return Err(err("-: needs at least one argument"));
     }
-    arith("-", e, a, 0, i64::checked_sub, |x, y| x - y)
+    arith("-", e, a, 0, i64::checked_sub, BigInt::sub, |x, y| x - y)
 }
 fn mul(e: &mut Engine, a: &[Value]) -> PResult {
-    arith("*", e, a, 1, i64::checked_mul, |x, y| x * y)
+    arith("*", e, a, 1, i64::checked_mul, BigInt::mul, |x, y| x * y)
 }
 
 /// Division is where the absence of `ratios` shows. `(/ 8 4)` is the exact 2;
@@ -140,7 +266,7 @@ fn div(e: &mut Engine, a: &[Value]) -> PResult {
     } else {
         (a[0], &a[1..])
     };
-    if all_exact(a) {
+    if all_fixnum(a) {
         let Value::Fixnum(mut acc) = first else {
             unreachable!()
         };
@@ -168,24 +294,129 @@ fn div(e: &mut Engine, a: &[Value]) -> PResult {
             Value::Flonum(facc)
         });
     }
-    let mut acc = as_f64(first).expect("checked");
+
+    // The same shape exactly, over bignums. `(/ 2^64 2)` is the exact
+    // 2^63; `(/ 2^64 3)` is inexact, because `ratios` is still not
+    // claimed and that is a decision, not an omission
+    // ([numeric-tower.md](../../docs/numeric-tower.md) §5).
+    if all_exact_int(e, a) {
+        let mut acc = as_exact(e, first).expect("exact");
+        let mut exact = true;
+        let mut facc = acc.to_f64();
+        for &dv in rest {
+            let d = as_exact(e, dv).expect("exact");
+            if d.is_zero() {
+                return Err(err("/: division by exact zero"));
+            }
+            if exact {
+                let (q, r) = acc.divrem(&d).expect("non-zero divisor");
+                if r.is_zero() {
+                    acc = q;
+                    facc = acc.to_f64();
+                    continue;
+                }
+                // Inexact from here on, starting with this division.
+                facc = acc.to_f64();
+                exact = false;
+            }
+            facc /= d.to_f64();
+        }
+        return if exact {
+            norm(e, "/", acc)
+        } else {
+            Ok(Value::Flonum(facc))
+        };
+    }
+    let mut acc = as_f64(e, first).expect("checked");
     for &d in rest {
-        acc /= as_f64(d).expect("checked");
+        acc /= as_f64(e, d).expect("checked");
     }
     Ok(Value::Flonum(acc))
 }
 
-fn compare(who: &'static str, e: &Engine, args: &[Value], ok: fn(f64, f64) -> bool) -> PResult {
+/// Compare an exact integer with a flonum **exactly**, by splitting the
+/// flonum at its integral part. Going through `as_f64` on both sides would
+/// round the exact one, and past 2^53 that turns distinct integers into
+/// equal doubles -- the mistake `=` already guarded against for fixnums
+/// with `i128`, which a bignum makes unguardable that way.
+fn cmp_exact_flonum(e: &Engine, exact: Value, f: f64) -> Option<Ordering> {
+    if f.is_nan() {
+        return None;
+    }
+    if f == f64::INFINITY {
+        return Some(Ordering::Less);
+    }
+    if f == f64::NEG_INFINITY {
+        return Some(Ordering::Greater);
+    }
+    let x = as_exact(e, exact)?;
+    let t = f.trunc();
+    let whole = BigInt::from_f64(t)?;
+    match x.cmp(&whole) {
+        // Equal to the integral part, so the fraction decides.
+        Ordering::Equal => {
+            if f > t {
+                Some(Ordering::Less)
+            } else if f < t {
+                Some(Ordering::Greater)
+            } else {
+                Some(Ordering::Equal)
+            }
+        }
+        other => Some(other),
+    }
+}
+
+/// The ordering of two numbers, or `None` when a NaN is involved and every
+/// comparison is false.
+fn num_cmp(e: &Engine, a: Value, b: Value) -> Option<Ordering> {
+    // The overwhelmingly common case, kept first and allocation-free.
+    if let (Value::Fixnum(x), Value::Fixnum(y)) = (a, b) {
+        return Some(x.cmp(&y));
+    }
+    let (a_exact, b_exact) = (is_exact_int(e, a), is_exact_int(e, b));
+    if a_exact && b_exact {
+        return Some(as_exact(e, a)?.cmp(&as_exact(e, b)?));
+    }
+    if a_exact {
+        return cmp_exact_flonum(e, a, as_f64(e, b)?);
+    }
+    if b_exact {
+        return cmp_exact_flonum(e, b, as_f64(e, a)?).map(Ordering::reverse);
+    }
+    as_f64(e, a)?.partial_cmp(&as_f64(e, b)?)
+}
+
+fn compare(
+    who: &'static str,
+    e: &Engine,
+    args: &[Value],
+    ok: fn(Ordering) -> bool,
+) -> PResult {
     if args.len() < 2 {
         return Err(err(format!("{who}: needs at least two arguments")));
     }
     for &a in args {
         want_number(who, a, e)?;
     }
+    // All-fixnum first, which is nearly every comparison a program makes:
+    // no `Option`, no engine, no conversion.
+    if all_fixnum(args) {
+        for w in args.windows(2) {
+            let (Value::Fixnum(x), Value::Fixnum(y)) = (w[0], w[1]) else {
+                unreachable!("all_fixnum")
+            };
+            if !ok(x.cmp(&y)) {
+                return Ok(Value::Bool(false));
+            }
+        }
+        return Ok(Value::Bool(true));
+    }
     for w in args.windows(2) {
-        let (x, y) = (as_f64(w[0]).expect("checked"), as_f64(w[1]).expect("checked"));
-        if !ok(x, y) {
-            return Ok(Value::Bool(false));
+        match num_cmp(e, w[0], w[1]) {
+            Some(o) if ok(o) => {}
+            // `None` is a NaN, and every comparison against one is false.
+            _ => return Ok(Value::Bool(false)),
         }
     }
     Ok(Value::Bool(true))
@@ -193,40 +424,22 @@ fn compare(who: &'static str, e: &Engine, args: &[Value], ok: fn(f64, f64) -> bo
 
 /// `=` on a mixed pair must be mathematically correct, which comparing two
 /// f64s is not: 9007199254740993 is not representable, so converting it
-/// makes it equal to 9007199254740992.0. Compare in i128 when one side is
-/// exact and the other is an integral flonum.
+/// makes it equal to 9007199254740992.0. `num_cmp` is where that care
+/// lives now, because a bignum cannot be checked in `i128` either.
 fn num_eq(e: &mut Engine, a: &[Value]) -> PResult {
-    if a.len() < 2 {
-        return Err(err("=: needs at least two arguments"));
-    }
-    for &x in a {
-        want_number("=", x, e)?;
-    }
-    for w in a.windows(2) {
-        let same = match (w[0], w[1]) {
-            (Value::Fixnum(x), Value::Fixnum(y)) => x == y,
-            (Value::Fixnum(n), Value::Flonum(f)) | (Value::Flonum(f), Value::Fixnum(n)) => {
-                f.fract() == 0.0 && f.is_finite() && (f as i128) == (n as i128)
-            }
-            _ => as_f64(w[0]) == as_f64(w[1]),
-        };
-        if !same {
-            return Ok(Value::Bool(false));
-        }
-    }
-    Ok(Value::Bool(true))
+    compare("=", e, a, |o| o == Ordering::Equal)
 }
 fn lt(e: &mut Engine, a: &[Value]) -> PResult {
-    compare("<", e, a, |x, y| x < y)
+    compare("<", e, a, |o| o == Ordering::Less)
 }
 fn gt(e: &mut Engine, a: &[Value]) -> PResult {
-    compare(">", e, a, |x, y| x > y)
+    compare(">", e, a, |o| o == Ordering::Greater)
 }
 fn le(e: &mut Engine, a: &[Value]) -> PResult {
-    compare("<=", e, a, |x, y| x <= y)
+    compare("<=", e, a, |o| o != Ordering::Greater)
 }
 fn ge(e: &mut Engine, a: &[Value]) -> PResult {
-    compare(">=", e, a, |x, y| x >= y)
+    compare(">=", e, a, |o| o != Ordering::Less)
 }
 
 fn one(who: &str, a: &[Value]) -> Result<Value, VmError> {
@@ -284,7 +497,7 @@ fn not(_e: &mut Engine, a: &[Value]) -> PResult {
 fn is_zero(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("zero?", a)?;
     want_number("zero?", v, e)?;
-    Ok(Value::Bool(as_f64(v) == Some(0.0)))
+    Ok(Value::Bool(as_f64(e, v) == Some(0.0)))
 }
 
 /// `eq?` is identity. Immediates compare by value, and heap objects by
@@ -297,13 +510,30 @@ fn eq(_e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
-/// `eqv?`. For the types that exist so far this is `eq?`, since numbers are
-/// immediates and compare by value. It gets its own entry because the prelude
-/// and R7RS both name it, and because it will diverge when records arrive.
-fn eqv(_e: &mut Engine, a: &[Value]) -> PResult {
+/// `eqv?`. For the immediates this is `eq?`, since they compare by value.
+///
+/// **A bignum is the exception**, and it is not optional: a bignum is a
+/// number that happens to live in the heap, so two references holding the
+/// same integer are `eqv?` -- R7RS requires `eqv?` to be true of two exact
+/// numbers that are `=`. Comparing the `Value`s alone would compare heap
+/// addresses and report `#f` while `equal?` reported `#t`, which is the
+/// kind of disagreement normalisation exists to prevent.
+fn eqv(e: &mut Engine, a: &[Value]) -> PResult {
     match a {
-        [x, y] => Ok(Value::Bool(x == y)),
+        [x, y] => Ok(Value::Bool(eqv_values(e, *x, *y))),
         _ => Err(err("eqv?: expects two arguments")),
+    }
+}
+
+fn eqv_values(e: &Engine, x: Value, y: Value) -> bool {
+    if x == y {
+        return true;
+    }
+    match (x, y) {
+        (Value::Obj(r1), Value::Obj(r2)) => {
+            matches!((e.obj(r1), e.obj(r2)), (Obj::Bignum(a), Obj::Bignum(b)) if a == b)
+        }
+        _ => false,
     }
 }
 
@@ -451,7 +681,7 @@ macro_rules! float_prim {
         fn $name(e: &mut Engine, a: &[Value]) -> PResult {
             let v = one(stringify!($name), a)?;
             want_number(stringify!($name), v, e)?;
-            let x: f64 = as_f64(v).expect("checked");
+            let x: f64 = as_f64(e, v).expect("checked");
             Ok(Value::Flonum($f(x)))
         }
     };
@@ -477,7 +707,7 @@ fn p_sqrt(e: &mut Engine, a: &[Value]) -> PResult {
             return Ok(Value::Fixnum(r));
         }
     }
-    Ok(Value::Flonum(as_f64(v).expect("checked").sqrt()))
+    Ok(Value::Flonum(as_f64(e, v).expect("checked").sqrt()))
 }
 
 /// One argument is the natural log; two is a log in the given base.
@@ -486,9 +716,9 @@ fn p_log(e: &mut Engine, a: &[Value]) -> PResult {
         want_number("log", x, e)?;
     }
     match a {
-        [x] => Ok(Value::Flonum(as_f64(*x).expect("checked").ln())),
+        [x] => Ok(Value::Flonum(as_f64(e, *x).expect("checked").ln())),
         [x, b] => Ok(Value::Flonum(
-            as_f64(*x).expect("checked").ln() / as_f64(*b).expect("checked").ln(),
+            as_f64(e, *x).expect("checked").ln() / as_f64(e, *b).expect("checked").ln(),
         )),
         _ => Err(err("log: expects one or two arguments")),
     }
@@ -501,9 +731,9 @@ fn p_atan(e: &mut Engine, a: &[Value]) -> PResult {
         want_number("atan", x, e)?;
     }
     match a {
-        [x] => Ok(Value::Flonum(as_f64(*x).expect("checked").atan())),
+        [x] => Ok(Value::Flonum(as_f64(e, *x).expect("checked").atan())),
         [y, x] => Ok(Value::Flonum(
-            as_f64(*y).expect("checked").atan2(as_f64(*x).expect("checked")),
+            as_f64(e, *y).expect("checked").atan2(as_f64(e, *x).expect("checked")),
         )),
         _ => Err(err("atan: expects one or two arguments")),
     }
@@ -515,20 +745,51 @@ fn p_expt(e: &mut Engine, a: &[Value]) -> PResult {
         [base, exp] => {
             want_number("expt", *base, e)?;
             want_number("expt", *exp, e)?;
+            // The fixnum fast path, unchanged: a small exponent that
+            // cannot overflow stays three multiplies and no allocation.
             if let (Value::Fixnum(b), Value::Fixnum(x)) = (base, exp)
                 && *x >= 0
                 && *x < 63
             {
                 let mut acc: i64 = 1;
+                let mut fits = true;
                 for _ in 0..*x {
-                    acc = acc.checked_mul(*b).ok_or_else(|| {
-                        err("expt: exact integer overflow (the `exact-closed` feature is absent)")
-                    })?;
+                    match acc.checked_mul(*b) {
+                        Some(next) => acc = next,
+                        None => {
+                            fits = false;
+                            break;
+                        }
+                    }
                 }
-                return Ok(Value::Fixnum(acc));
+                if fits {
+                    return Ok(Value::Fixnum(acc));
+                }
+            }
+            // An exact base raised to a non-negative exact integer power is
+            // exact, however big it gets. The size is **checked before the
+            // work**, because `(expt 2 (expt 2 40))` must report rather
+            // than allocate until the process dies: the result has
+            // `bit_len(base) * exp` bits and that is knowable up front.
+            if is_exact_int(e, *base)
+                && let Some(x) = as_exact(e, *exp)
+                && !x.is_negative()
+            {
+                let b = as_exact(e, *base).expect("exact");
+                let Some(x_small) = x.to_i64() else {
+                    return Err(too_big("expt"));
+                };
+                if b.is_zero() {
+                    return Ok(Value::Fixnum(if x_small == 0 { 1 } else { 0 }));
+                }
+                let bits = b.bit_len().saturating_mul(x_small.max(0) as u64);
+                if bits > MAX_EXACT_BITS || x_small > u32::MAX as i64 {
+                    return Err(too_big("expt"));
+                }
+                return norm(e, "expt", b.pow(x_small as u32));
             }
             Ok(Value::Flonum(
-                as_f64(*base).expect("checked").powf(as_f64(*exp).expect("checked")),
+                as_f64(e, *base).expect("checked").powf(as_f64(e, *exp).expect("checked")),
             ))
         }
         _ => Err(err("expt: expects two arguments")),
@@ -543,8 +804,10 @@ macro_rules! round_prim {
             let v = one($who, a)?;
             want_number($who, v, e)?;
             match v {
-                Value::Fixnum(_) => Ok(v),
-                _ => Ok(Value::Flonum($f(as_f64(v).expect("checked")))),
+                // An exact integer is already rounded, whichever way it is
+                // stored, so these are the identity on it.
+                _ if is_exact_int(e, v) => Ok(v),
+                _ => Ok(Value::Flonum($f(as_f64(e, v).expect("checked")))),
             }
         }
     };
@@ -567,11 +830,16 @@ fn p_abs(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("abs", a)?;
     want_number("abs", v, e)?;
     match v {
-        Value::Fixnum(n) => n
-            .checked_abs()
-            .map(Value::Fixnum)
-            .ok_or_else(|| err("abs: exact integer overflow")),
-        _ => Ok(Value::Flonum(as_f64(v).expect("checked").abs())),
+        // `(abs i64::MIN)` has no fixnum, and now has an answer.
+        Value::Fixnum(n) => match n.checked_abs() {
+            Some(m) => Ok(Value::Fixnum(m)),
+            None => norm(e, "abs", BigInt::from_i64(n).abs()),
+        },
+        _ if is_exact_int(e, v) => {
+            let b = as_exact(e, v).expect("exact");
+            norm(e, "abs", b.abs())
+        }
+        _ => Ok(Value::Flonum(as_f64(e, v).expect("checked").abs())),
     }
 }
 
@@ -620,7 +888,35 @@ fn int_pair(who: &'static str, e: &Engine, a: &[Value]) -> Result<(i64, i64, boo
     }
 }
 
+/// The division family when either side is a bignum. `None` when both are
+/// fixnums, so the fixnum path below runs unchanged and unslowed.
+fn big_pair(
+    who: &str,
+    e: &Engine,
+    a: &[Value],
+) -> Result<Option<(BigInt, BigInt)>, VmError> {
+    let [x, y] = a else {
+        return Err(err(format!("{who}: expects two integers")));
+    };
+    if matches!(x, Value::Fixnum(_)) && matches!(y, Value::Fixnum(_)) {
+        return Ok(None);
+    }
+    if !(is_exact_int(e, *x) && is_exact_int(e, *y)) {
+        return Ok(None);
+    }
+    let bx = as_exact(e, *x).expect("exact");
+    let by = as_exact(e, *y).expect("exact");
+    if by.is_zero() {
+        return Err(err(format!("{who}: division by zero")));
+    }
+    Ok(Some((bx, by)))
+}
+
 fn p_quotient(e: &mut Engine, a: &[Value]) -> PResult {
+    if let Some((x, y)) = big_pair("quotient", e, a)? {
+        let (q, _) = x.divrem(&y).expect("non-zero divisor");
+        return norm(e, "quotient", q);
+    }
     let (x, y, inexact) = int_pair("quotient", e, a)?;
     Ok(int_result(x.wrapping_div(y), inexact))
 }
@@ -630,6 +926,10 @@ fn p_quotient(e: &mut Engine, a: &[Value]) -> PResult {
 /// hostile programs. The mathematical answer is 0, and `checked_rem` is how
 /// to say that without a special case for the one input.
 fn p_remainder(e: &mut Engine, a: &[Value]) -> PResult {
+    if let Some((x, y)) = big_pair("remainder", e, a)? {
+        let (_, r) = x.divrem(&y).expect("non-zero divisor");
+        return norm(e, "remainder", r);
+    }
     let (x, y, inexact) = int_pair("remainder", e, a)?;
     Ok(int_result(x.checked_rem(y).unwrap_or(0), inexact))
 }
@@ -638,6 +938,17 @@ fn p_remainder(e: &mut Engine, a: &[Value]) -> PResult {
 /// wrong for a negative one -- `(modulo 13 -4)` is -3, not -1. Found by the
 /// R7RS suite; `rem_euclid` is not this operation.
 fn p_modulo(e: &mut Engine, a: &[Value]) -> PResult {
+    if let Some((x, y)) = big_pair("modulo", e, a)? {
+        // The sign of the *divisor*, as for fixnums: `divrem`'s remainder
+        // takes the dividend's sign, so correct it when they differ.
+        let (_, r) = x.divrem(&y).expect("non-zero divisor");
+        let m = if !r.is_zero() && r.is_negative() != y.is_negative() {
+            r.add(&y)
+        } else {
+            r
+        };
+        return norm(e, "modulo", m);
+    }
     let (x, y, inexact) = int_pair("modulo", e, a)?;
     // Every step here can overflow on the i64 edges: the remainder itself
     // for `i64::MIN % -1`, and the `+ y` for a large remainder. Wrapping is
@@ -669,13 +980,13 @@ fn fold_extreme(who: &'static str, e: &Engine, a: &[Value], want_min: bool) -> P
     let inexact = a.iter().any(|v| matches!(v, Value::Flonum(_)));
     let mut best = a[0];
     for &x in &a[1..] {
-        let (bx, xx) = (as_f64(best).expect("checked"), as_f64(x).expect("checked"));
+        let (bx, xx) = (as_f64(e, best).expect("checked"), as_f64(e, x).expect("checked"));
         if (want_min && xx < bx) || (!want_min && xx > bx) {
             best = x;
         }
     }
     Ok(if inexact {
-        Value::Flonum(as_f64(best).expect("checked"))
+        Value::Flonum(as_f64(e, best).expect("checked"))
     } else {
         best
     })
@@ -684,17 +995,19 @@ fn fold_extreme(who: &'static str, e: &Engine, a: &[Value], want_min: bool) -> P
 fn p_exact_to_inexact(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("exact->inexact", a)?;
     want_number("exact->inexact", v, e)?;
-    Ok(Value::Flonum(as_f64(v).expect("checked")))
+    Ok(Value::Flonum(as_f64(e, v).expect("checked")))
 }
 
 fn p_is_exact(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("exact?", a)?;
     want_number("exact?", v, e)?;
-    Ok(Value::Bool(matches!(v, Value::Fixnum(_))))
+    // A bignum is exact: it is an exact integer that happens not to fit a
+    // fixnum, which is a storage fact and not a numeric one.
+    Ok(Value::Bool(is_exact_int(e, v)))
 }
 
-fn p_is_number(_e: &mut Engine, a: &[Value]) -> PResult {
-    Ok(Value::Bool(as_f64(one("number?", a)?).is_some()))
+fn p_is_number(e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(as_f64(e, one("number?", a)?).is_some()))
 }
 
 /// R7RS makes the port optional on every input primitive, defaulting to
@@ -1276,6 +1589,20 @@ fn string_to_number(e: &mut Engine, a: &[Value]) -> PResult {
     let mut reader = crate::reader::Reader::new(trimmed);
     match reader.read(&mut scratch) {
         // The whole string has to be a number: `"1 2"` is #f, not 1.
+        // A bignum arrives as a heap object of the *scratch* engine, so it
+        // has to be rebuilt in the caller's -- a `Value::Obj` is an index
+        // into one heap and means nothing in another. Forgetting this is a
+        // use-after-free that happens to read a live slot.
+        Ok(Some(Value::Obj(r)))
+            if reader.consumed() == trimmed.chars().count()
+                && matches!(scratch.obj(r), Obj::Bignum(_)) =>
+        {
+            let Obj::Bignum(b) = scratch.obj(r) else {
+                unreachable!("matched")
+            };
+            let b = b.clone();
+            norm(e, "string->number", b)
+        }
         Ok(Some(n @ (Value::Fixnum(_) | Value::Flonum(_))))
             if reader.consumed() == trimmed.chars().count() =>
         {
@@ -1298,6 +1625,12 @@ fn number_to_string(e: &mut Engine, a: &[Value]) -> PResult {
     };
     if radix == 10 {
         let text = write_str(e, v);
+        return Ok(e.string(&text));
+    }
+    if let Value::Obj(r) = v
+        && let Obj::Bignum(b) = e.obj(r)
+    {
+        let text = b.to_string_radix(radix);
         return Ok(e.string(&text));
     }
     let Value::Fixnum(n) = v else {
@@ -1464,7 +1797,7 @@ fn format(e: &mut Engine, a: &[Value]) -> PResult {
                         let prec: usize = digits.parse().unwrap_or(6);
                         let v = take(&mut next)?;
                         want_number("format", v, e)?;
-                        let x = as_f64(v).expect("checked");
+                        let x = as_f64(e, v).expect("checked");
                         out.push_str(&format!("{x:.prec$}"));
                     }
                     _ => return Err(err("format: expected ~,Nf")),
@@ -1579,17 +1912,15 @@ fn is_procedure(e: &mut Engine, a: &[Value]) -> PResult {
     }))
 }
 
-fn is_exact_integer(_e: &mut Engine, a: &[Value]) -> PResult {
-    Ok(Value::Bool(matches!(
-        one("exact-integer?", a)?,
-        Value::Fixnum(_)
-    )))
+fn is_exact_integer(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("exact-integer?", a)?;
+    Ok(Value::Bool(is_exact_int(e, v)))
 }
 
 fn num_pred(who: &'static str, e: &Engine, a: &[Value], f: fn(f64) -> bool) -> PResult {
     let v = one(who, a)?;
     want_number(who, v, e)?;
-    Ok(Value::Bool(f(as_f64(v).expect("checked"))))
+    Ok(Value::Bool(f(as_f64(e, v).expect("checked"))))
 }
 
 fn is_positive(e: &mut Engine, a: &[Value]) -> PResult {
@@ -1598,11 +1929,33 @@ fn is_positive(e: &mut Engine, a: &[Value]) -> PResult {
 fn is_negative(e: &mut Engine, a: &[Value]) -> PResult {
     num_pred("negative?", e, a, |x| x < 0.0)
 }
+/// **Not through `f64`.** `num_pred` converts, and 2^64+1 as a double is
+/// 2^64 exactly -- so the low bit is gone and `odd?` answered `#f`. The
+/// parity of an exact integer has to be read from the exact integer.
+fn parity(who: &'static str, e: &mut Engine, a: &[Value], want_even: bool) -> PResult {
+    let v = one(who, a)?;
+    want_number(who, v, e)?;
+    if let Value::Fixnum(n) = v {
+        return Ok(Value::Bool((n % 2 == 0) == want_even));
+    }
+    if let Some(b) = as_exact(e, v) {
+        let (_, r) = b.divrem(&BigInt::from_i64(2)).expect("two is non-zero");
+        return Ok(Value::Bool(r.is_zero() == want_even));
+    }
+    // An inexact integer: `num_pred` takes a fn pointer, so the two cases
+    // are separate rather than a captured flag.
+    if want_even {
+        num_pred(who, e, a, |x| x % 2.0 == 0.0)
+    } else {
+        num_pred(who, e, a, |x| x % 2.0 != 0.0)
+    }
+}
+
 fn is_even(e: &mut Engine, a: &[Value]) -> PResult {
-    num_pred("even?", e, a, |x| x % 2.0 == 0.0)
+    parity("even?", e, a, true)
 }
 fn is_odd(e: &mut Engine, a: &[Value]) -> PResult {
-    num_pred("odd?", e, a, |x| x % 2.0 != 0.0)
+    parity("odd?", e, a, false)
 }
 fn is_nan(e: &mut Engine, a: &[Value]) -> PResult {
     num_pred("nan?", e, a, |x| x.is_nan())
@@ -2124,6 +2477,11 @@ fn stderr_port(e: &mut Engine, _a: &[Value]) -> PResult {
 // what it is here -- the alternative would be a wrong answer in the one
 // place bit twiddling is usually counting on exactness.
 
+/// The bitwise operations are **word** operations: `(srfi 151)` is written
+/// against two's complement and scm's is 64 bits wide (§4.5). A bignum is
+/// refused rather than silently truncated, and says why -- extending them
+/// to arbitrary width is a separate piece of work that needs a two's
+/// complement reading of a sign-magnitude number.
 fn bits_arg(who: &str, v: Value) -> Result<i64, VmError> {
     match v {
         Value::Fixnum(n) => Ok(n),
@@ -2131,6 +2489,7 @@ fn bits_arg(who: &str, v: Value) -> Result<i64, VmError> {
             "{who}: expects exact integers, not {}",
             match other {
                 Value::Flonum(f) => format!("the inexact {f}"),
+                Value::Obj(_) => "a bignum: the bitwise operations are 64 bits wide".to_string(),
                 _ => format!("{other:?}"),
             }
         ))),
@@ -2167,13 +2526,37 @@ fn p_bit_not(_e: &mut Engine, a: &[Value]) -> PResult {
 /// `(arithmetic-shift n count)` -- left for a positive count, an
 /// *arithmetic* right shift for a negative one, so the sign is preserved
 /// and shifting a negative number right far enough gives -1.
-fn p_shift(_e: &mut Engine, a: &[Value]) -> PResult {
+fn p_shift(e: &mut Engine, a: &[Value]) -> PResult {
     let [n, count] = a else {
         return Err(err("arithmetic-shift: expects a number and a count"));
     };
+    let count_v = *count;
+    // A bignum operand, or a left shift that leaves the word, is exact
+    // arithmetic now rather than an error (§4.5 is superseded for the
+    // widening case by S18).
+    if is_exact_int(e, *n) && !matches!(n, Value::Fixnum(_)) {
+        let b = as_exact(e, *n).expect("exact");
+        let c = bits_arg("arithmetic-shift", count_v)?;
+        return if c >= 0 {
+            if b.bit_len().saturating_add(c as u64) > MAX_EXACT_BITS {
+                return Err(too_big("arithmetic-shift"));
+            }
+            norm(e, "arithmetic-shift", b.shl(c as u32))
+        } else {
+            norm(e, "arithmetic-shift", b.shr((-c) as u32))
+        };
+    }
     let n = bits_arg("arithmetic-shift", *n)?;
-    let count = bits_arg("arithmetic-shift", *count)?;
+    let count = bits_arg("arithmetic-shift", count_v)?;
     if count >= 0 {
+        if n != 0 && (count >= 64 || (n << count) >> count != n) {
+            // It no longer fits a word, so widen rather than refuse.
+            let b = BigInt::from_i64(n);
+            if b.bit_len().saturating_add(count as u64) > MAX_EXACT_BITS {
+                return Err(too_big("arithmetic-shift"));
+            }
+            return norm(e, "arithmetic-shift", b.shl(count as u32));
+        }
         if count >= 64 {
             // Only zero can survive a shift off the end of the word.
             if n == 0 {
@@ -2208,8 +2591,20 @@ fn p_bit_count(_e: &mut Engine, a: &[Value]) -> PResult {
 }
 
 /// How many bits the magnitude needs, excluding the sign.
-fn p_integer_length(_e: &mut Engine, a: &[Value]) -> PResult {
+fn p_integer_length(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("integer-length", a)?;
+    if is_exact_int(e, v) && !matches!(v, Value::Fixnum(_)) {
+        let b = as_exact(e, v).expect("exact");
+        // For a negative value this is the length of its complement, which
+        // for a bignum magnitude differs from `bit_len` by one only at an
+        // exact power of two -- so compute it the same way as for a word.
+        let len = if b.is_negative() {
+            b.neg().sub(&BigInt::from_i64(1)).bit_len()
+        } else {
+            b.bit_len()
+        };
+        return Ok(Value::Fixnum(len as i64));
+    }
     let n = bits_arg("integer-length", v)?;
     let m = if n >= 0 { n } else { !n };
     Ok(Value::Fixnum(64 - m.leading_zeros() as i64))
@@ -2272,6 +2667,11 @@ fn equal_hash(e: &Engine, v: Value, budget: &mut usize) -> u64 {
         Value::Eof => mix(10, 0),
         Value::Undefined => mix(11, 0),
         Value::Obj(r) => match e.obj(r) {
+            // **By value, not by address.** Two bignums holding the same
+            // integer are `equal?` and `eqv?`, so they must hash alike or
+            // every hash table keyed on a large integer silently misses.
+            // Tagged `1` like a fixnum, since no bignum equals a fixnum.
+            Obj::Bignum(b) => mix(1, b.hash_u64()),
             Obj::Pair(car, cdr) => {
                 let h = equal_hash(e, *car, budget);
                 mix(mix(12, h), equal_hash(e, *cdr, budget))
@@ -2421,12 +2821,19 @@ fn p_symbol_hash(e: &mut Engine, a: &[Value]) -> PResult {
     bounded(a, 1, h)
 }
 
-fn p_number_hash(_e: &mut Engine, a: &[Value]) -> PResult {
+fn p_number_hash(e: &mut Engine, a: &[Value]) -> PResult {
     let v = *a.first().ok_or_else(|| err("number-hash: expects a number"))?;
     let h = match v {
         Value::Fixnum(n) => mix(1, n as u64),
         Value::Flonum(x) => mix(2, hash_f64(x)),
-        _ => return Err(err("number-hash: expects a number")),
+        _ => match as_exact(e, v) {
+            // Tagged like a fixnum, because a bignum *is* an exact integer
+            // and `hash-table` must not care which one holds a given value.
+            // It cannot collide with a fixnum's hash in practice because no
+            // bignum is equal to any fixnum.
+            Some(b) => mix(1, b.hash_u64()),
+            None => return Err(err("number-hash: expects a number")),
+        },
     };
     bounded(a, 1, h)
 }
@@ -3431,27 +3838,27 @@ fn range_of(who: &str, a: &[Value], at: usize, len: usize) -> Result<(usize, usi
     Ok((start, end))
 }
 
-fn p_is_real(_e: &mut Engine, a: &[Value]) -> PResult {
-    Ok(Value::Bool(as_f64(one("real?", a)?).is_some()))
+fn p_is_real(e: &mut Engine, a: &[Value]) -> PResult {
+    Ok(Value::Bool(as_f64(e, one("real?", a)?).is_some()))
 }
 
 /// Without `ratios` every number is either an exact integer or a flonum, so
 /// `rational?` is true of anything finite -- and saying that plainly is
 /// better than pretending there is a rational type.
-fn p_is_rational(_e: &mut Engine, a: &[Value]) -> PResult {
+fn p_is_rational(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("rational?", a)?;
-    Ok(Value::Bool(match as_f64(v) {
+    Ok(Value::Bool(match as_f64(e, v) {
         Some(x) => x.is_finite(),
         None => false,
     }))
 }
 
-fn p_is_integer(_e: &mut Engine, a: &[Value]) -> PResult {
+fn p_is_integer(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("integer?", a)?;
     Ok(Value::Bool(match v {
         Value::Fixnum(_) => true,
         Value::Flonum(x) => x.fract() == 0.0 && x.is_finite(),
-        _ => false,
+        _ => is_exact_int(e, v),
     }))
 }
 
@@ -3475,9 +3882,14 @@ fn p_exact(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("exact", a)?;
     want_number("exact", v, e)?;
     match v {
-        Value::Fixnum(_) => Ok(v),
-        Value::Flonum(x) if x.fract() == 0.0 && x.abs() < (i64::MAX as f64) => {
-            Ok(Value::Fixnum(x as i64))
+        _ if is_exact_int(e, v) => Ok(v),
+        // Any integral flonum now has an exact counterpart, however large:
+        // 1e30 is exactly an integer and exactly representable as one.
+        Value::Flonum(x) if x.fract() == 0.0 && x.is_finite() => {
+            match BigInt::from_f64(x) {
+                Some(b) => norm(e, "exact", b),
+                None => Err(err(format!("exact: {x} has no exact value"))),
+            }
         }
         _ => Err(err(format!(
             "exact: {} would need an exact rational (the `ratios` feature is absent)",
@@ -3490,18 +3902,37 @@ fn p_square(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("square", a)?;
     want_number("square", v, e)?;
     match v {
-        Value::Fixnum(n) => n
-            .checked_mul(n)
-            .map(Value::Fixnum)
-            .ok_or_else(|| err("square: exact integer overflow")),
+        Value::Fixnum(n) => match n.checked_mul(n) {
+            Some(m) => Ok(Value::Fixnum(m)),
+            None => {
+                let b = BigInt::from_i64(n);
+                norm(e, "square", b.mul(&b))
+            }
+        },
+        _ if is_exact_int(e, v) => {
+            let b = as_exact(e, v).expect("exact");
+            if b.bit_len().saturating_mul(2) > MAX_EXACT_BITS {
+                return Err(too_big("square"));
+            }
+            norm(e, "square", b.mul(&b))
+        }
         _ => {
-            let x = as_f64(v).expect("checked");
+            let x = as_f64(e, v).expect("checked");
             Ok(Value::Flonum(x * x))
         }
     }
 }
 
 fn p_gcd(e: &mut Engine, a: &[Value]) -> PResult {
+    if a.iter().any(|&v| !matches!(v, Value::Fixnum(_)))
+        && a.iter().all(|&v| is_exact_int(e, v))
+    {
+        let mut g = BigInt::zero();
+        for &v in a {
+            g = g.gcd(&as_exact(e, v).expect("exact"));
+        }
+        return norm(e, "gcd", g);
+    }
     let mut g: i64 = 0;
     let mut inexact = false;
     for &v in a {
@@ -3519,6 +3950,24 @@ fn p_gcd(e: &mut Engine, a: &[Value]) -> PResult {
 }
 
 fn p_lcm(e: &mut Engine, a: &[Value]) -> PResult {
+    if a.iter().any(|&v| !matches!(v, Value::Fixnum(_)))
+        && a.iter().all(|&v| is_exact_int(e, v))
+    {
+        let mut l = BigInt::from_i64(1);
+        for &v in a {
+            let n = as_exact(e, v).expect("exact");
+            if n.is_zero() {
+                return Ok(Value::Fixnum(0));
+            }
+            let g = l.gcd(&n);
+            let (q, _) = l.divrem(&g).expect("gcd of non-zeros is non-zero");
+            l = q.mul(&n).abs();
+            if l.bit_len() > MAX_EXACT_BITS {
+                return Err(too_big("lcm"));
+            }
+        }
+        return norm(e, "lcm", l);
+    }
     let mut l: i64 = 1;
     let mut inexact = false;
     for &v in a {
@@ -3545,7 +3994,43 @@ fn is_inexact(v: &Value) -> bool {
 }
 
 /// `(exact-integer-sqrt n)` returns two values: the root and the remainder.
+/// Newton's method on integers: it converges from above and the invariant
+/// `r*r <= n` is checked exactly, so the answer is the true floor of the
+/// square root however large `n` is.
+fn big_isqrt(n: &BigInt) -> BigInt {
+    if n.is_zero() {
+        return BigInt::zero();
+    }
+    let one = BigInt::from_i64(1);
+    let two = BigInt::from_i64(2);
+    // Start at 2^ceil(bits/2), which is >= sqrt(n), so the iteration
+    // descends and cannot overshoot downwards.
+    let mut x = one.shl((n.bit_len() / 2 + 1) as u32);
+    loop {
+        // y = (x + n/x) / 2
+        let (q, _) = n.divrem(&x).expect("x is non-zero");
+        let (y, _) = x.add(&q).divrem(&two).expect("two is non-zero");
+        if y.cmp(&x) != Ordering::Less {
+            break;
+        }
+        x = y;
+    }
+    x
+}
+
 fn p_exact_integer_sqrt(e: &mut Engine, a: &[Value]) -> PResult {
+    let v0 = one("exact-integer-sqrt", a)?;
+    if is_exact_int(e, v0) && !matches!(v0, Value::Fixnum(_)) {
+        let n = as_exact(e, v0).expect("exact");
+        if n.is_negative() {
+            return Err(err("exact-integer-sqrt: expects a non-negative exact integer"));
+        }
+        let r = big_isqrt(&n);
+        let rem = n.sub(&r.mul(&r));
+        let rv = norm(e, "exact-integer-sqrt", r)?;
+        let remv = norm(e, "exact-integer-sqrt", rem)?;
+        return Ok(e.alloc(Obj::Values(vec![rv, remv])));
+    }
     match one("exact-integer-sqrt", a)? {
         Value::Fixnum(n) if n >= 0 => {
             // Checked, because `(r + 1) * (r + 1)` overflows near i64::MAX and
@@ -3572,7 +4057,30 @@ fn p_exact_integer_sqrt(e: &mut Engine, a: &[Value]) -> PResult {
 
 /// `floor/` and `truncate/` each return the quotient and remainder as two
 /// values, which is why they needed `values` to exist first.
+/// `floor` division over bignums: the quotient rounds toward negative
+/// infinity and the remainder takes the **divisor's** sign, which is the
+/// same correction `modulo` needs and the same place `rem_euclid` was
+/// wrong for fixnums.
+fn big_floor_divrem(x: &BigInt, y: &BigInt) -> (BigInt, BigInt) {
+    let (q, r) = x.divrem(y).expect("non-zero divisor");
+    if !r.is_zero() && r.is_negative() != y.is_negative() {
+        (q.sub(&BigInt::from_i64(1)), r.add(y))
+    } else {
+        (q, r)
+    }
+}
+
 fn div_pair(who: &'static str, e: &mut Engine, a: &[Value], floor: bool) -> PResult {
+    if let Some((x, y)) = big_pair(who, e, a)? {
+        let (q, r) = if floor {
+            big_floor_divrem(&x, &y)
+        } else {
+            x.divrem(&y).expect("non-zero divisor")
+        };
+        let qv = norm(e, who, q)?;
+        let rv = norm(e, who, r)?;
+        return Ok(e.alloc(Obj::Values(vec![qv, rv])));
+    }
     let (x, y, inexact) = int_pair(who, e, a)?;
     // The floor remainder takes the sign of the divisor, which is the same
     // definition `modulo` needed -- and the same place `rem_euclid` was wrong.
@@ -3595,11 +4103,19 @@ fn p_truncate_div(e: &mut Engine, a: &[Value]) -> PResult {
     div_pair("truncate/", e, a, false)
 }
 fn p_floor_quotient(e: &mut Engine, a: &[Value]) -> PResult {
+    if let Some((x, y)) = big_pair("floor-quotient", e, a)? {
+        let (q, _) = big_floor_divrem(&x, &y);
+        return norm(e, "floor-quotient", q);
+    }
     let (x, y, inexact) = int_pair("floor-quotient", e, a)?;
     let r = x.checked_rem(y).unwrap_or(0).wrapping_add(y).checked_rem(y).unwrap_or(0);
     Ok(int_result(x.wrapping_sub(r).wrapping_div(y), inexact))
 }
 fn p_floor_remainder(e: &mut Engine, a: &[Value]) -> PResult {
+    if let Some((x, y)) = big_pair("floor-remainder", e, a)? {
+        let (_, r) = big_floor_divrem(&x, &y);
+        return norm(e, "floor-remainder", r);
+    }
     let (x, y, inexact) = int_pair("floor-remainder", e, a)?;
     let r = x.checked_rem(y).unwrap_or(0);
     Ok(int_result(
@@ -3646,7 +4162,7 @@ fn exact_ratio(who: &str, x: f64) -> Result<(f64, f64), VmError> {
 fn p_numerator(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("numerator", a)?;
     match v {
-        Value::Fixnum(_) => Ok(v),
+        _ if is_exact_int(e, v) => Ok(v),
         Value::Flonum(x) => exact_ratio("numerator", x).map(|(n, _)| Value::Flonum(n)),
         _ => Err(err(format!(
             "numerator: {} is not a rational number",
@@ -3658,7 +4174,7 @@ fn p_numerator(e: &mut Engine, a: &[Value]) -> PResult {
 fn p_denominator(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("denominator", a)?;
     match v {
-        Value::Fixnum(_) => Ok(Value::Fixnum(1)),
+        _ if is_exact_int(e, v) => Ok(Value::Fixnum(1)),
         Value::Flonum(x) => exact_ratio("denominator", x).map(|(_, d)| Value::Flonum(d)),
         _ => Err(err(format!(
             "denominator: {} is not a rational number",
@@ -4073,9 +4589,16 @@ fn string_to_utf8(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn p_features(e: &mut Engine, _a: &[Value]) -> PResult {
     let mut names: Vec<&str> = vec!["r7rs", "ieee-float", "scm"];
+    // **Claimed as of S18**: exact integers are unbounded
+    // (docs/numeric-tower.md). The feature identifier is a promise, so it
+    // is claimed only now that the fuzzer exercises big literals and the
+    // tiers agree on them.
+    names.push("exact-closed");
     // NOT claimed, and each absence is a decision recorded in the plan:
-    //   exact-closed  -- exact arithmetic raises on overflow (no bignums)
-    //   ratios        -- no exact rationals (§2.3)
+    //   ratios        -- no exact rationals, and that is a DECISION rather
+    //                    than a gap: `(/ 8 3)` matching Janet's float
+    //                    division is deliberate (§4.7), and Steel's `8/3`
+    //                    silently turned `lorenz` into bignum arithmetic
     //   full-unicode  -- no case folding or Unicode digit values (§2.3)
     //   exact-complex -- no complex numbers at all
     if cfg!(unix) {

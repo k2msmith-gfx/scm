@@ -76,10 +76,18 @@ fn errors_in_native_code_are_the_same_errors_with_the_same_backtrace() {
     let ba: Vec<String> = a.backtrace().iter().map(|f| f.what.clone()).collect();
     let bb: Vec<String> = b.backtrace().iter().map(|f| f.what.clone()).collect();
     assert_eq!(ba, bb);
-    // Fixnum overflow leaves the fast path and raises T1's error.
+    // Fixnum overflow leaves the native fast path and **widens** in T1's
+    // primitive (S18), rather than raising as it used to. The property
+    // that matters is unchanged and is the reason this assertion is here:
+    // whatever the fast path bails out to, the three tiers agree. The
+    // leaf compiler is `f64` throughout and T2's fast path is fixnum
+    // only, so an exact 2^70 can only come from the primitive.
     let big = "(define (dbl x) (* x 2)) (let loop ([i 0] [x 1]) (if (= i 70) x (loop (+ i 1) (dbl x))))";
     assert_eq!(show(&mut t2(), big), show(&mut Vm::new(), big));
-    assert!(show(&mut t2(), big).contains("error"));
+    assert_eq!(show(&mut t2(), big), "1180591620717411303424");
+    // And it is exact, not a flonum that prints without a dot.
+    let exact = "(define (dbl x) (* x 2)) (exact? (let loop ([i 0] [x 1]) (if (= i 70) x (loop (+ i 1) (dbl x)))))";
+    assert_eq!(show(&mut t2(), exact), "#t");
 }
 
 #[test]

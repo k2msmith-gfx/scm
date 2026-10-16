@@ -136,6 +136,26 @@ fn the_generators_and_accumulators_pass_on_both_tiers() {
     }
 }
 
+/// Unbounded exact integers (S18, docs/numeric-tower.md). Not a SRFI, but
+/// gated the same way and on both tiers, because the property that matters
+/// most is that the tiers agree on exact arithmetic past the word exactly
+/// as they agree on everything else.
+///
+/// The invariant the program is really about is **one integer, one
+/// representation**: a result that fits comes back a fixnum, so `eqv?`,
+/// `equal?`, `=` and `equal-hash` can never disagree about one value. Two
+/// bugs this caught that nothing else would have: `odd?` went through
+/// `f64`, where 2^64+1 is 2^64 and the low bit is gone; and `equal-hash`
+/// hashed a bignum by its heap address, so two `equal?` bignums hashed
+/// differently and any hash table keyed on a large integer would have
+/// silently missed.
+#[test]
+fn unbounded_exact_integers_pass_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "bignum.scm"), "()", "bignums on {tier:?}");
+    }
+}
+
 /// `(srfi 130)` is `(srfi 13)` with cursors, and **cursors here are
 /// indices**: the SRFI requires only that they be "either disjoint from
 /// indexes or identical to indexes", and the abstraction exists for

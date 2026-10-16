@@ -422,3 +422,24 @@ Building the reduced set found four more things, two of them real bugs:
 
 The `triangl` program is the slow one at 18 s in release: its input is a
 fixed puzzle with no size to cut.
+
+## S18: 1112, and every remaining numeric gap is `ratios`
+
+2026-10-15. Claiming `exact-closed` ([numeric-tower.md](numeric-tower.md))
+moved the suite from **1106 passed / 74 failed** to **1112 / 71**, and
+reached three more assertions — a wide integer literal used to stop the
+reader, so the forms after it in that datum were never attempted.
+
+The number matters less than the shape of what is left. The report
+previously complained in two numeric registers: integers that did not fit
+a word, and rationals. The first register is now **empty** — zero
+occurrences of "does not fit" anywhere in the report. All 31 remaining
+numeric complaints are `ratios`, and every one of them is the deliberate
+decision recorded in [numeric-tower.md](numeric-tower.md) §5: `(/ 8 3)`
+returning a flonum matches Janet's float division (plan §4.7), and
+Steel's `8/3` silently turning `lorenz` into bignum arithmetic is the
+measured reason not to want the alternative.
+
+So the remaining numeric distance from R7RS-small is exactly one declined
+optional feature, named and argued, rather than a mix of a decision and a
+limitation.

@@ -206,6 +206,10 @@ fn emit(
         Value::Eof => out.push_str("#<eof>"),
         Value::Undefined => out.push_str("#<undefined>"),
         Value::Obj(r) => match e.obj(r) {
+            // Decimal, like every other exact integer, and with no marker
+            // to say it was too wide for a fixnum: that is a storage
+            // detail and `write` prints values.
+            Obj::Bignum(n) => out.push_str(&n.to_string_radix(10)),
             Obj::Str(chars) => {
                 if quoted {
                     out.push('"');

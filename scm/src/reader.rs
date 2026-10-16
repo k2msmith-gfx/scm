@@ -733,7 +733,8 @@ impl Reader {
             Some(c) if "eibodxEIBODX".contains(c) => {
                 let tok = self.raw_token();
                 match parse_number(&tok) {
-                    Ok(Some(v)) => Ok(v),
+                    Ok(Some(Parsed::Val(v))) => Ok(v),
+                    Ok(Some(Parsed::Big(b))) => Ok(e.exact_integer(b)),
                     Ok(None) => self.invalid(start, format!("`{tok}` is not a number")),
                     Err(msg) => self.invalid(start, msg),
                 }
@@ -860,7 +861,8 @@ impl Reader {
             return self.invalid(start, "empty token");
         }
         match parse_number(&tok) {
-            Ok(Some(v)) => return Ok(v),
+            Ok(Some(Parsed::Val(v))) => return Ok(v),
+            Ok(Some(Parsed::Big(b))) => return Ok(e.exact_integer(b)),
             Err(msg) => return self.invalid(start, msg),
             Ok(None) => {}
         }
@@ -882,7 +884,15 @@ pub fn reads_as_number(tok: &str) -> bool {
 
 /// `Ok(None)` means "not a number, try something else". `Err` means "meant to
 /// be a number and is wrong", which must not silently become a symbol.
-fn parse_number(tok: &str) -> Result<Option<Value>, String> {
+/// A parsed number. `Big` exists because a bignum has to be allocated in
+/// the caller's engine, and this function has none -- `reads_as_number`
+/// asks the same question without one.
+enum Parsed {
+    Val(Value),
+    Big(crate::bigint::BigInt),
+}
+
+fn parse_number(tok: &str) -> Result<Option<Parsed>, String> {
     let mut radix: Option<u32> = None;
     let mut exact: Option<bool> = None;
     let mut rest = tok;
@@ -932,9 +942,9 @@ fn parse_number(tok: &str) -> Result<Option<Value>, String> {
     // R7RS spells these in lower case but says nothing about matching case,
     // and the suite writes `+InF.0`.
     match rest.to_ascii_lowercase().as_str() {
-        "+inf.0" => return Ok(Some(Value::Flonum(f64::INFINITY))),
-        "-inf.0" => return Ok(Some(Value::Flonum(f64::NEG_INFINITY))),
-        "+nan.0" | "-nan.0" => return Ok(Some(Value::Flonum(f64::NAN))),
+        "+inf.0" => return Ok(Some(Parsed::Val(Value::Flonum(f64::INFINITY)))),
+        "-inf.0" => return Ok(Some(Parsed::Val(Value::Flonum(f64::NEG_INFINITY)))),
+        "+nan.0" | "-nan.0" => return Ok(Some(Parsed::Val(Value::Flonum(f64::NAN)))),
         _ => {}
     }
 
@@ -962,17 +972,24 @@ fn parse_number(tok: &str) -> Result<Option<Value>, String> {
         return match i64::from_str_radix(&signed, radix) {
             Ok(n) => {
                 Ok(Some(if exact == Some(false) {
-                    Value::Flonum(n as f64)
+                    Parsed::Val(Value::Flonum(n as f64))
                 } else {
-                    Value::Fixnum(n)
+                    Parsed::Val(Value::Fixnum(n))
                 }))
             }
-            // Settled in §4.5: overflow is an error, not a silent widening to
-            // a flonum. Losing exactness quietly is how a render comes out
-            // wrong instead of a stack trace.
-            Err(_) => Err(format!(
-                "integer literal `{rest}` does not fit in a 64-bit exact integer"
-            )),
+            // Too wide for a word is no longer an error: S18 claims
+            // `exact-closed`, so the literal reads as an exact bignum. What
+            // has not changed is that it must not become a flonum -- losing
+            // exactness quietly is how a render comes out wrong instead of
+            // raising -- unless `#i` asked for that explicitly.
+            Err(_) => match crate::bigint::BigInt::parse(&signed, radix) {
+                Some(b) => Ok(Some(if exact == Some(false) {
+                    Parsed::Val(Value::Flonum(b.to_f64()))
+                } else {
+                    Parsed::Big(b)
+                })),
+                None => Err(format!("`{rest}` is not a valid radix-{radix} integer")),
+            },
         };
     }
 
@@ -1015,15 +1032,21 @@ fn parse_number(tok: &str) -> Result<Option<Value>, String> {
     match rest.parse::<f64>() {
         Ok(x) => {
             if exact == Some(true) {
-                if x.fract() == 0.0 && x.abs() < (i64::MAX as f64) {
-                    Ok(Some(Value::Fixnum(x as i64)))
+                // An integral flonum now has an exact counterpart however
+                // large, so `#e1e30` reads rather than complaining about a
+                // feature that was never the obstacle for an integer.
+                if x.fract() == 0.0 && x.is_finite() {
+                    match crate::bigint::BigInt::from_f64(x) {
+                        Some(b) => Ok(Some(Parsed::Big(b))),
+                        None => Err(format!("`#e{rest}` has no exact value")),
+                    }
                 } else {
                     Err(format!(
                         "`#e{rest}` would need an exact rational, and the `ratios` feature is absent"
                     ))
                 }
             } else {
-                Ok(Some(Value::Flonum(x)))
+                Ok(Some(Parsed::Val(Value::Flonum(x))))
             }
         }
         // `1.2.3` and friends: it started like a number and is not one.

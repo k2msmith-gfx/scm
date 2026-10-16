@@ -235,15 +235,51 @@ fn wrongness_is_invalid_not_incomplete() {
 
 #[test]
 fn an_unsupported_number_says_so() {
-    // No `ratios`, no bignums (plan §2.3). Both must be errors rather than
-    // quietly becoming something else -- Steel's `(/ 8 3)` silently turning
-    // into bignum arithmetic is the cautionary tale.
+    // `ratios` is still absent and still a decision, not a gap: Steel's
+    // `(/ 8 3)` silently turning into bignum arithmetic is the cautionary
+    // tale, so a rational literal must be an error rather than quietly
+    // becoming something else.
     let mut e = Engine::new();
     let err = scm::read_one("1/2", &mut e).unwrap_err();
     assert!(format!("{err}").contains("ratios"), "got {err}");
+}
 
-    let err = scm::read_one("99999999999999999999999999", &mut e).unwrap_err();
-    assert!(format!("{err}").contains("64-bit"), "got {err}");
+#[test]
+fn a_wide_integer_literal_reads_as_an_exact_bignum() {
+    // S18: `exact-closed` is claimed, so this reads rather than reporting
+    // that it does not fit a word (docs/numeric-tower.md). It must not
+    // become a flonum -- that is the quiet exactness loss §4.5 refuses.
+    let mut e = Engine::new();
+    let v = scm::read_one("99999999999999999999999999", &mut e)
+        .unwrap()
+        .unwrap();
+    assert_eq!(scm::write_str(&e, v), "99999999999999999999999999");
+    assert!(matches!(v, Value::Obj(_)), "a bignum is a heap object");
+
+    // And it round-trips: read -> write -> read is the property most
+    // likely to break, since the reader and the writer are two new halves.
+    for src in [
+        "99999999999999999999999999",
+        "-99999999999999999999999999",
+        "9223372036854775808",
+        "-9223372036854775809",
+        "#x1fffffffffffffffc",
+        "#b101010101010101010101010101010101010101010101010101010101010101010101",
+    ] {
+        let v = scm::read_one(src, &mut e).unwrap().unwrap();
+        let text = scm::write_str(&e, v);
+        let again = scm::read_one(&text, &mut e).unwrap().unwrap();
+        assert_eq!(
+            scm::write_str(&e, again),
+            text,
+            "{src} did not round-trip"
+        );
+    }
+
+    // A value that fits comes back a fixnum, so one integer has one
+    // representation however it was spelled.
+    let v = scm::read_one("#x7fffffffffffffff", &mut e).unwrap().unwrap();
+    assert_eq!(v, Value::Fixnum(i64::MAX));
 }
 
 #[test]

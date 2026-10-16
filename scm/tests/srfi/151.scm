@@ -40,13 +40,24 @@
 (check shift-right-far (arithmetic-shift -1 -100) -1)
 (check shift-right-far-positive (arithmetic-shift 1 -100) 0)
 (check shift-left-edge (arithmetic-shift 1 62) 4611686018427387904)
-;; And a left shift off the end of the word is an error, not a wrap:
-;; plan §4.5 says overflow is reported, and bit twiddling is exactly
-;; where a silent wrap would be a wrong answer.
-(check shift-overflow (arithmetic-shift 1 63)
-       '(raised "arithmetic-shift: 1 shifted left 63 does not fit in a 64-bit exact integer"))
-(check shift-overflow-big (arithmetic-shift 3 100)
-       '(raised "arithmetic-shift: 3 shifted left 100 does not fit in a 64-bit exact integer"))
+;; A left shift off the end of the word **widens** as of S18, rather than
+;; reporting: `exact-closed` is claimed and the exact answer exists. What
+;; §4.5 refuses is a silent *wrap*, which would be a wrong answer, and
+;; that has not changed -- these are exact.
+(check shift-off-the-word-widens (arithmetic-shift 1 63) 9223372036854775808)
+(check shift-off-the-word-is-exact (exact? (arithmetic-shift 1 63)) #t)
+(check shift-far-off-the-word (arithmetic-shift 3 100)
+       3802951800684688204490109616128)
+;; Shifting back is the inverse, so nothing was lost on the way out.
+(check shift-out-and-back (arithmetic-shift (arithmetic-shift 3 100) -100) 3)
+;; But it is still bounded: unbounded means "not bounded by the word", not
+;; "allowed to exhaust the host" (requirement 8).
+(check shift-is-still-bounded (arithmetic-shift 1 99999999)
+       '(raised "arithmetic-shift: exact integer too large (over 1048576 bits)"))
+;; The logical operations stay 64 bits wide, and say so rather than
+;; silently truncating a bignum.
+(check bitwise-and-refuses-a-bignum (bitwise-and (arithmetic-shift 1 63) 1)
+       '(raised "bitwise-and: expects exact integers, not a bignum: the bitwise operations are 64 bits wide"))
 (check shift-zero-any-distance (arithmetic-shift 0 1000) 0)
 (check shift-rejects-inexact (arithmetic-shift 1.0 2)
        '(raised "arithmetic-shift: expects exact integers, not the inexact 1"))

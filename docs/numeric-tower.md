@@ -1,15 +1,16 @@
-# The numeric tower: a stage decision
+# The numeric tower: the integer half, and why the rest stays out
 
-**Status: PROPOSED 2026-10-15. Not decided, not scheduled.** This document
-exists because plan §2.3 declined the numeric tower before there was any
-evidence either way, and the thing has come back often enough since to
-deserve a decision made on purpose rather than by accumulation.
+**Status: DONE 2026-10-15 as S18.** Proposed and accepted the same day;
+this document is now both the argument and the record. Sections 1–7 are
+the proposal as written before the work, unchanged except for this header,
+so that what was predicted can be read against §10, which is what
+actually happened.
 
-The recommendation, up front: **add unbounded exact integers and claim
-`exact-closed`. Do not add exact rationals. Do not add complex numbers.**
-The reason rationals are excluded is not cost — it is that excluding them
-is a deliberate decision already made and measured, and reversing it would
-change `/` for every ray scene.
+The decision: **unbounded exact integers, `exact-closed` claimed. No
+exact rationals. No complex numbers.** The reason rationals are excluded
+is not cost — it is that excluding them is a deliberate decision already
+made and measured, and reversing it would change `/` for every ray
+scene.
 
 ## 1. What is actually being asked
 
@@ -212,3 +213,109 @@ tiers.
   checked error is better than that, and would remain better.
 - **Do not claim `exact-closed` before the fuzzer exercises it.** A
   feature identifier is a promise.
+
+
+## 10. What actually happened
+
+The three cheapness claims in §4 held. The leaf compiler and T2's codegen
+were not touched at all; `code.rs` needed no change; and `Obj::Bignum`
+behind the existing `Value::Obj` meant no native tag number moved. Adding
+the variant produced exactly **two** non-exhaustive-match errors in the
+whole crate, which is the localisation §4 predicted.
+
+### The bignum is hand-written, because the crate has no dependencies
+
+`scm`'s `[dependencies]` is empty, and for a library whose second goal is
+to be embedded that is worth keeping: an embedder takes this and nothing
+else. So `bigint.rs` is about 400 lines of sign-magnitude arithmetic with
+**`u32` limbs**, chosen so every intermediate product fits a `u64` and the
+whole thing stays in arithmetic the compiler checks — `u64` limbs would
+need `u128` throughout and would make the division loop much harder to
+trust. Division is Knuth's algorithm D in the Hacker's Delight
+formulation; the 15 unit tests check it against `i128` on 4,000 randomised
+inputs and, for operands too wide for that, against the defining property
+`a = q·b + r` with `|r| < |b|`.
+
+### Two bugs the dedicated test caught that nothing else would have
+
+Both were silent and both were about **going through `f64`**:
+
+- **`odd?` was wrong on `2^64+1`.** It went through `num_pred`, which
+  converts to a double, and `2^64+1` as a double is `2^64` — so the low
+  bit was gone and `odd?` answered `#f`. Parity now reads the exact
+  integer.
+- **`equal-hash` hashed a bignum by its heap address.** Two `equal?`
+  bignums therefore hashed differently, and any hash table keyed on a
+  large integer would have silently missed. It now hashes by value, tagged
+  as a fixnum is, since no bignum is equal to any fixnum.
+
+`eqv?` was a third of the same family, caught by the probe rather than the
+test: comparing `Value`s alone compares addresses, so two equal bignums
+were `eqv?`-distinct while `equal?` said they were the same. That is the
+disagreement normalisation exists to prevent, and it is now asserted in
+both directions.
+
+### One part of §8 was wrong, and was not done
+
+The stage said to "rewrite the three reduced-modulus hashes
+conventionally". **That was a mistake in the proposal and the code was
+left alone**, with its comments corrected instead.
+
+The reduction was never a workaround. An unreduced `(* 31 h)` grows about
+five bits per element, so folding over a long list or a long string builds
+a many-thousand-bit integer, allocates all the way, and then reduces it at
+the end to the same answer. Reduction is simply how a bounded hash is
+written. What was wrong was the *justification*: three comments blamed the
+absent bignums, which was misleading even when bignums were absent. They
+now say that the unreduced form would work and would be worse.
+
+### Unbounded is not a licence to exhaust the host
+
+Requirement 8 says a script must not be able to kill its process, and S7
+found four ways it could. `(expt 2 (expt 2 40))` would have been a fifth,
+so there is a ceiling of 2^20 bits — about 315,000 decimal digits —
+enforced at one chokepoint, `norm`, plus a **pre-check** in `expt` and
+`arithmetic-shift`, where the result's size is knowable before the work
+and refusing afterwards would be too late.
+
+### Measured, not hoped
+
+| gate | result |
+|---|---|
+| root `cargo test` | 338 passed, 0 failed |
+| `cargo test -p scm-llvm` (T0/T1/T2) | 31 passed, 0 failed |
+| clippy | 0 warnings |
+| differential fuzzer, 5 seeds | 0 mismatches, with big literals generated |
+| benchmark language gate (53 programs) | all run and correct |
+| R7RS conformance | **1112 passed / 71 failed**, up from 1106 / 74 |
+
+The conformance move is the satisfying one: the report now contains
+**zero** complaints about an integer not fitting a word, and every
+remaining numeric gap in it is `ratios` — 31 mentions, all of them the
+deliberate decision of §5 rather than an omission.
+
+On performance, the fixnum path costs about **1.4%** on a 20-million
+iteration loop of `+`, `-` and `=` (1.67s → 1.69s, five trials each, very
+low variance). Two full-size benchmark programs went in opposite
+directions — `tak` 81.3s → 79.3s, `nqueens` 218.4s → 221.9s — so at
+program scale it is inside the noise. §7 set "more than a few percent" as
+the threshold to reconsider the representation; 1.4% is under it.
+
+Two attempts to recover that 1.4% are worth recording as *not* being the
+cause: `want_number` was rewritten to check two tags instead of calling
+`as_f64` (which would have put a bignum's heap read on the fixnum path),
+and `compare` gained an all-fixnum fast path that builds no `Option` and
+never consults the engine. Both are better code and neither moved the
+number, which puts the remaining cost in `arith`'s restructured overflow
+branch and in code size.
+
+### What is still absent, on purpose
+
+`ratios` and `exact-complex` remain unclaimed, for the reasons in §5 —
+which are evidence, not budget. The **bitwise operations stay 64 bits
+wide**: `(bitwise-and (expt 2 63) 1)` refuses, and says that it refuses
+because they are word operations, rather than silently truncating.
+Extending them needs a two's complement reading of a sign-magnitude
+number, which is a separate piece of work nothing has asked for. A right
+*shift* of a bignum does work, and floors, which is the two's complement
+answer.

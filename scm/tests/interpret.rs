@@ -51,12 +51,30 @@ fn division_is_inexact_without_ratios() {
 }
 
 #[test]
-fn fixnum_overflow_is_an_error_not_a_widening() {
-    // The settled decision: losing exactness quietly is how a render comes
-    // out wrong instead of raising.
-    let e = eval_err("(* 9223372036854775807 2)");
-    assert!(e.contains("overflow"), "got {e}");
-    assert!(e.contains("exact-closed"), "got {e}");
+fn fixnum_overflow_widens_rather_than_raising_or_going_inexact() {
+    // **This reverses the S0 decision, on purpose: S18 claims
+    // `exact-closed`** (docs/numeric-tower.md). What has not changed is the
+    // reason the old behaviour was an error rather than a widening to
+    // flonum -- losing exactness quietly is how a render comes out wrong
+    // instead of raising -- and widening to an exact bignum loses nothing.
+    assert_eq!(eval("(* 9223372036854775807 2)"), "18446744073709551614");
+    assert_eq!(eval("(+ 9223372036854775807 1)"), "9223372036854775808");
+    assert_eq!(eval("(- -9223372036854775808 1)"), "-9223372036854775809");
+    // And it is exact, not a flonum that happens to print without a dot.
+    assert_eq!(eval("(exact? (* 9223372036854775807 2))"), "#t");
+    // Still exact coming back down: a result that fits is a fixnum again,
+    // so there is one representation per integer.
+    assert_eq!(eval("(- (* 9223372036854775807 2) 9223372036854775807)"), "9223372036854775807");
+    assert_eq!(eval("(exact? (- (+ 9223372036854775807 1) 1))"), "#t");
+}
+
+#[test]
+fn an_exact_integer_is_not_allowed_to_exhaust_the_host() {
+    // Requirement 8: unbounded means "not bounded by the word size", not
+    // "allowed to kill the process". S7 found four ways a script could do
+    // that and this would have been a fifth.
+    let e = eval_err("(expt 2 1099511627776)");
+    assert!(e.contains("too large"), "got {e}");
 }
 
 #[test]

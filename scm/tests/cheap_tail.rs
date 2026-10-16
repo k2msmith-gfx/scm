@@ -325,15 +325,25 @@ fn reading_from_a_closed_port_refuses() {
 
 #[test]
 fn features_is_honest() {
-    // §2.3's whole obligation for not implementing the numeric tower: the
-    // feature list says what is actually true. The absences are the point.
+    // §2.3's whole obligation for the parts of the numeric tower that are
+    // absent: the feature list says what is actually true, and the
+    // absences are the point.
     let f = eval("(features)");
-    for present in ["r7rs", "ieee-float"] {
+    // `exact-closed` is claimed as of S18 (docs/numeric-tower.md), and a
+    // feature identifier is a promise -- so the claim is only honest if
+    // these hold.
+    for present in ["r7rs", "ieee-float", "exact-closed"] {
         assert!(f.contains(present), "{present} should be claimed: {f}");
     }
-    for absent in ["exact-closed", "ratios", "full-unicode", "exact-complex"] {
+    assert_eq!(eval("(* 9223372036854775807 9223372036854775807)"),
+               "85070591730234615847396907784232501249");
+    assert_eq!(eval("(exact? (* 9223372036854775807 9223372036854775807))"), "#t");
+    // Still absent, each a decision rather than a gap: `ratios` because
+    // `(/ 8 3)` matching Janet's float division is deliberate (§4.7).
+    for absent in ["ratios", "full-unicode", "exact-complex"] {
         assert!(!f.contains(absent), "{absent} must NOT be claimed: {f}");
     }
+    assert_eq!(eval("(/ 8 3)"), "2.6666666666666665");
 }
 
 #[test]

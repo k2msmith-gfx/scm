@@ -166,10 +166,14 @@
 
     ;; ── combining hashes ──────────────────────────────────────────────
     ;;
-    ;; Every step is reduced modulo `%limit` first. `(* 31 h)` on an
-    ;; unreduced hash overflows an i64, and plan §2.3 declines bignums --
-    ;; so a combining hash has to stay in a range it can multiply within
-    ;; rather than rely on either a bignum or a silent wrap. 2^25 is
+    ;; Every step is reduced modulo `%limit` first, and **this is the
+    ;; right way to write it, not a workaround.** The earlier comment here
+    ;; blamed the absent bignums (plan §2.3); S18 claims `exact-closed`,
+    ;; so the unreduced form would now *work* -- and would be worse. An
+    ;; unreduced `(* 31 h)` grows about five bits per element, so folding
+    ;; over a long list builds a many-thousand-bit integer, allocates all
+    ;; the way, and then reduces it at the end to the same answer. A
+    ;; bounded hash stays in a range it can multiply within. 2^25 is
     ;; `(hash-bound)`, and 31 times it is nowhere near the word.
     (define %limit 33554432)
 

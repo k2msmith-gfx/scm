@@ -337,6 +337,11 @@ pub enum Obj {
         bracket: bool,
     },
     Bytevector(Vec<u8>),
+    /// An exact integer outside `i64`. **Always out of range**: a value
+    /// that fits is a `Value::Fixnum`, which `prim.rs` normalises to on
+    /// every result, because two representations of one integer would make
+    /// `eqv?` and `equal-hash` disagree with themselves.
+    Bignum(crate::bigint::BigInt),
     /// A parameter object (R7RS `make-parameter`). `slot` indexes the VM's
     /// table of current values; the converter, if any, is applied by
     /// `parameterize`'s expansion rather than here, so that calling it is an
@@ -840,6 +845,7 @@ impl Engine {
                     // nothing.
                     Obj::Str(_)
                     | Obj::Bytevector(_)
+                    | Obj::Bignum(_)
                     | Obj::Rng(_)
                     | Obj::Continuation { .. } => {}
                 },
@@ -1115,6 +1121,17 @@ impl Engine {
         self.alloc(Obj::Bytevector(bytes))
     }
 
+    /// An exact integer from a `BigInt`, **normalised**: a value that fits
+    /// comes back a `Fixnum` and only what does not is allocated. Both the
+    /// reader and the arithmetic go through this, so there is one rule for
+    /// where the fixnum/bignum boundary is rather than two that can drift.
+    pub fn exact_integer(&mut self, b: crate::bigint::BigInt) -> Value {
+        match b.to_i64() {
+            Some(n) => Value::Fixnum(n),
+            None => self.alloc(Obj::Bignum(b)),
+        }
+    }
+
     /// An empty slot vector with room for `cap`, from the pool when it has
     /// one. Hand it to [`Engine::env`] filled.
     pub fn slots(&mut self, cap: usize) -> Vec<(SymId, Value)> {
@@ -1235,6 +1252,14 @@ impl Engine {
                         }
                         (Obj::Bytevector(b1), Obj::Bytevector(b2)) => {
                             if b1 != b2 {
+                                return Some(false);
+                            }
+                        }
+                        // Two bignums are `eqv?` when they are the same
+                        // integer, which is what `=` says too: both are
+                        // exact, so there is no exactness to differ on.
+                        (Obj::Bignum(a), Obj::Bignum(b)) => {
+                            if a != b {
                                 return Some(false);
                             }
                         }

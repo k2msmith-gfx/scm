@@ -8,6 +8,7 @@
 //!
 //! There is deliberately no LLVM here and the default feature set is empty.
 
+pub mod bigint;
 pub mod code;
 pub mod embed;
 pub mod heap;

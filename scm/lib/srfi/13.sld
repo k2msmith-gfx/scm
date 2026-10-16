@@ -401,10 +401,11 @@
       (%cmp s1 s2 opt #t #f 'index 'index "string-ci>="))
 
     ;; `bound` defaults to 2^22 and 0 asks for that default. The
-    ;; accumulator is reduced at every step, because `(* 37 h)` over a
-    ;; long string overflows without a numeric tower -- the same trap
-    ;; `(srfi 128)`'s combiner and `(srfi 14)`'s hash hit (plan §2.3).
-    ;; This is therefore **not** the same function as the native
+    ;; accumulator is reduced at every step, which is how a bounded hash
+    ;; is written: `exact-closed` is claimed (S18), so the unreduced
+    ;; `(* 37 h)` would now work, and over a 1000-character string it
+    ;; would build a 5000-bit integer and then reduce it to the same
+    ;; answer. This is **not** the same function as the native
     ;; `string-hash`, which the SRFI permits: a hash value is only ever
     ;; promised to agree with itself.
     (define (%string-hash s opt fold? who)

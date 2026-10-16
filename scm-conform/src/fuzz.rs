@@ -213,7 +213,28 @@ impl Gen {
             return v;
         }
         match ty {
-            Ty::Int => format!("{}", self.rng.below(41) as i64 - 20),
+            // Mostly small, but **one in eight is wide enough to need a
+            // bignum**. `exact-closed` is a promise (S18), and the tiers
+            // have to agree on exact arithmetic past the word as they
+            // agree on everything else -- which nothing checked until the
+            // generator could produce one.
+            Ty::Int => {
+                if self.rng.chance(1, 8) {
+                    (*self.rng.pick(&[
+                        "9223372036854775808",
+                        "-9223372036854775809",
+                        "18446744073709551616",
+                        "99999999999999999999999999",
+                        "-170141183460469231731687303715884105728",
+                        "(expt 2 100)",
+                        "(expt 2 64)",
+                        "(* 4294967296 4294967296)",
+                    ]))
+                        .to_string()
+                } else {
+                    format!("{}", self.rng.below(41) as i64 - 20)
+                }
+            }
             Ty::Flo => format!("{}.{}", self.rng.below(20) as i64 - 10, self.rng.below(100)),
             Ty::Bool => if self.rng.chance(1, 2) { "#t".into() } else { "#f".into() },
             Ty::Str => format!("\"{}\"", self.rng.pick(&["", "a", "hello", "x y", "scheme", "q\\\"q"])),
@@ -224,7 +245,10 @@ impl Gen {
 
     fn int(&mut self, depth: u32) -> String {
         let d = depth - 1;
-        match self.rng.below(47) {
+        // 48, not 47: arm 46 was added for bignum growth and the `_` arm
+        // is a real case (`raise-continuable`), not a filler -- leaving the
+        // bound alone would have silently dropped it.
+        match self.rng.below(48) {
             0..=3 => {
                 let op = *self.rng.pick(&["+", "-", "*"]);
                 let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d));
@@ -248,6 +272,15 @@ impl Gen {
             19 => { let (c, a, b) = (self.expr(Ty::Bool, d), self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(guard (e (#t {a})) (if {c} (raise 'boom) {b}))") }
             20 => { let (s, a) = (self.stmt(d), self.expr(Ty::Int, d)); format!("(begin {s} {a})") }
             21 => { let l = self.expr(Ty::List, d); format!("(apply + {l})") }
+            // Growth with no `modulo` guard, so a product really does
+            // leave the word. Bounded by construction: squaring a
+            // 128-bit value twice is 512 bits, far inside the cap, so the
+            // tiers are compared on the arithmetic rather than on which
+            // of them reports "too large" first.
+            46 => {
+                let a = self.expr(Ty::Int, d);
+                format!("(let ((n (+ 4294967296 (abs (modulo {a} 1000))))) (* (* n n) (* n n)))")
+            }
             22 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let-values (((u w) (values {a} {b}))) (- u w))") }
             23 => { let a = self.expr(Ty::Int, d); format!("(do ((i 0 (+ i 1)) (s 0 (+ s {a}))) ((= i {}) s))", 1 + self.rng.below(4)) }
             24 => { let (k, a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(case (modulo {k} 3) ((0 1) {a}) (else {b}))") }
