@@ -176,3 +176,26 @@ testing that should come before anyone outside depends on this.
 Do not determine the language's needs from ray's current simple examples.
 The goals, in order, are: replace Janet in ray/modeler, and distribute scm
 as a general-purpose embeddable Scheme.
+
+### How ray will consume this (verified 2026-10-16)
+
+An out-of-workspace crate depending on both by path was built and run, and
+it did everything the port needs: keyword-argument verbs, a verb calling
+back into Scheme through `define_fn_with`, a `Proc` held across 20,000
+evaluations and a collection, the embedded libraries reachable from the
+host, fuel bounding a runaway, and a leaf compiled with the `Vm` then
+dropped and called from `rayon` workers.
+
+    schemers = { path = "../scm/scm" }        # then `use scm::…`
+    scm-llvm = { path = "../scm/scm-llvm" }   # only for compiled texels
+
+Three things the port has to decide rather than inherit:
+
+- **`scm-llvm` needs LLVM 21 at build time, always.** Depending on it
+  unconditionally makes every ray build need a toolchain. Put it behind a
+  ray-side feature, exactly as `scm-cli` does.
+- **A git dependency needs the repo reachable.** While `k2msmith-gfx/scm`
+  is private, a path dependency across the two working copies is the
+  frictionless route.
+- Ray is on stable / edition 2024, which satisfies scm's
+  `rust-version = "1.85"`. No toolchain pin is needed on either side.
