@@ -16,7 +16,9 @@ path = "src/main.rs"
 jit = ["dep:scm-llvm"]
 
 [dependencies]
-scm = { path = "../scm" }
+# The package is `schemers`; the library it builds is `scm`, so the
+# `use scm::…` below are unchanged.
+schemers = { path = "../scm" }
 scm-llvm = { path = "../scm-llvm", optional = true }
 # Line editing, history and multi-line entry for the terminal client. The
 # multi-line decision still comes from the session's own parse op.

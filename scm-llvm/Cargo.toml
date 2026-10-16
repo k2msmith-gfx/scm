@@ -14,7 +14,9 @@ description = "The leaf compiler: a pure numeric subset of scm, compiled to thre
 #   LLVM_SYS_211_PREFIX=$LLVM cargo test -p scm-llvm --release
 
 [dependencies]
-scm = { path = "../scm" }
+# The package is `schemers`; the library it builds is `scm`, so the
+# `use scm::…` below are unchanged.
+schemers = { path = "../scm" }
 inkwell = { version = "0.10", features = ["llvm21-1"] }
 llvm-sys = "211"
 

@@ -23,5 +23,7 @@ path = "src/bin/fuzz.rs"
 t2 = ["dep:scm-llvm"]
 
 [dependencies]
-scm = { path = "../scm" }
+# The package is `schemers`; the library it builds is `scm`, so the
+# `use scm::…` below are unchanged.
+schemers = { path = "../scm" }
 scm-llvm = { path = "../scm-llvm", optional = true }

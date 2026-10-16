@@ -1,20 +1,27 @@
 [package]
-name = "scm"
-# NOTE: `scm` is TAKEN on crates.io -- 0.0.3, ~18k downloads, "Common SCM
-# operations for use with Rust Builders". Publishing needs a different
-# name; `scm-scheme`, `scm-r7rs`, `r7rs-scm` and `schemers` were all free
-# when checked on 2026-10-16. The name here is the one the workspace and
-# the repository use, and a path or git dependency does not care.
+# The published name. `scm` was taken on crates.io by an unrelated
+# source-control crate, and this is the chosen alternative (2026-10-16).
+name = "schemers"
 version.workspace = true
 edition.workspace = true
 rust-version = "1.85"
 license.workspace = true
 description = "An embeddable R7RS-small Scheme: a GC'd interpreter, a bytecode VM, and an optional LLVM tier, with no dependencies"
 repository = "https://github.com/k2msmith-gfx/scm"
-documentation = "https://docs.rs/scm"
+documentation = "https://docs.rs/schemers"
 readme = "../README.md"
 keywords = ["scheme", "r7rs", "lisp", "interpreter", "embeddable"]
 categories = ["compilers", "development-tools"]
+
+# The package publishes as `schemers`; the library it builds is `scm`.
+# Deliberate: the project, its repository, its binary and every `use` in
+# this workspace are `scm`, and renaming the library to match the
+# published package would churn all of that to no one's benefit. A
+# dependent names `schemers` in its manifest and writes `use scm::…`,
+# which the README says out loud so nobody has to discover it.
+[lib]
+name = "scm"
+path = "src/lib.rs"
 
 # These are vestigial in *this* crate and kept as the plan §5 guard: the
 # promise is that `cargo build` needs no LLVM, and the guard is that the

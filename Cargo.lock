@@ -303,7 +303,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "scm"
+name = "schemers"
 version = "0.0.1"
 
 [[package]]
@@ -311,7 +311,7 @@ name = "scm-cli"
 version = "0.0.1"
 dependencies = [
  "rustyline",
- "scm",
+ "schemers",
  "scm-llvm",
 ]
 
@@ -319,7 +319,7 @@ dependencies = [
 name = "scm-conform"
 version = "0.0.1"
 dependencies = [
- "scm",
+ "schemers",
  "scm-llvm",
 ]
 
@@ -330,7 +330,7 @@ dependencies = [
  "inkwell",
  "llvm-sys",
  "rayon",
- "scm",
+ "schemers",
 ]
 
 [[package]]

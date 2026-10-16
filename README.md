@@ -161,14 +161,24 @@ Your own libraries are found as `acme/util.sld` on `.` or
 
 ## The Rust API
 
-    cargo doc --open -p scm
+    cargo doc --open -p schemers
 
-The crate is not on crates.io yet, and **cannot be published as `scm`** —
-that name is taken by an unrelated source-control crate. Take it as a git
-or path dependency for now:
+**The package is `schemers`; the library it builds is `scm`.** The name
+`scm` was taken on crates.io by an unrelated source-control crate, and
+renaming the library to match would have churned the repository, the
+binary and every `use` in it to no one's benefit. So a dependent names one
+and writes the other:
 
     [dependencies]
-    scm = { git = "https://github.com/k2msmith-gfx/scm" }
+    schemers = "0.0.1"
+
+```rust
+use scm::{Interp, Val};
+```
+
+Not published yet; take it as a git dependency meanwhile:
+
+    schemers = { git = "https://github.com/k2msmith-gfx/scm" }
 
 `scm::embed` is the surface with the stability obligation. The other
 modules are `pub` because the CLI, the conformance runner and the LLVM
