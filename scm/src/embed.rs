@@ -154,8 +154,22 @@ pub enum Val {
     Null,
     Unspecified,
     Bool(bool),
-    /// An exact integer. No bignums (§2.3), so this is the whole range.
+    /// An exact integer that fits a machine word. Since S18 exact integers
+    /// are unbounded, so one that does not fit arrives as
+    /// [`Val::BigInt`] rather than being truncated or rounded.
     Int(i64),
+    /// An exact integer outside `i64`, as its decimal text.
+    ///
+    /// Text rather than a bignum type, deliberately: the `scm` crate has no
+    /// dependencies and exposing its internal representation would make
+    /// every host take one. A host that needs arithmetic on it parses the
+    /// string with whatever it already uses; a host that only wants to log
+    /// or round-trip it does not have to.
+    ///
+    /// Round-trips: handing a `BigInt` back through [`Interp::make`] reads
+    /// it as the same exact integer, and one that fits a word normalises to
+    /// a fixnum, as it does everywhere else.
+    BigInt(String),
     Float(f64),
     Char(char),
     Str(String),
@@ -499,7 +513,9 @@ impl Interp {
             .ok_or(Error::ForeignHandle)
     }
 
-    /// Read a value as host data, to [`MAX_DEPTH`].
+    /// Read a value as host data, to a fixed depth limit (128); past it
+    /// the structure comes back as [`Val::Opaque`] rather than recursing
+    /// without bound on a cyclic or very deep value.
     pub fn value(&mut self, v: &Rooted) -> Result<Val, Error> {
         self.enter()?;
         let raw = self.raw(v)?;
@@ -728,7 +744,7 @@ impl Interp {
     }
 }
 
-/// A `Value` as host data, to [`MAX_DEPTH`].
+/// A `Value` as host data, to `MAX_DEPTH`.
 ///
 /// A free function rather than a method because the host-function dispatch in
 /// [`crate::vm`] needs it too, and it only ever needs the heap.
@@ -799,6 +815,7 @@ pub(crate) fn read_val(engine: &crate::heap::Engine, v: Value, depth: usize) -> 
             Value::Obj(r) => match engine.obj(r) {
                 Obj::Str(cs) => Val::Str(cs.iter().collect()),
                 Obj::Bytevector(b) => Val::Bytes(b.clone()),
+                Obj::Bignum(n) => Val::BigInt(n.to_string_radix(10)),
                 Obj::Vector { items, .. } => {
                     Val::Vector(items.iter().map(|&i| read_val(engine, i, depth + 1)).collect())
                 }
@@ -850,6 +867,13 @@ pub(crate) fn build_val(
             Val::Sym(s) => engine.sym(s),
             Val::Keyword(k) => engine.kw(k),
             Val::Bytes(b) => engine.alloc(Obj::Bytevector(b.clone())),
+            Val::BigInt(text) => match crate::bigint::BigInt::parse(text, 10) {
+                // Through `exact_integer`, so a value that fits comes back a
+                // fixnum: one integer, one representation, whichever side of
+                // the boundary it was built on.
+                Some(b) => engine.exact_integer(b),
+                None => return Err(Error::Syntax(format!("Val::BigInt is not an exact integer: {text:?}"))),
+            },
             Val::List(items) => {
                 let mut built = Vec::with_capacity(items.len());
                 for i in items {

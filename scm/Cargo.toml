@@ -1,17 +1,31 @@
 [package]
 name = "scm"
+# NOTE: `scm` is TAKEN on crates.io -- 0.0.3, ~18k downloads, "Common SCM
+# operations for use with Rust Builders". Publishing needs a different
+# name; `scm-scheme`, `scm-r7rs`, `r7rs-scm` and `schemers` were all free
+# when checked on 2026-10-16. The name here is the one the workspace and
+# the repository use, and a path or git dependency does not care.
 version.workspace = true
 edition.workspace = true
+rust-version = "1.85"
 license.workspace = true
-description = "An R7RS-small Scheme: reader, printer, and (eventually) the rest"
+description = "An embeddable R7RS-small Scheme: a GC'd interpreter, a bytecode VM, and an optional LLVM tier, with no dependencies"
+repository = "https://github.com/k2msmith-gfx/scm"
+documentation = "https://docs.rs/scm"
+readme = "../README.md"
+keywords = ["scheme", "r7rs", "lisp", "interpreter", "embeddable"]
+categories = ["compilers", "development-tools"]
 
-# LLVM lives behind these and they are EMPTY on purpose until S11. The point of
-# declaring them now is that `cargo build --no-default-features` is the guard
-# from the first commit that has a Cargo.toml (plan §5), and a guard that only
-# arrives with the thing it guards has never guarded anything.
+# These are vestigial in *this* crate and kept as the plan §5 guard: the
+# promise is that `cargo build` needs no LLVM, and the guard is that the
+# default feature set is empty and nothing here reads a feature at all.
+# The real `jit` lives in `scm-cli`, which pulls `scm-llvm` behind it.
 [features]
 default = []
 jit = []
 aot = []
 
+# None. Deliberately: a host takes this crate and nothing else, which is
+# also why `bigint.rs` is hand-written and why `embed::Val` carries a wide
+# exact integer as text rather than exposing a bignum type.
 [dependencies]

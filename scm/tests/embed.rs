@@ -430,3 +430,42 @@ fn a_panic_in_a_reentrant_host_function_leaves_the_machine_usable() {
     let v = i.eval("(* 6 7)").unwrap();
     assert_eq!(i.value(&v).unwrap(), Val::Int(42));
 }
+
+#[test]
+fn an_exact_integer_too_wide_for_a_word_crosses_the_boundary_as_text() {
+    // S18 made exact integers unbounded, which left a hole here: a bignum
+    // result reached the host as `Val::Opaque`, so a host could not see a
+    // number the language had just computed. `Val::BigInt` carries it as
+    // decimal text -- text rather than a bignum type, because the crate has
+    // no dependencies and exposing the internal one would make every host
+    // take it.
+    let mut i = Interp::new().unwrap();
+
+    let r = i.eval("(* 9223372036854775807 2)").unwrap();
+    assert_eq!(i.value(&r).unwrap(), Val::BigInt("18446744073709551614".into()));
+    // What fits a word is still an `Int`, so a host matching on `Int` keeps
+    // working for every value it used to see.
+    let r = i.eval("42").unwrap();
+    assert_eq!(i.value(&r).unwrap(), Val::Int(42));
+
+    // Both directions, losslessly.
+    let text = "1267650600228229401496703205376";
+    let built = i.make(&Val::BigInt(text.into())).unwrap();
+    assert_eq!(i.write(&built).unwrap(), text);
+    assert_eq!(i.value(&built).unwrap(), Val::BigInt(text.into()));
+
+    // And normalised on the way in: one integer, one representation,
+    // whichever side of the boundary built it.
+    let small = i.make(&Val::BigInt("7".into())).unwrap();
+    assert_eq!(i.value(&small).unwrap(), Val::Int(7));
+
+    // A host function may return one, and Scheme does arithmetic on it.
+    i.define_fn("big", |_| Ok(Val::BigInt("1000000000000000000000".into())))
+        .unwrap();
+    let r = i.eval("(+ (big) 1)").unwrap();
+    assert_eq!(i.write(&r).unwrap(), "1000000000000000000001");
+
+    // Text that is not an exact integer is the host's mistake and is
+    // reported rather than silently becoming something else.
+    assert!(matches!(i.make(&Val::BigInt("1.5".into())), Err(Error::Syntax(_))));
+}
