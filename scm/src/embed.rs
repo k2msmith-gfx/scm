@@ -39,7 +39,11 @@ use crate::vm::{Vm, VmError};
 /// one handle would need reference counting to know when to release it. A
 /// host that wants to keep a raised object past the error calls
 /// [`Interp::keep`].
+/// **`#[non_exhaustive]`**, so a host matches with a wildcard arm and a
+/// new way for a call to fail is not a breaking change. Added before the
+/// first publish because adding it afterwards would itself be one.
 #[derive(Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     /// The script could not be read: unbalanced parens, a bad escape. Held
     /// apart from [`Error::Incomplete`] because an editor needs the
@@ -147,7 +151,13 @@ pub struct Description {
 /// parameter have no useful host representation, so they stay behind a
 /// [`Rooted`] as [`Val::Opaque`]. A host should never need to know what an
 /// `ObjRef` is.
+/// **`#[non_exhaustive]`**, which is not caution for its own sake: adding
+/// [`Val::BigInt`] for S18's unbounded integers broke every exhaustive
+/// match over this enum, and the value types a Scheme can hand a host are
+/// not a closed set. With this, a host writes a wildcard arm once and a
+/// later variant is a patch release rather than a major one.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Val {
     /// `'()`. Note this is the empty list, not a nil: plan §4 is explicit
     /// that this language has no nil.
