@@ -50,3 +50,77 @@ safepoints.
 under GC stress, and a check that at least 80 of 100 programs produce a
 value rather than an error, so the comparison is of answers and not only of
 messages. Fixed seeds, so a failure is a number.
+
+## Libraries, and a generator that was testing almost nothing
+
+2026-10-15. Until now the fuzzer generated no `define-library`, no
+`import` and no modifier, while the project had reached **twenty embedded
+libraries**. The library system has tier-specific paths — a frame whose
+definitions are mutually recursive, a macro bound as a value in that
+frame, an export resolved against the globals because the library does not
+define it — and none of them had ever been compared between T0 and T1
+except by the examples in `scm/tests/srfi/`, written by hand.
+
+A generated program now has, half the time, one or two libraries defined
+and imported before anything else. What they contain is chosen to hit the
+parts where the tiers could disagree:
+
+- a procedure or two, the second able to call the first;
+- a **mutually recursive pair**, written in the order that needs the
+  frame's bindings visible to each other rather than in sequence, behind a
+  wrapper that guards its argument so no call site can hand it a negative
+  and never come back;
+- an exported **macro**, which a library binds as a value in its frame the
+  way `let-syntax` does;
+- an exported **variable and setter**, for the copy-at-import
+  simplification below;
+- an export the library **does not define**, resolved against the globals
+  — the fallback `(srfi 133)` and `(srfi 130)` both lean on;
+- optionally a dependency on an earlier generated library, so the chain is
+  more than one deep.
+
+The import is then one of five shapes — plain, `prefix`, `only`,
+`except`+`rename` — and the generator registers *exactly* the names that
+shape brings in, which is the part a modifier can get wrong.
+
+### The copy-at-import simplification is now fuzzed, not just documented
+
+[libraries.md](libraries.md) records one deliberate deviation from R7RS: a
+binding is copied at import, so a library that `set!`s its own exported
+variable afterwards does not reach the importer. That is the kind of thing
+a differential fuzzer is uniquely good for — it cannot tell you the
+simplification is *right*, but it can tell you both tiers implement the
+same one, on every path the generator reaches, which no hand-written test
+can claim. A generated program assigns through the setter and reads its own
+copy in the same expression.
+
+### Library bodies get their own expression generator
+
+A library body is **not** generated with the ordinary expression
+generator, and the reason is worth recording: that one can reach for the
+program's top-level `p` parameter and `pt` record type, neither of which
+is in scope inside a library. The result would have been a library that
+fails to load — a program testing the error path rather than the library
+system. The confined generator uses the library's own parameter, its own
+earlier definitions, and base arithmetic, with no division and guarded
+multiplication, so every generated library loads and every exported
+procedure is total.
+
+### The mistake worth writing down
+
+The first version of this emitted libraries and imported them, and was
+testing almost nothing. The only path that called an imported procedure
+was the generic one-in-fifty `call` arm choosing a name out of *all*
+procedures in scope, so across forty programs a library procedure was
+called about twice — nine name occurrences in total, and most of those
+were the macro and the variable, which have their own arms. The work
+looked done.
+
+Library procedures now have their own arm, which took the same count from
+**9 to 36 across forty programs**. And
+`the_generator_exercises_the_library_system` asserts the coverage
+directly: at least 40 of 120 programs define a library, at least 15 of
+those *use* an import in the expression whose value the tiers compare, and
+at least three distinct modifiers appear. Coverage of a fuzzer's own
+output is worth asserting, because nothing else notices it drifting back
+to zero.

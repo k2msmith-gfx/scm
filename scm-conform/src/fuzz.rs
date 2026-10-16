@@ -44,6 +44,23 @@ pub enum Ty {
     Vec,
 }
 
+/// A library the program defined and then imported, and the names the
+/// import actually brought in -- which is not the same list, because the
+/// modifiers drop and rename things.
+struct Lib {
+    name: String,
+    /// Exported procedures of one argument. Every one is **total**: the
+    /// bodies use no division and the recursive ones guard their argument,
+    /// so a call site can pass any integer without the program hanging or
+    /// raising instead of testing the library system.
+    unary: Vec<String>,
+    /// Exported macros, each taking one expression.
+    macros: Vec<String>,
+    /// An exported variable and the setter that assigns it, when the
+    /// library has them.
+    cell: Option<(String, String)>,
+}
+
 pub struct Gen {
     rng: Rng,
     /// Variables in scope, innermost last.
@@ -52,13 +69,21 @@ pub struct Gen {
     procs: Vec<(String, usize)>,
     macros: Vec<String>,
     counters: Vec<String>,
+    /// `(variable, setter)` pairs imported from a library, for the
+    /// copy-at-import check.
+    cells: Vec<(String, String)>,
+    /// Imported procedures, kept apart from `procs` as well as in it. The
+    /// generic `call` arm picks one name out of all of them, which left
+    /// library procedures called about twice in forty programs -- too thin
+    /// to be testing anything. They get their own arm.
+    lib_procs: Vec<String>,
     counter: u32,
     out: String,
 }
 
 impl Gen {
     pub fn new(seed: u64) -> Self {
-        Gen { rng: Rng::new(seed), env: Vec::new(), procs: Vec::new(), macros: Vec::new(), counters: Vec::new(), counter: 0, out: String::new() }
+        Gen { rng: Rng::new(seed), env: Vec::new(), procs: Vec::new(), macros: Vec::new(), counters: Vec::new(), cells: Vec::new(), lib_procs: Vec::new(), counter: 0, out: String::new() }
     }
 
     fn fresh(&mut self, base: &str) -> String {
@@ -75,8 +100,22 @@ impl Gen {
         self.procs.clear();
         self.macros.clear();
         self.counters.clear();
+        self.cells.clear();
+        self.lib_procs.clear();
         self.out.push_str("(define p (make-parameter 1))\n");
         self.out.push_str("(define-record-type pt (make-pt x y) pt? (x pt-x) (y pt-y set-pt-y!))\n");
+        // Libraries first, so the procedures below can call what they
+        // export. Half the programs have none, so the plain shapes keep
+        // their share of the generator.
+        if self.rng.chance(1, 2) {
+            let mut names: Vec<String> = Vec::new();
+            let count = 1 + self.rng.below(2);
+            for _ in 0..count {
+                let lib = self.library(&names);
+                self.import_lib(&lib);
+                names.push(lib.name.clone());
+            }
+        }
         let n = 1 + self.rng.below(3) as usize;
         for _ in 0..n {
             self.procedure();
@@ -108,6 +147,250 @@ impl Gen {
         let _ = writeln!(self.out, "(define result (list {}))", items.join(" "));
         self.out.push_str("result\n");
         std::mem::take(&mut self.out)
+    }
+
+    /// An integer expression confined to a library body.
+    ///
+    /// **Not `expr`**: that one can reach for the program's top-level `p`
+    /// parameter and `pt` record type, and neither is in scope inside a
+    /// library -- the result would be a library that fails to load rather
+    /// than a test of the library system. Calls go only to procedures
+    /// defined *earlier* in the same body, so the call graph is acyclic
+    /// and the program terminates.
+    fn lib_expr(&mut self, own: &[String], depth: u32) -> String {
+        if depth == 0 || self.rng.chance(1, 3) {
+            return if self.rng.chance(1, 2) {
+                "x".to_string()
+            } else {
+                format!("{}", self.rng.below(20) as i64 - 9)
+            };
+        }
+        let d = depth - 1;
+        match self.rng.below(6) {
+            0 => {
+                let (a, b) = (self.lib_expr(own, d), self.lib_expr(own, d));
+                format!("(+ {a} {b})")
+            }
+            1 => {
+                let (a, b) = (self.lib_expr(own, d), self.lib_expr(own, d));
+                format!("(- {a} {b})")
+            }
+            // Guarded, so a library body cannot be the thing that makes a
+            // program interesting for the wrong reason.
+            2 => {
+                let (a, b) = (self.lib_expr(own, d), self.lib_expr(own, d));
+                format!("(modulo (* {a} {b}) 10007)")
+            }
+            3 => {
+                let (c, a, b) = (
+                    self.lib_expr(own, d),
+                    self.lib_expr(own, d),
+                    self.lib_expr(own, d),
+                );
+                format!("(if (< {c} 0) {a} {b})")
+            }
+            4 => {
+                let (i, b) = (self.lib_expr(own, d), self.lib_expr(own, d));
+                format!("(let ((y {i})) (+ y {b}))")
+            }
+            _ => match own.last().cloned() {
+                Some(f) => {
+                    let a = self.lib_expr(own, d);
+                    format!("({f} (modulo (abs {a}) 7))")
+                }
+                None => self.lib_expr(own, d),
+            },
+        }
+    }
+
+    /// Emit a `define-library`, and describe what it exports.
+    ///
+    /// The library system is 20 embedded libraries deep and until now the
+    /// fuzzer generated none of it: no `define-library`, no `import`, no
+    /// modifier. What is worth exercising is the parts with tier-specific
+    /// paths -- a frame whose definitions are mutually recursive, a macro
+    /// bound as a value in that frame, and an export resolved against the
+    /// globals because the library does not define it.
+    fn library(&mut self, earlier: &[String]) -> Lib {
+        self.counter += 1;
+        let id = self.counter;
+        let name = format!("(fz{id} util)");
+
+        // Nothing from the program's top level is in scope inside a
+        // library, so generate the body against an empty world and put
+        // the program's back afterwards.
+        let saved_env = std::mem::take(&mut self.env);
+        let saved_procs = std::mem::take(&mut self.procs);
+        let saved_macros = std::mem::take(&mut self.macros);
+        let saved_counters = std::mem::take(&mut self.counters);
+
+        let mut defined: Vec<String> = Vec::new();
+        let mut exports: Vec<String> = Vec::new();
+        let mut unary: Vec<String> = Vec::new();
+        let mut macros: Vec<String> = Vec::new();
+        let mut cell: Option<(String, String)> = None;
+        let mut body = String::new();
+
+        // One procedure always, so the importer has something to call.
+        let f = format!("lf{id}");
+        let e = self.lib_expr(&defined, 2);
+        let _ = writeln!(body, "    (define ({f} x) {e})");
+        defined.push(f.clone());
+        exports.push(f.clone());
+        unary.push(f.clone());
+
+        // A second one, which may call the first.
+        if self.rng.chance(1, 2) {
+            let g = format!("lg{id}");
+            let e = self.lib_expr(&defined, 2);
+            let _ = writeln!(body, "    (define ({g} x) {e})");
+            defined.push(g.clone());
+            exports.push(g.clone());
+            unary.push(g.clone());
+        }
+
+        // A mutually recursive pair, defined in the order that needs the
+        // frame's bindings to be visible to each other rather than in
+        // sequence. Only the guarded wrapper is exported, so no call site
+        // can hand it a negative and never come back.
+        if self.rng.chance(1, 3) {
+            let ev = format!("lev{id}");
+            let od = format!("lod{id}");
+            let w = format!("lmp{id}");
+            let _ = writeln!(body, "    (define ({ev} n) (if (= n 0) 1 ({od} (- n 1))))");
+            let _ = writeln!(body, "    (define ({od} n) (if (= n 0) 0 ({ev} (- n 1))))");
+            let _ = writeln!(body, "    (define ({w} x) ({ev} (modulo (abs x) 10)))");
+            exports.push(w.clone());
+            unary.push(w);
+        }
+
+        // A macro, which a library binds as a value in its frame the way
+        // `let-syntax` does.
+        if self.rng.chance(1, 2) {
+            let m = format!("lm{id}");
+            let _ = writeln!(
+                body,
+                "    (define-syntax {m} (syntax-rules () ((_ e) (+ e e))))"
+            );
+            exports.push(m.clone());
+            macros.push(m);
+        }
+
+        // An exported variable and its setter. **This is the documented
+        // simplification**: a binding is copied at import, so assigning it
+        // inside the library does not reach the importer. Both tiers have
+        // to implement the same simplification, which is exactly what a
+        // differential fuzzer can say and a hand-written test cannot say
+        // for every path.
+        if self.rng.chance(1, 3) {
+            let v = format!("lv{id}");
+            let set = format!("lset{id}");
+            let _ = writeln!(body, "    (define {v} 10)");
+            let _ = writeln!(body, "    (define ({set} x) (set! {v} x) {v})");
+            exports.push(v.clone());
+            exports.push(set.clone());
+            unary.push(set.clone());
+            cell = Some((v, set));
+        }
+
+        // An export the library does **not** define, resolved against the
+        // globals -- the fallback `(srfi 133)` and `(srfi 130)` both lean
+        // on, where a library re-exports a prelude procedure it never
+        // mentions.
+        let mut export_text = exports.join(" ");
+        if self.rng.chance(1, 3) {
+            let base = *self.rng.pick(&["length", "reverse", "abs"]);
+            let alias = format!("lre{id}");
+            export_text.push_str(&format!(" (rename {base} {alias})"));
+            if base == "abs" {
+                unary.push(alias);
+            }
+        }
+
+        // Depend on an earlier library, so the chain is more than one deep.
+        let deps = match earlier.last() {
+            Some(d) if self.rng.chance(1, 3) => format!(" {d}"),
+            _ => String::new(),
+        };
+
+        let _ = writeln!(self.out, "(define-library {name}");
+        let _ = writeln!(self.out, "  (export {export_text})");
+        let _ = writeln!(self.out, "  (import (scheme base){deps})");
+        let _ = writeln!(self.out, "  (begin");
+        self.out.push_str(&body);
+        self.out.push_str("    ))\n");
+
+        self.env = saved_env;
+        self.procs = saved_procs;
+        self.macros = saved_macros;
+        self.counters = saved_counters;
+
+        Lib { name, unary, macros, cell }
+    }
+
+    /// Import it, under one of the five shapes, and register exactly the
+    /// names that shape brings in -- which is the part a modifier can get
+    /// wrong.
+    fn import_lib(&mut self, lib: &Lib) {
+        let pick = if lib.unary.len() > 1 { self.rng.below(5) } else { self.rng.below(3) };
+        match pick {
+            // Everything, under its own name.
+            0 | 1 => {
+                let _ = writeln!(self.out, "(import {})", lib.name);
+                for n in &lib.unary {
+                    self.procs.push((n.clone(), 1));
+                    self.lib_procs.push(n.clone());
+                }
+                for m in &lib.macros {
+                    self.macros.push(m.clone());
+                }
+                if let Some(c) = &lib.cell {
+                    self.cells.push(c.clone());
+                }
+            }
+            // A prefix on every name.
+            2 => {
+                let p = format!("px{}", self.counter);
+                let _ = writeln!(self.out, "(import (prefix {} {p}))", lib.name);
+                for n in &lib.unary {
+                    self.procs.push((format!("{p}{n}"), 1));
+                    self.lib_procs.push(format!("{p}{n}"));
+                }
+                for m in &lib.macros {
+                    self.macros.push(format!("{p}{m}"));
+                }
+                if let Some((v, set)) = &lib.cell {
+                    self.cells.push((format!("{p}{v}"), format!("{p}{set}")));
+                }
+            }
+            // Just one name.
+            3 => {
+                let n = self.rng.pick(&lib.unary).clone();
+                let _ = writeln!(self.out, "(import (only {} {n}))", lib.name);
+                self.procs.push((n.clone(), 1));
+                self.lib_procs.push(n);
+            }
+            // All but one, renamed.
+            _ => {
+                let dropped = lib.unary[0].clone();
+                let kept = lib.unary[1].clone();
+                let alias = format!("rn{}", self.counter);
+                let _ = writeln!(
+                    self.out,
+                    "(import (rename (except {} {dropped}) ({kept} {alias})))",
+                    lib.name
+                );
+                self.procs.push((alias.clone(), 1));
+                self.lib_procs.push(alias);
+                for n in lib.unary.iter().skip(2) {
+                    self.procs.push((n.clone(), 1));
+                    self.lib_procs.push(n.clone());
+                }
+                for m in &lib.macros {
+                    self.macros.push(m.clone());
+                }
+            }
+        }
     }
 
     fn procedure(&mut self) {
@@ -245,10 +528,12 @@ impl Gen {
 
     fn int(&mut self, depth: u32) -> String {
         let d = depth - 1;
-        // 48, not 47: arm 46 was added for bignum growth and the `_` arm
-        // is a real case (`raise-continuable`), not a filler -- leaving the
-        // bound alone would have silently dropped it.
-        match self.rng.below(48) {
+        // 50, not 47: arms 46, 47 and 48 were added for bignum growth,
+        // the copy-at-import check and calls through an import, and the
+        // `_` arm is a real case (`raise-continuable`) rather than a
+        // filler -- leaving the bound alone silently drops whatever sits
+        // last.
+        match self.rng.below(50) {
             0..=3 => {
                 let op = *self.rng.pick(&["+", "-", "*"]);
                 let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d));
@@ -295,6 +580,28 @@ impl Gen {
             33 => { let a = self.expr(Ty::Int, d); format!("(let ((v (vector 1 2 3))) (vector-set! v 1 {a}) (vector-ref v 1))") }
             34 => match self.macros.last().cloned() { Some(m) => { let a = self.expr(Ty::Int, d); format!("({m} {a})") } None => self.expr(Ty::Int, d) },
             35 => match self.counters.last().cloned() { Some(c) => format!("(+ ({c}) ({c}))"), None => self.expr(Ty::Int, d) },
+            // The copy-at-import simplification, read out loud: the setter
+            // assigns the library's own variable and returns it, while the
+            // importer's copy keeps the value it was imported with. Both
+            // tiers must say the same thing about that.
+            // A call through the import, which is the whole point of
+            // generating libraries: the name resolves through whatever
+            // modifier brought it in.
+            48 => match self.lib_procs.len() {
+                0 => self.expr(Ty::Int, d),
+                n => {
+                    let f = self.lib_procs[self.rng.below(n as u64) as usize].clone();
+                    let a = self.expr(Ty::Int, d);
+                    format!("({f} (modulo (abs {a}) 11))")
+                }
+            },
+            47 => match self.cells.last().cloned() {
+                Some((v, set)) => {
+                    let a = self.expr(Ty::Int, d);
+                    format!("(let ((before {v})) (+ (* 100 ({set} {a})) (* 10 before) {v}))")
+                }
+                None => self.expr(Ty::Int, d),
+            },
             36 => {
                 // Closures created in a loop, capturing the loop variable,
                 // called afterwards: each must see its own binding.
