@@ -12,6 +12,10 @@ not to reopen.
 
 ## Start here
 
+- **`docs/subset.md`** — **the normative statement of what the language
+  is.** Read it before answering "does scm support X", and if you change
+  what the language does, change it there. `scm/tests/subset.rs` checks
+  every claim in it, so the document cannot quietly rot.
 - **`docs/plan.md`** — the argument and the staging. §9 is the stage table:
   every stage, its size, its exit criterion, and whether it was met. If you
   are about to do a stage's worth of work, it gets a row.
@@ -63,6 +67,12 @@ Nothing is done until these pass, and **commit only on green**:
     cargo test -p scm-cli --test boot
     LLVM_SYS_211_PREFIX=… cargo test -p scm-llvm
     cd emacs && SCM=$PWD/../target/release/scm emacs --batch -l test-scm-mode.el
+    cargo run --release -p scm-conform --bin soak -- --minutes 60
+
+The **soak** is for duration rather than intensity, which is what the GC
+tests cannot give: it watches whether the live set and the slot high-water
+hold still over hundreds of thousands of rounds. `cargo test` runs a
+bounded version; the binary is the long one.
 
 The Emacs check drives the **real server** from batch Emacs rather than a
 mock, so it is a protocol test as much as an editor one. `SCM` must be an

@@ -9,3 +9,4 @@
 //! output or error message.
 
 pub mod fuzz;
+pub mod soak;

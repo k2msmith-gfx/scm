@@ -63,6 +63,12 @@ authored code can leave the VM entirely.
 
 ## Compatibility
 
+**[docs/subset.md](docs/subset.md) is the normative statement** of what
+the language is — the baseline, the feature identifiers, the four
+deviations, the resource limits, and what is deliberately not promised.
+Every claim in it is checked by `scm/tests/subset.rs`, so a sentence that
+stops being true fails the build. The rest of this section is the summary.
+
 **R7RS-small, qualified.** The conformance suite is Chibi-Scheme's
 `r7rs-tests.scm` — written by other people, against the spec — vendored
 unedited and run unchanged:
@@ -447,11 +453,22 @@ profile you name, so `--release` separately.
 
 ## Testing
 
-    cargo test                                                        # ~343 tests
+    cargo test                                                        # ~360 tests
     cargo run --release -p scm-conform -- scm-conform/suites/r7rs-tests.scm out.md
     cargo run --release -p scm-conform --bin scm-fuzz -- --seed 42 --count 2000
+    cargo run --release -p scm-conform --bin soak -- --minutes 60
     cd emacs && SCM=$PWD/../target/release/scm emacs --batch -l test-scm-mode.el
     scm-conform/bench/vs-steel/run.py                                 # needs `steel` on PATH
+
+The **soak** is the instrument for duration rather than intensity. The GC
+tests collect at every safepoint, which finds a collector bug immediately;
+the soak runs rounds of ordinary allocating work — closures over mutable
+state, a cycle made unreachable, a mutated reachable structure, string
+ports, records, hash tables, deep recursion, an escape continuation,
+bignums — and watches whether the live set and the heap's high-water mark
+hold still. Over **a million rounds** both were bit-identical: live 6,223
+objects and 11,081 slots, start to finish. A leak of one cell per round
+would be unmissable; so would a non-moving heap fragmenting.
 
 The **differential fuzzer** is the main instrument: random programs under
 every engine must agree on value, output and error message. It generates
