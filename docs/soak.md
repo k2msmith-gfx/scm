@@ -41,17 +41,23 @@ rather than a difference, because the absolute size is the round's business.
 
     cargo run --release -p scm-conform --bin soak -- --minutes 12
 
-**1,000,000 rounds. Both numbers bit-identical from the
-first sample to the last: 6,223 live objects and 11,081 slots.** Not
-"within tolerance" — unchanged. One collection per round.
+**2,000,000 rounds, and 2,000,001 collections. Both numbers
+bit-identical from the first sample to the last: 6,223 live objects and
+11,081 slots.** Not "within tolerance" — unchanged, for twelve and a half
+minutes and one collection per round.
 
 | | start | end | ratio |
 |---|---|---|---|
 | live objects | 6,223 | 6,223 | 1.000× |
 | slot high-water | 11,081 | 11,081 | 1.000× |
 
-A leak of a single cell per round would have added a million cells. There is
-nothing there to find, and now there is a way to keep checking.
+A leak of a single cell per round would have added two million cells.
+There is nothing there to find, and now there is a way to keep checking.
+
+    2000000 rounds, 2000001 collections
+      live  6223 -> 6223  (1.000x)
+      slots 11081 -> 11081  (1.000x)
+    steady: neither live objects nor the heap high-water trended up
 
 ## As a gate
 

@@ -466,7 +466,7 @@ the soak runs rounds of ordinary allocating work — closures over mutable
 state, a cycle made unreachable, a mutated reachable structure, string
 ports, records, hash tables, deep recursion, an escape continuation,
 bignums — and watches whether the live set and the heap's high-water mark
-hold still. Over **a million rounds** both were bit-identical: live 6,223
+hold still. Over **two million rounds** both were bit-identical: live 6,223
 objects and 11,081 slots, start to finish. A leak of one cell per round
 would be unmissable; so would a non-moving heap fragmenting.
 
