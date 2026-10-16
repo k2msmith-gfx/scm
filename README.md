@@ -271,10 +271,12 @@ printed form.
 
 ### Editors
 
-`scm::repl` is the protocol the terminal, the TCP socket and
-[emacs/](emacs/README.md) all speak: framing, completion, describe,
-interrupt and a break REPL where an uncaught error stops with the frames
-live. A client parses no Scheme. See [docs/repl.md](docs/repl.md).
+`scm::repl` is the protocol the terminal, the TCP socket and the Emacs mode
+below all speak: framing, completion, describe, interrupt, and a break REPL
+where an uncaught error stops with the frames live. A client parses no
+Scheme — everything it knows comes from the server. See
+[docs/repl.md](docs/repl.md), and **Emacs** below for the client built on
+it.
 
 ## Running it
 
@@ -294,6 +296,60 @@ you can inspect locals in and `,return` a value from.
 6.7× the interpreter on the benchmark suite with identical results), and
 `t2` the LLVM tier if the binary was built with it.
 
+## Emacs
+
+[`emacs/scm-mode.el`](emacs/README.md) is a SLIME-shaped mode for editing
+`.scm` files: a REPL in a window, completion, describe, eldoc and
+interrupt. Opening the first `.scm` file starts `scm --serve`, connects,
+and shows the REPL — there is nothing to launch by hand.
+
+| key | in a `.scm` buffer |
+|---|---|
+| `C-x C-e` | eval the sexp before point |
+| `C-c C-c`, `C-M-x` | eval the top-level form around point |
+| `C-c C-r` / `C-c C-k` | eval the region / the whole buffer |
+| `C-c C-z` | go to the REPL |
+| `C-c C-d` | describe the symbol at point: signature, kind, docstring, value |
+| `C-c C-b` | interrupt a runaway — out of band, on a second connection |
+| `TAB` | complete over the server's global names |
+
+In the `*scm*` buffer, `RET` sends a form **once the server says it is
+complete** and inserts a newline when it says more is coming. That is S1's
+*incomplete* versus *invalid* distinction doing visible work: the editor
+does not guess where a form ends, and it does not need a Scheme parser to
+find out. Errors arrive with their message and backtrace; eldoc shows a
+procedure's signature as you type.
+
+Highlighting is `scheme-mode`'s plus scm's own spellings — `[…]` vectors,
+`&opt`/`&named`/`&keys`, and `:keywords`.
+
+### Setting it up
+
+Doom, in `packages.el` and `config.el`:
+
+```elisp
+(package! scm-mode :recipe (:local-repo "~/devel/scm/emacs" :files ("scm-mode.el")))
+
+(use-package! scm-mode
+  :mode "\\.scm\\'"
+  :config
+  (setq scm-program "~/devel/scm/target/release/scm"))
+```
+
+Then `doom sync`. **Leave Doom's `:lang scheme` module off**, or geiser will
+also claim `.scm` buffers. `M-x scm-repl` shows the REPL by hand and
+`M-x scm-start` restarts the server. [emacs/README.md](emacs/README.md) has
+the plain-Emacs setup and the rest of the keys.
+
+### It is tested, from batch Emacs
+
+    cd emacs && SCM=$PWD/../target/release/scm emacs --batch -l test-scm-mode.el
+
+That drives the **real server** rather than a mock: eval, output, framing,
+completion, describe, an error with its backtrace, string escaping both
+ways, the REPL buffer, and an interrupt of a runaway. The mode is the first
+client of the protocol, so what it exercises is the protocol.
+
 ## The LLVM tiers
 
     LLVM=$(nix build --no-link --print-out-paths 'nixpkgs#llvmPackages_21.llvm.dev')
@@ -310,9 +366,10 @@ explains is the call protocol's ceiling rather than the code's.
 
 ## Testing
 
-    cargo test                                                        # ~340 tests
+    cargo test                                                        # ~343 tests
     cargo run --release -p scm-conform -- scm-conform/suites/r7rs-tests.scm out.md
     cargo run --release -p scm-conform --bin scm-fuzz -- --seed 42 --count 2000
+    cd emacs && SCM=$PWD/../target/release/scm emacs --batch -l test-scm-mode.el
     scm-conform/bench/vs-steel/run.py                                 # needs `steel` on PATH
 
 The **differential fuzzer** is the main instrument: random programs under

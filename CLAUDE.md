@@ -57,6 +57,11 @@ Nothing is done until these pass, and **commit only on green**:
     cargo test -p scm-conform --test benchmarks
     cargo test -p scm-cli --test boot
     LLVM_SYS_211_PREFIX=… cargo test -p scm-llvm
+    cd emacs && SCM=$PWD/../target/release/scm emacs --batch -l test-scm-mode.el
+
+The Emacs check drives the **real server** from batch Emacs rather than a
+mock, so it is a protocol test as much as an editor one. `SCM` must be an
+**absolute** path; a relative one fails the executable check.
 
 The **differential fuzzer** is the main instrument: random programs under
 every engine must agree on value, output and error message. It generates
