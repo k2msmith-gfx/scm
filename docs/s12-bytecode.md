@@ -170,3 +170,43 @@ should be. (T0 measured 13× slower than Chibi on `fib`.)
 
 Still timing out at two minutes: `puzzle`, `takl`, `ntakl`, `cpstak`, `fib`, `sum`, `ack`, `array1`, `conform`, `dynamic`, `earley`, `graphs`, `lattice`, `nqueens`, `parsing`, `peval`, `quicksort`, `scheme`, `gcbench`, `mperm`.
 Chibi itself needs 60 s for `fib` and 131 s for `nqueens` at these sizes.
+
+## The collection threshold kept re-ramping (2026-10-16)
+
+Measured while asking where Steel is faster on lists. The threshold was
+recomputed after every collection as `max(min_heap, 2 × live, visited)`,
+which is a growth policy — but one with no memory of itself. A program
+that repeatedly builds a large structure and drops it collapses its live
+set to almost nothing between rounds, so the threshold collapsed with it
+and had to **re-ramp by doubling on every round**.
+
+200 rounds of building and dropping a 100k-element list cost **868
+collections**, where a 4 MB floor needed 9.
+
+The threshold now also decays toward the live set rather than collapsing
+to it, losing 1/16 of itself per collection. Interleaved A/B, three pairs:
+
+| | collections | time |
+|---|---|---|
+| collapse to the live set | 868 | 2340 ms |
+| decay toward it | **324** | **2081 ms** |
+
+**11%, and it costs no memory.** The slot table only ever grows, so the
+high-water mark is already paid for; a larger threshold only delays
+collections inside a heap that already exists.
+
+The decay was swept rather than guessed — 445 collections at 1/4, 384 at
+1/8, 324 at 1/16, 298 at 1/32 — and 1/16 is where the returns stop. What
+remains is structural: each round allocates 100k and the threshold is twice
+the live set, so **about one collection per round is the floor for any
+policy of this shape**. Going below it means tolerating more garbage, which
+is a memory decision rather than a free one, and is not taken here.
+
+### And the heap cap now collects before it complains
+
+Holding the threshold at or below the cap fell out of the same change, and
+it fixes a false positive. A safepoint collects *before* it checks the cap,
+so a threshold above the cap let `used` reach it with **no collection
+attempted** — and a program one collection away from fitting was told it
+was out of memory. A doctest was relying on exactly that: a million live
+pairs under a 1,048,576-slot cap, which fits once the garbage goes.

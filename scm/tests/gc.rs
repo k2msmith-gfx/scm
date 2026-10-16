@@ -302,3 +302,60 @@ fn evaluating_a_quoted_form_does_not_mutate_it() {
     let v = vm.eval_str(src).expect("eval a quoted macro use twice");
     assert_eq!(write_str(&vm.engine, v), "(42 42 (when #t 42))");
 }
+
+/// The collection threshold keeps a memory of itself, so a program that
+/// repeatedly builds and drops a large structure does not re-pay the
+/// doubling ramp on every round.
+///
+/// Measured before this: 200 rounds of a 100k list cost **868 collections**
+/// and about 18% of the program's time. The threshold now decays toward the
+/// live set rather than collapsing to it, which costs no memory at all --
+/// the slot table only ever grows, so the high-water mark is already paid
+/// for and a larger threshold only delays collections inside a heap that
+/// exists.
+#[test]
+fn the_collection_threshold_does_not_re_ramp_every_round() {
+    let src = "(define (build n) (let loop ((i n) (acc '())) (if (= i 0) acc (loop (- i 1) (cons i acc)))))
+               (let loop ((i 0) (t 0)) (if (= i 40) t (loop (+ i 1) (+ t (car (build 20000))))))";
+    let mut vm = Vm::new();
+    let v = vm.eval_str(src).unwrap();
+    // Still correct: `(car (build 20000))` is 1 every round, 40 rounds.
+    assert_eq!(write_str(&vm.engine, v), "40");
+
+    // 40 rounds of 20k allocations is 800k cells. Under the old policy the
+    // threshold collapsed to twice the live set after every round, so each
+    // round re-ramped by doubling from the floor -- about 5 collections a
+    // round. One per round is the structural floor for any policy of this
+    // shape, so the bound here is generous and still well under the old
+    // behaviour.
+    let n = vm.engine.collections();
+    assert!(n < 100, "{n} collections: the threshold is re-ramping again");
+}
+
+/// The heap cap is reported only once a collection has been **tried**.
+///
+/// A safepoint collects before it checks the cap, so the threshold is held
+/// at or below the cap: otherwise `used` could reach the cap with no
+/// collection attempted, and a program one collection away from fitting
+/// would be told it was out of memory.
+#[test]
+fn the_heap_cap_collects_before_it_complains() {
+    // Garbage, not live data: each round drops the list it built. This fits
+    // a small cap comfortably *if* the collector runs first, and not at all
+    // if the cap is checked against uncollected garbage.
+    let src = "(define (build n) (let loop ((i n) (acc '())) (if (= i 0) acc (loop (- i 1) (cons i acc)))))
+               (let loop ((i 0) (t 0)) (if (= i 30) t (loop (+ i 1) (+ t (car (build 5000))))))";
+    let mut vm = Vm::new();
+    vm.engine.set_heap_cap(Some(60_000));
+    let v = vm.eval_str(src).unwrap();
+    assert_eq!(write_str(&vm.engine, v), "30");
+
+    // A live set that genuinely will not fit is still an error, not a hang
+    // and not an abort.
+    let mut vm = Vm::new();
+    vm.engine.set_heap_cap(Some(20_000));
+    let err = vm
+        .eval_str("(let loop ((i 0) (acc '())) (if (= i 200000) acc (loop (+ i 1) (cons i acc))))")
+        .unwrap_err();
+    assert!(matches!(err, VmError::OutOfMemory), "{err:?}");
+}

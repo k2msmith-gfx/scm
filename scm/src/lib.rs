@@ -50,8 +50,10 @@
 //! assert!(matches!(scm.eval("(let spin () (spin))"), Err(Error::OutOfFuel)));
 //!
 //! let mut scm = Interp::new()?;
-//! scm.set_heap_cap(Some(1 << 20));
-//! // And a script that allocates without bound hits the heap cap.
+//! scm.set_heap_cap(Some(1 << 16));
+//! // And a script whose *live* data will not fit hits the heap cap. The
+//! // cap is only reported once a collection has been tried, so a program
+//! // that fits after its garbage goes keeps running.
 //! let runaway = "(let loop ((i 0) (acc '())) (if (= i 1000000) acc (loop (+ i 1) (cons i acc))))";
 //! assert!(matches!(scm.eval(runaway), Err(Error::OutOfMemory)));
 //! # Ok::<(), scm::EmbedError>(())
