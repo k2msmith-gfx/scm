@@ -1461,8 +1461,13 @@ settles that this table left open: the **branch policy** (ray's
 `tool-refactor` merges to `main` first; the port is a separate `scm-port`
 branch; **both VMs stay feature-gated for its life**, because the corpus gate
 needs a Janet load and a scm load in one build to compare, and Janet's
-deletion is the *next* branch's exit criterion); the **cut** (B1-B3 are on
-that branch, B4 and B5 are not); and the six things that do not port,
+deletion is the *next* branch's exit criterion); the **look** (*"better to
+make them look like Scheme"* -- so the printer emits `define`, `#(0 1 0)` and
+a `(material …)` call rather than transliterating `def`, `[0 1 0]` and a dict
+literal, and the compatibility spellings this repository *accepts* are not
+reasons to emit them -- see the survey's §5, now superseded); the **cut**
+(B1-B3 are on that branch, B4 and B5 are not); and the six things that do not
+port,
 measured -- of which the dictionary gap is **two producers** in all of ray,
 and `camera-match`'s `(curenv)` shadow is the one needing a new mechanism,
 because this document's *importing copies bindings* leaves late lookup nowhere

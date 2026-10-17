@@ -112,6 +112,33 @@ so `syntax-rules` can have it at S5 -- but with 253 uses the *name and shape*
 should be kept rather than rewritten, because 253 rewritten loops is 253
 chances to be subtly wrong. The same goes for `for`, `each` and `loop`.
 
+> **Superseded 2026-10-16, and by two things at once.** `seq`, `for`, `each`
+> and `repeat` are implemented under Janet's names in `prelude.scm:250-280`,
+> and they work; what no longer holds is the *argument above for keeping the
+> names*, so the question of where they live is reopened.
+>
+> First, **the 253 loops were never going to be converted mechanically.** This
+> section assumed a textual conversion of scene *source*. §8a retired that: a
+> scene converts by being loaded and re-saved through a printer, and **a save
+> preserves state, not source shape** -- loops, helpers and `defshape` come
+> out as the flat calls they made. No `seq` in the corpus survives a save to
+> be rewritten, rightly or wrongly. The 253 only matter for hand-written
+> sources, which is ray's prelude and modeler (B5).
+>
+> Second, **Kevin ruled on how those should read**: *"I don't necessarily want
+> the scripts to look like Janet. I think it is better to make them look like
+> Scheme."* So B5's translator targets `for-each`, `map` and named `let`, and
+> the compatibility names have no consumer that wants them.
+>
+> They are still the right 30 lines to have written -- they are tested, and a
+> file mid-translation can lean on them -- but as **globals in the core
+> prelude of a general-purpose embeddable Scheme** (goal 2) `for` and `each`
+> are a surprise rather than a service. `~/devel/ray/docs/scm-port-plan.md`
+> §3.5 recommends moving them to an optional `(scm janet-compat)` library.
+> Nothing in this repository's libraries uses them -- only their own tests --
+> so the move is mechanical. **Not done; recorded, because the reason it
+> should happen is here and not there.**
+
 ---
 
 ## 6. What this does not resolve
@@ -140,7 +167,7 @@ What scm owes, for a converted scene to run. Status as of this survey:
 | proper tail calls, so loops do not grow | **done** (S2) |
 | a collector, so a scene build does not leak | **done** (S3) |
 | `let`, `when`, `unless`, `cond`, `case`, `and`, `or`, `do` | S5 (`syntax-rules`) |
-| `seq`, `for`, `each`, `loop`, `while`, `repeat` | S5, keeping Janet's names (§5) |
+| `seq`, `for`, `each`, `loop`, `while`, `repeat` | S5, under Janet's names -- but §5's *reason* for the names is superseded, and the port rules against using them in authored Scheme |
 | `map`, `filter`, `reduce`, `sort`, `reverse`, `length` | S5 (`(scheme base)` + list library) |
 | **a growable array** (`array/push`) | **S5, decision needed** (§2) |
 | **`format`** | **S5, not optional** (§3) |
