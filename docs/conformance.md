@@ -339,6 +339,30 @@ they are recorded here rather than fixed because the cost is in the expander's
 hardest region for seven assertions. If a *real* macro ever trips on one, that
 changes the arithmetic.
 
+> **A real macro tripped on one, 2026-10-16 — and found a feature that was
+> missing rather than wrong.** Writing `(srfi 204)`, the pattern matcher
+> ([srfi.md](srfi.md), tranche fourteen), turned up two holes that this
+> section's list does not cover, because the suite never reaches either:
+>
+> * **`#(…)` in a `syntax-rules` pattern matched nothing, and `#(…)` in a
+>   template could not carry an ellipsis.** R7RS 4.3.2 lists both. A vector
+>   pattern fell through to the constant case and was compared with `equal?`,
+>   so it matched only a vector equal to itself; a vector template
+>   instantiated its elements one at a time and raised *"pattern variable a
+>   needs ellipsis"*. **Fixed**: both now use the same sequence machinery as
+>   the list cases, which is three arms in `syntax.rs`. The suite's number is
+>   **unmoved at 1112/71**, because `r7rs-tests.scm` never writes a vector
+>   pattern — so this is a feature gained with nothing to show for it in the
+>   percentage, which is this document's own point about the number made
+>   concrete.
+> * **`_` in a literals list is still a wildcard**, so a rule written to match
+>   the *identifier* `_` matches everything and binds nothing. That is the
+>   third row above seen from the other side, and it is **not fixed**: the
+>   library asks the question the other way round, with the candidate as the
+>   literal and `_` as the input, which answers correctly and needs no
+>   expander change. Worth knowing before writing a macro that treats `_` as
+>   a literal, because the failure is silent.
+
 ## The R7RS benchmark suite, first run
 
 2026-10-13. [ecraven/r7rs-benchmarks](https://github.com/ecraven/r7rs-benchmarks),

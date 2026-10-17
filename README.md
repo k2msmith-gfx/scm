@@ -170,13 +170,14 @@ silent approximation.
 
 ## Libraries built in
 
-**36 libraries are embedded in the binary**, so `scm` needs no library
-directory beside it and a built standalone binary carries them too. Twenty
-distinct SRFIs:
+**37 libraries are embedded in the binary**, so `scm` needs no library
+directory beside it and a built standalone binary carries them too.
+Twenty-one distinct SRFIs:
 
 | | |
 |---|---|
 | lists, control | `(srfi 1)` `(srfi 2)` `(srfi 8)` `(srfi 26)` `(srfi 111)` |
+| destructuring | `(srfi 204)` — `match`, the Wright-Cartwright-Shinn matcher |
 | strings, chars | `(srfi 13)` `(srfi 14)` `(srfi 130)` |
 | vectors, arrays | `(srfi 4)` `(srfi 63)` `(srfi 133)` `(srfi 160 base)` + 10 element types |
 | tables, comparators | `(srfi 69)` `(srfi 125)` `(srfi 128)` |

@@ -32,6 +32,7 @@ tranches below are the order they were added in.
 | `(srfi 151)` | bitwise operations | Scheme, on **native bit primitives** |
 | `(srfi 158)` | generators and accumulators | Scheme |
 | `(srfi 194)` | random data generators, 30 of 32 | Scheme, on `(srfi 27)` |
+| `(srfi 204)` | `match` and its five derived forms — **withdrawn SRFI**, see the tranche below | Scheme, `syntax-rules` throughout |
 | `(srfi 160 base)` | `(srfi 4)` under SRFI 160's name | the same bindings |
 | `(srfi 160 <type>)` | ~57 operations for each of ten element types | Scheme, written once |
 | `(scm test)` | `check`, `check-raises`, `test-failures` | Scheme |
@@ -1039,6 +1040,89 @@ or trailing delimiter would otherwise leave. Its `limit` counts **splits**
 rather than pieces, so the result holds at most `limit + 1` of them and
 the last keeps whatever remains, delimiters included. An empty delimiter
 splits into characters.
+
+## Tranche fourteen: the pattern matcher, and two holes in the expander
+
+`(srfi 204)` is `match` — the Wright-Cartwright-Shinn matcher, the
+destructuring form a Scheme or Racket reader already knows, since Chibi,
+Gauche, Guile's `(ice-9 match)` and Racket's own `match` are all this shape.
+It is here because the ray port measured the need: **551 destructuring binds
+in ray's non-example Janet and 466 in its 218 scene files**, about a thousand
+sites, and R7RS has nothing for them — `define-values` and `receive`
+destructure multiple *values*, not structure.
+
+**It is a withdrawn SRFI**, and that is stated here rather than buried:
+withdrawn 2022-02-02. What withdrawal means for this library is that its
+document will not change again, not that the matcher is unusual. The number
+is used because implementations do use it for this matcher; if that ever
+looks like a claim too far, `(scm match)` is a one-line rename.
+
+### What it supports, and what it does not
+
+The grammar, less three groups. Supported: pattern variables, `_`, the
+literals (including a **keyword**, which the SRFI's grammar does not list
+because no standard Scheme has them), `'sexp` and quoted data, list patterns
+with an improper tail, `...` and `___` ellipsis — one per list, with any
+number of fixed patterns after it — vector patterns with ellipsis, `and`,
+`or`, `not`, `?` with extra patterns, `=` accessors, quasipatterns with
+`unquote`, the `(=> fail)` restart, and all five derived forms, with
+`match-let` binding in **parallel** and in its named-loop form.
+
+Absent, in three groups with different standing:
+
+| | why |
+|---|---|
+| `$`, `struct`, `object` — record patterns | **the SRFI permits it**: *"This pattern may not be available (because an implementation has not made the necessary record introspection forms available)"*. scm's records expose no `is-a?`/`slot-ref` to a library |
+| `***` — tree patterns | **the SRFI permits it**: *"tree patterns are considered experimental at this stage and so are an optional part of this SRFI"* |
+| `**1`, `=.. k`, `*.. k j` — counted ellipses; `get!`/`set!`; `unquote-splicing` in a quasipattern; repeated (nonlinear) pattern variables | **mine.** Each is a real omission rather than a permitted one. The repetition case is the one to know about: the SRFI says an implementation that does not support it *"should cause a syntax error"*, and this one does not — a repeated variable rebinds instead of comparing, so `((a a) …)` silently matches two different values. Do not write one |
+
+`match-letrec` is `match-let*`: sequential, not recursive, so a pattern
+cannot refer to a binding made later in the same form.
+
+### The two expander holes it found, which is the point of writing libraries
+
+Both were found by a pattern that could not fire, not by reading.
+
+**`#(…)` in a `syntax-rules` pattern matched nothing.** R7RS 4.3.2 lists
+vector patterns and vector templates; scm had neither. A `#(p …)` pattern
+fell through to the constant case and was compared with `equal?`, so it
+matched only a vector equal to the pattern itself — which is to say never —
+and a `#(t …)` template instantiated its elements one at a time, so it
+reached a repeated binding with no ellipsis around it and raised *"pattern
+variable a needs ellipsis"*. Both are now the same sequence machinery the
+list cases use, which is three arms in `syntax.rs` and no new concepts.
+**The conformance number did not move**: 1112/71 before and after, because
+`r7rs-tests.scm` never exercises a vector pattern. A feature gained with no
+number to show for it is the clearest case yet of this document's own claim
+that the number is not the finding.
+
+**`_` in a literals list is still a wildcard.** `(syntax-rules (_) ((_ v _ sk
+fk) sk) …)` — declaring `_` a literal and expecting it to match only the
+identifier `_` — instead matches *everything* and binds nothing, so the
+matcher's leaf rule swallowed every pattern and bound no variables. That cost
+this library its first version. It is the facet of
+[conformance.md](conformance.md)'s *"`_` in a pattern matches without
+binding; as an argument it is an ordinary identifier"* that the suite's seven
+remaining hygiene corners do not cover — and that document says *"if a real
+macro ever trips on one, that changes the arithmetic."* One just did. The
+library asks the question the other way round instead, with the candidate as
+the literal and `_` as the input, which answers correctly and needed no
+expander change.
+
+### Three techniques worth recording, because they are not obvious
+
+- **An identifier can be told from a literal inside `syntax-rules`**: put the
+  candidate in a nested rule's pattern, where an identifier becomes a pattern
+  *variable* and matches a probe while a number or string becomes a literal
+  and does not. Everything in the matcher's leaf case rests on this.
+- **`(syntax-rules <ellipsis> (<literal> …) …)` renames the ellipsis**, which
+  is what makes `...` itself available as a literal to match. Every macro here
+  that has to recognise an ellipsis *inside* a pattern declares its own.
+- **The ellipsis split needs no backtracking.** `(p … p1 … pN)` is decided by
+  counting the fixed patterns after the ellipsis, at expansion time, and
+  `(length (quote rest))` counts them at run time by quoting the pattern as
+  data. The SRFI forbids two ellipses in one list, which is exactly what makes
+  counting sufficient.
 
 ## What is still absent
 

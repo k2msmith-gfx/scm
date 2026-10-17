@@ -230,12 +230,37 @@ impl SyntaxRules {
                 true
             }
             Value::Null => matches!(input, Value::Null),
+            // `#(p …)` matches a VECTOR element-wise, ellipsis included
+            // (R7RS 4.3.2). Without this arm it fell through to the constant
+            // case below and compared for equality, so a vector pattern
+            // matched only a vector equal to the pattern itself -- which is
+            // to say, never. Found by writing `(srfi 204)`, whose `#(a b)`
+            // rule could not fire. A *bracket* vector pattern is not this: by
+            // plan §4.9 it reads as a list, which `as_list` already does.
+            Value::Obj(pr)
+                if matches!(
+                    e.obj(pr),
+                    Obj::Vector {
+                        bracket: false,
+                        ..
+                    }
+                ) =>
+            {
+                let Obj::Vector { items: pitems, .. } = e.obj(pr).clone() else {
+                    unreachable!("guarded")
+                };
+                let Value::Obj(ir) = input else { return false };
+                let Obj::Vector { items: iitems, .. } = e.obj(ir).clone() else {
+                    return false;
+                };
+                self.match_seq(e, &pitems, Value::Null, &iitems, Value::Null, b)
+            }
             Value::Obj(_) => match as_list(e, pat) {
                 Some((pitems, ptail)) => match as_list(e, input) {
                     Some((iitems, itail)) => self.match_seq(e, &pitems, ptail, &iitems, itail, b),
                     None => false,
                 },
-                // A `#(…)` pattern, or a string/bytevector constant.
+                // A string or bytevector constant.
                 None => e.equal(pat, input),
             },
             _ => e.equal(pat, input),
@@ -384,17 +409,28 @@ impl SyntaxRules {
                 Ok(Value::Symbol(self.rename(e, r, renames)))
             }
             Value::Obj(_) => {
-                let Some((items, tail)) = as_list(e, tmpl) else {
-                    // `#(…)` template: expand the elements, keep the kind.
-                    if let Value::Obj(r) = tmpl
-                        && let Obj::Vector { items, bracket } = e.obj(r).clone()
-                    {
-                        let mut out = Vec::with_capacity(items.len());
-                        for i in items {
-                            out.push(self.instantiate(e, i, b, renames)?);
-                        }
-                        return Ok(e.vector(out, bracket));
-                    }
+                // Which kind of vector, if any, this template rebuilds as.
+                // A `#(…)` template is a sequence like any other and gets the
+                // SAME ellipsis processing (R7RS 4.3.2) -- the first version
+                // instantiated its elements one by one, so `#(a ...)` reached
+                // a `Many` binding with no ellipsis around it and raised
+                // "pattern variable a needs ellipsis". A bracket vector takes
+                // this path already, through `as_list`.
+                let vector_kind = match tmpl {
+                    Value::Obj(r) => match e.obj(r) {
+                        Obj::Vector { bracket, .. } => Some(*bracket),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some((items, tail)) = as_list(e, tmpl).or_else(|| match (tmpl, vector_kind) {
+                    (Value::Obj(r), Some(_)) => match e.obj(r).clone() {
+                        Obj::Vector { items, .. } => Some((items, Value::Null)),
+                        _ => None,
+                    },
+                    // A string or bytevector constant.
+                    _ => None,
+                }) else {
                     return Ok(tmpl);
                 };
                 // `(... template)` escapes a literal ellipsis: inside it an
@@ -404,8 +440,6 @@ impl SyntaxRules {
                 if items.len() == 2 && self.is_ellipsis(e, items[0]) {
                     return self.instantiate_no_ellipsis(e, items[1], b, renames);
                 }
-                let bracket = matches!(tmpl, Value::Obj(r)
-                    if matches!(e.obj(r), Obj::Vector { bracket: true, .. }));
                 let mut out: Vec<Value> = Vec::new();
                 let mut i = 0;
                 while i < items.len() {
@@ -432,8 +466,10 @@ impl SyntaxRules {
                 } else {
                     self.instantiate(e, tail, b, renames)?
                 };
-                if bracket && matches!(tail, Value::Null) {
-                    return Ok(e.vector(out, true));
+                if let Some(bracket) = vector_kind
+                    && matches!(tail, Value::Null)
+                {
+                    return Ok(e.vector(out, bracket));
                 }
                 let mut acc = tail;
                 for v in out.into_iter().rev() {

@@ -36,6 +36,13 @@ fn srfi_1_passes_on_both_tiers() {
 }
 
 #[test]
+fn srfi_204_passes_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "204.scm"), "()", "(srfi 204) on {tier:?}");
+    }
+}
+
+#[test]
 fn the_small_srfis_pass_on_both_tiers() {
     for tier in [Tier::T0, Tier::T1] {
         assert_eq!(run(tier, "small.scm"), "()", "(srfi 2/8/26/111/132) on {tier:?}");
