@@ -48,6 +48,26 @@ at `211`, so only that major version. `brew --prefix llvm@21` (21.1.8) and
 `/usr/lib/llvm-21` from apt.llvm.org are the other two prefixes; the README
 lists all three.
 
+**On NixOS the prefix is not enough**, because `llvm-config --libs` emits
+`-lffi -lz -lxml2` and those are not on the default search path. Linking
+fails at the *test* step with `rust-lld: error: unable to find library
+-lffi`. Add them:
+
+    export LIBRARY_PATH=$(nix build --no-link --print-out-paths 'nixpkgs#libffi^out')/lib:\
+    $(nix build --no-link --print-out-paths 'nixpkgs#zlib^out')/lib:\
+    $(nix build --no-link --print-out-paths 'nixpkgs#libxml2^out')/lib
+
+The **`^out` on each is required**: all three are multi-output. Without
+it `libxml2` resolves to its `bin` output, which has no `.so` at all, and
+`libffi` prints *two* paths (`-man` as well), so the shell folds a newline
+into `LIBRARY_PATH` and the entry silently stops resolving. Elsewhere the
+system linker already finds all three and `LIBRARY_PATH` is unnecessary.
+
+**`cargo build -p scm-llvm` is not evidence that LLVM works.** The crate is
+an rlib, so a build never links and succeeds in seconds with libffi, zlib
+and libxml2 all missing. Only `cargo test -p scm-llvm` links. This is the
+"gate that passes suspiciously fast" rule in its LLVM form.
+
 If `llvm-sys` says "No suitable version of LLVM was found" while the prefix
 is set and `llvm-config` works: its not-found verdict is **cached** and
 `rerun-if-env-changed` sees no change, because the variable's value is the

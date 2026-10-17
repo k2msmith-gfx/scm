@@ -443,6 +443,31 @@ Only the nix route is exercised on the development machine; the other two
 are the standard prefixes for an LLVM 21.1 development install, which is
 all `llvm-sys` asks for.
 
+On **NixOS** the prefix alone is not enough. `llvm-config --libs` emits
+`-lffi -lz -lxml2`, and those three are not on the default library search
+path, so the link fails:
+
+    rust-lld: error: unable to find library -lffi
+
+Point the linker at them as well:
+
+    export LIBRARY_PATH=$(nix build --no-link --print-out-paths 'nixpkgs#libffi^out')/lib:\
+    $(nix build --no-link --print-out-paths 'nixpkgs#zlib^out')/lib:\
+    $(nix build --no-link --print-out-paths 'nixpkgs#libxml2^out')/lib
+
+The `^out` matters on every one of the three, because all three are
+multi-output: plain `nixpkgs#libxml2` resolves to a `bin` output that
+carries no shared library, and plain `nixpkgs#libffi` prints two paths,
+which puts a newline in the middle of `LIBRARY_PATH` and quietly breaks
+the entry. On a Homebrew or apt install the system linker already finds
+all three and `LIBRARY_PATH` is unnecessary.
+
+Note too that `cargo build -p scm-llvm` succeeding proves nothing here.
+The crate is an rlib, so building it never invokes the linker and takes a
+couple of seconds even with libffi, zlib and libxml2 all unreachable.
+`cargo test -p scm-llvm` is the command that links, and so the one that
+tells you the toolchain is really in place.
+
 Without any of them you get this, which is `llvm-sys` talking and not scm:
 
     error: No suitable version of LLVM was found system-wide or pointed
