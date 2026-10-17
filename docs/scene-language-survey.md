@@ -133,7 +133,7 @@ chances to be subtly wrong. The same goes for `for`, `each` and `loop`.
 > They are still the right 30 lines to have written -- they are tested, and a
 > file mid-translation can lean on them -- but as **globals in the core
 > prelude of a general-purpose embeddable Scheme** (goal 2) `for` and `each`
-> are a surprise rather than a service. `~/devel/ray/docs/scm-port-plan.md`
+> are a surprise rather than a service. [port-plan.md](port-plan.md)
 > §3.5 recommends moving them to an optional `(scm janet-compat)` library.
 > Nothing in this repository's libraries uses them -- only their own tests --
 > so the move is mechanical. **Not done; recorded, because the reason it

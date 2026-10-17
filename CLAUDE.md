@@ -27,6 +27,10 @@ not to reopen.
 - **`docs/scene-language-survey.md`** — what ray's 219 scene files actually
   require of the language, measured rather than guessed. **Scope work from
   this, not from the SRFI catalogue.**
+- **`docs/port-plan.md`** — Track B: ray replacing Janet with scm, the plan
+  for the work on ray's side. It lives here, not there, because every stage
+  in it is gated on this repository. A bare path in it is this repo; a `ray/`
+  prefix is the other. ray keeps a pointer at `docs/scm-port-plan.md`.
 
 ## Build / run
 
