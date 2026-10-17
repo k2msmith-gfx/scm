@@ -1453,11 +1453,26 @@ ray's plan; those numbers are estimates.
 Listed for the dependency, not scheduled here. Each stage needs ray's API
 refactor on its side and Track A's S7 on this one.
 
+**Scheduled on ray's side, 2026-10-16: `~/devel/ray/docs/scm-port-plan.md`.**
+With Track A at S20 and ray's API refactor at A3+A5 complete (178 verbs on one
+guarded dispatcher), the port has a plan in the repository where the work
+happens, and these five rows are its input rather than its statement. What it
+settles that this table left open: the **branch policy** (ray's
+`tool-refactor` merges to `main` first; the port is a separate `scm-port`
+branch; **both VMs stay feature-gated for its life**, because the corpus gate
+needs a Janet load and a scm load in one build to compare, and Janet's
+deletion is the *next* branch's exit criterion); the **cut** (B1-B3 are on
+that branch, B4 and B5 are not); and the five things that do not port,
+measured -- of which the dictionary gap is **two producers** in all of ray,
+and `camera-match`'s `(curenv)` shadow is the one needing a new mechanism,
+because this document's *importing copies bindings* leaves late lookup nowhere
+to live.
+
 | | stage | size |
 |---|---|---|
-| **B1** | **The verb bridge.** `#[verb]`'s shim generator emits Scheme as it emits Janet: keywords, `&opt`, `&named`, error strings verbatim, numeric coercion at the boundary so no `->f` appears in authored code (§4.7). | 0.5 |
-| **B2** | The corpus **renders identically** — a differential test between two ray builds. Compare scene *files*, not image bytes (renders are nondeterministic). | 0.3 |
-| **B3** | Goal (d): compiled texel functions in ray — the measured 15.22 s becoming ~0.09 s ([leaf-survey](leaf-survey.md)). | 0.4 |
+| **B1** | **The verb bridge.** `#[verb]`'s shim generator emits Scheme as it emits Janet: keywords, `&opt`, `&named`, error strings verbatim, numeric coercion at the boundary so no `->f` appears in authored code (§4.7). **P2 of the port plan.** | 0.5 |
+| **B2** | The corpus **renders identically** — a differential test between two ray builds. Compare scene *files*, not image bytes (renders are nondeterministic). **P4 of the port plan.** | 0.3 |
+| **B3** | Goal (d): compiled texel functions in ray — the measured 15.22 s becoming ~0.09 s ([leaf-survey](leaf-survey.md)). **P5 of the port plan.** | 0.4 |
 | **B4** | Goal (a): compiled fields callable from rayon workers, plus whatever the thread-local store needs (§6). | 0.8 |
 | **B5** | The prelude and the modeler move: ~19,000 lines plus the prelude, divisible by file. | 2.0 |
 
