@@ -2275,11 +2275,25 @@ impl Vm {
     ///
     /// ```text
     /// formals := sym | ( req* [&opt spec*] [&named spec*] [&keys sym] [. sym] )
-    /// spec    := sym | (sym default-expr)
+    /// spec    := sym | (sym default-expr) | [sym default-expr] | kw spec
     /// ```
     ///
     /// The order is fixed, as it is in Janet, and a marker out of order is an
     /// error rather than a parameter that happens to be spelled `&opt`.
+    ///
+    /// The last `spec` alternative is S21: a **keyword datum declares a
+    /// keyword parameter**, which is Racket's spelling and the one a Scheme
+    /// reader recognises -- `#:at at`, `#:at (at 0)`, `#:at [at 0]`. It is a
+    /// synonym rather than a replacement; `&named` stays legal. Two notes on
+    /// why it is shaped this way:
+    ///
+    ///   * `:at` and `#:at` are the **same datum** here, so `(define (f :at a)
+    ///     …)` works too and a house style can match its call sites either
+    ///     way.
+    ///   * it does **not** change the section, so a required parameter may
+    ///     follow one -- `(define (f #:at at b) …)`. That is what Racket does,
+    ///     keyword arguments being order-independent, and it is why this is
+    ///     handled before the section dispatch rather than inside it.
     fn parse_formals(&mut self, formals: Value) -> VResult<Formals> {
         #[derive(PartialEq, Clone, Copy)]
         enum Section {
@@ -2288,6 +2302,7 @@ impl Vm {
             Named,
             Keys,
         }
+        const KW_PARAM_NEEDS_NAME: &str = "a keyword parameter needs a name: (f #:at at)";
 
         let mut f = Formals::default();
         let mut section = Section::Req;
@@ -2336,6 +2351,31 @@ impl Vm {
                             section = next;
                             continue;
                         }
+                    }
+                    // S21: a keyword datum declares a keyword parameter, and
+                    // the name comes from what follows it rather than from the
+                    // keyword -- `#:material mat` binds `mat`, as Racket's
+                    // `#:material [mat #f]` does. Deliberately before the
+                    // section dispatch: a keyword parameter does not open a
+                    // section, so required parameters may follow one.
+                    if let Value::Keyword(kw) = car {
+                        let spec = match cur {
+                            Value::Obj(r2) => match *self.engine.obj(r2) {
+                                Obj::Pair(spec, rest) => {
+                                    cur = rest;
+                                    spec
+                                }
+                                _ => return Err(self.err(KW_PARAM_NEEDS_NAME)),
+                            },
+                            _ => return Err(self.err(KW_PARAM_NEEDS_NAME)),
+                        };
+                        let p = self.parse_param_spec(spec)?;
+                        f.named.push(NamedParam {
+                            name: p.name,
+                            kw,
+                            default: p.default,
+                        });
+                        continue;
                     }
                     match section {
                         Section::Req => match car {

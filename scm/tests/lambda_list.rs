@@ -304,3 +304,82 @@ fn hash_colon_keywords_are_accepted_but_never_emitted() {
     assert_eq!(eval("(eq? :at #:at)"), "#t");
     assert_eq!(eval("(keyword? #:at)"), "#t");
 }
+
+// ---- S21: a keyword parameter spelled as a keyword ----------------------
+
+#[test]
+fn a_keyword_datum_declares_a_keyword_parameter() {
+    // Racket's spelling, and the reason it is here: a keyword PARAMETER is how
+    // every generated ray verb shim is declared, and `&named` is Common Lisp's
+    // convention by way of Janet -- so a Racket reader recognised the call and
+    // then not the definition (ray's scm-port-plan.md §3.6).
+    assert_eq!(eval("(define (f a #:at at) (list a at)) (f 1 :at 2)"), "(1 2)");
+    // A default, in both spellings of the spec.
+    assert_eq!(eval("(define (f #:at (at 7)) at) (f)"), "7");
+    assert_eq!(eval("(define (f #:at [at 7]) at) (f)"), "7");
+    assert_eq!(eval("(define (f #:at (at 7)) at) (f :at 1)"), "1");
+    // The name comes from what FOLLOWS the keyword, not from the keyword, so
+    // one may differ from the other -- as Racket's `#:material [mat #f]` does.
+    assert_eq!(
+        eval("(define (f #:material mat) mat) (f :material :brass)"),
+        ":brass"
+    );
+    // An absent one is #f, like `&named`, so the ray ergonomics hold.
+    assert_eq!(eval("(define (f #:m m) (if m 'given 'absent)) (f)"), "absent");
+}
+
+#[test]
+fn a_keyword_parameter_is_the_same_datum_either_way() {
+    // `:at` and `#:at` are one datum, so a house style can match its call
+    // sites either way and both declare the same parameter.
+    assert_eq!(eval("(define (f :at a) a) (f :at 3)"), "3");
+    assert_eq!(eval("(define (f #:at a) a) (f #:at 3)"), "3");
+    assert_eq!(eval("(define (f :at a) a) (f #:at 3)"), "3");
+}
+
+#[test]
+fn a_keyword_parameter_does_not_open_a_section() {
+    // Required parameters may follow one, which is what Racket does: keyword
+    // arguments are order-independent. This is why S21 is handled before the
+    // section dispatch and not inside it.
+    assert_eq!(eval("(define (f #:at at b) (list at b)) (f 5 :at 1)"), "(1 5)");
+    // And it composes with the declared markers rather than replacing them.
+    assert_eq!(
+        eval("(define (f a #:at at &opt b &named (c 3)) (list a at b c)) (f 1 :at 2)"),
+        "(1 2 #f 3)"
+    );
+    assert_eq!(
+        eval("(define (f &named a #:b b) (list a b)) (f :a 1 :b 2)"),
+        "(1 2)"
+    );
+}
+
+#[test]
+fn a_keyword_with_nothing_after_it_is_an_error() {
+    let e = eval_err("(define (f #:at) 1)");
+    assert!(e.contains("keyword parameter needs a name"), "got {e}");
+    let e = eval_err("(define (f a #:at (at 1) #:m) 1)");
+    assert!(e.contains("keyword parameter needs a name"), "got {e}");
+}
+
+#[test]
+fn every_tier_binds_a_keyword_parameter_the_same_way() {
+    // The gate this repository holds to: a compiler that disagrees with the
+    // interpreter is a bug, not a tradeoff. One parser feeds all three, which
+    // is the reason this passes -- and the reason to assert it anyway.
+    assert_eq!(
+        eval("(define (f a #:at (at 0) #:m m) (list a at m)) (list (f 1) (f 1 :at 2 :m 3))"),
+        "((1 0 #f) (1 2 3))"
+    );
+}
+
+#[test]
+fn the_canonical_signature_still_prints_one_spelling() {
+    // §4.9's policy, unchanged by S21: several accepted input spellings, one
+    // canonical output. `&named` is what `(signature …)` prints, whichever way
+    // the parameter was declared.
+    assert_eq!(
+        eval("(define (f a #:at at) at) (signature 'f)"),
+        "\"(f a &named at)\""
+    );
+}

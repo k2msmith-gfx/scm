@@ -133,6 +133,39 @@ fn deviation_four_an_import_copies_its_bindings() {
 }
 
 #[test]
+fn the_documented_lambda_list_holds() {
+    // A default runs only when the argument is absent, so an explicit #f
+    // survives -- the sentence the whole design exists for.
+    assert_eq!(eval("(define (f &opt (smooth #t)) smooth) (f #f)"), "#f");
+    assert_eq!(eval("(define (f &opt (smooth #t)) smooth) (f)"), "#t");
+    // An absent argument with no default is #f.
+    assert_eq!(eval("(define (f &opt m) m) (f)"), "#f");
+    // The markers are ordered, and out of order is an error.
+    assert!(eval("(define (f &named a &opt b) 1)").contains("out of order"));
+    // Three spellings, one procedure.
+    let call = "(list (g #(1 1 1)) (g #(1 1 1) :at #(0 1 0) :material :brass))";
+    let want = "((#(1 1 1) #(0 0 0) #f) (#(1 1 1) #(0 1 0) :brass))";
+    for formals in [
+        "(g size #:at (at #(0 0 0)) #:material material)",
+        "(g size :at (at #(0 0 0)) :material material)",
+        "(g size &named (at #(0 0 0)) material)",
+    ] {
+        assert_eq!(
+            eval(&format!("(define {formals} (list size at material)) {call}")),
+            want,
+            "formals {formals}"
+        );
+    }
+    // A keyword parameter does not open a section: a required one may follow.
+    assert_eq!(eval("(define (f #:at at b) (list at b)) (f 5 :at 1)"), "(1 5)");
+    // One canonical output, whichever spelling was written.
+    assert_eq!(
+        eval("(define (f a #:at at) at) (signature 'f)"),
+        "\"(f a &named at)\""
+    );
+}
+
+#[test]
 fn the_documented_limits_hold() {
     // Exact integers are bounded, and the bound reports.
     assert!(eval("(expt 2 1099511627776)").contains("too large"));

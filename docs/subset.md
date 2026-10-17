@@ -119,6 +119,37 @@ wild relies on the other behaviour. Both engines implement the same
 simplification, which the differential fuzzer checks on every run. See
 [libraries.md](libraries.md).
 
+## The lambda list
+
+One addition beyond R7RS, because ray's API is keyword-shaped: 113 of its
+documented verbs take keyword arguments and 79 take optionals.
+
+    formals := sym | ( req* [&opt spec*] [&named spec*] [&keys sym] [. sym] )
+    spec    := sym | (sym default) | [sym default] | kw spec
+
+A default **only runs when the argument is absent**, so an explicitly passed
+`#f` survives — which is the whole point, since ray documents options that
+default to true and treat `#f` as meaningful. An absent argument with no
+default is `#f`.
+
+`&opt`, `&named` and `&keys` must appear in that order; out of order is an
+error rather than a parameter that happens to be spelled `&opt`.
+
+**Several accepted spellings, one canonical output.** A keyword datum
+declares a keyword parameter, which is the spelling a Scheme or Racket reader
+knows, and `:at` and `#:at` are the same datum:
+
+```scheme
+(define (add-box size #:at (at #(0 0 0)) #:material material) …)
+(define (add-box size :at  (at #(0 0 0)) :material  material) …)
+(define (add-box size &named (at #(0 0 0)) material) …)
+```
+
+All three declare the same procedure, and a keyword parameter does **not**
+open a section — required parameters may follow one, as in Racket, because
+keyword arguments are order-independent. `(signature …)` prints `&named`
+whichever was written.
+
 ## The limits
 
 Not deviations — a conforming implementation may have them — but a caller
