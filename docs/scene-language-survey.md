@@ -179,7 +179,7 @@ four as no-ops** — verified by running them, not by reading:
 | `FormVal` | Janet emits | scm | |
 |---|---|---|---|
 | `Key` | `:at` | `:at` | **identical** — and no `#:` prefix, which is the thing Kevin disliked in Steel |
-| `Tuple` | `[0 1 0]` | `[0 1 0]` | **identical**, and scm *prints* it back with brackets (§4.5: a bracket vector is a constructor, and numbers self-evaluate) |
+| `Tuple` | `[0 1 0]` | `[0 1 0]` | **identical on READ** -- §4.5: a bracket vector is a constructor and numbers self-evaluate. **Corrected 2026-10-16: scm does not print it back with brackets.** `writer.rs:231` is deliberate and argued -- several accepted input spellings, **one canonical output**, always `#(...)`, because the flag is not part of the value and printing it would make two `equal?` vectors print differently depending on how each was born. Harmless for the port, and worth knowing why: ray's `Form::to_scheme()` owns the saved-file spelling and scm never writes the scene file |
 | `Num` / `NumFull` | `0.10000000000000001`, `1e+21`, `1e+06`, `6.1232339957367574e-17` | every one reads to the correct `f64` | **no-op**. scm re-prints shortest-round-trip (`0.1`), which differs textually and loses nothing, and scm is not the one writing `.janet` |
 | `Str` / `Sym` / `Call` | `"a\"b"`, `lambertian`, `(%tex 0)` | same | **identical** |
 | `Array` | `@[…]` | `[…]` | collapses: one vector type (already in §6's hazards) |
