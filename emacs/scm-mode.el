@@ -359,10 +359,17 @@ For the whole top-level form from anywhere inside it, use `scm-eval-defun'."
   "Scheme as scm speaks it, connected to a running scm."
   (add-hook 'completion-at-point-functions #'scm-complete-at-point nil t)
   (add-hook 'eldoc-documentation-functions #'scm-eldoc-function nil t)
+  ;; Only what `scheme-mode' does not already do. Keywords are NOT here, and
+  ;; measured rather than assumed: scheme-mode's own `\\<#?:\\sw+\\>' already
+  ;; fontifies both spellings and every keyword shape this language can read --
+  ;; `:tex-scale', `:-x', `:+x', `:x!', `:a*', `:k?', `:at>b' -- because
+  ;; scheme-mode's syntax table makes those characters word constituents. This
+  ;; mode used to carry a `font-lock-constant-face' rule for keywords that
+  ;; could never fire, the parent's matching first, so it described a colour
+  ;; nobody ever saw. The test asserts the parent still does it.
   (font-lock-add-keywords
    nil '(("\\[" . 'font-lock-bracket-face) ("\\]" . 'font-lock-bracket-face)
-         ("\\_<&\\(opt\\|named\\|keys\\)\\_>" . 'font-lock-keyword-face)
-         ("\\_<:[^ \t\n()\\[\\]]+" . 'font-lock-constant-face)))
+         ("\\_<&\\(opt\\|named\\|keys\\)\\_>" . 'font-lock-keyword-face)))
   (when scm-connect-automatically
     (scm-ensure-connected)))
 

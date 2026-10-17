@@ -371,8 +371,11 @@ does not guess where a form ends, and it does not need a Scheme parser to
 find out. Errors arrive with their message and backtrace; eldoc shows a
 procedure's signature as you type.
 
-Highlighting is `scheme-mode`'s plus scm's own spellings — `[…]` vectors,
-`&opt`/`&named`/`&keys`, and `:keywords`.
+Highlighting is `scheme-mode`'s plus the two spellings it does not know:
+`[…]` vectors and the lambda list's `&opt`/`&named`/`&keys`. Keywords are
+scheme-mode's own, and cover `:at`, `#:at` and every shape scm reads
+(`:tex-scale`, `:-x`, `:k?`) — asserted in the mode's test rather than
+assumed, since a parent mode's rules are not this project's to promise.
 
 ### Setting it up
 

@@ -17,6 +17,40 @@
 (let ((r (scm--request-sync 'describe '(:name "map"))))
   (cl-assert (plist-get r :bound))
   (cl-assert (equal (plist-get r :kind) "procedure")))
+;; A signature reaches eldoc in the spelling a Scheme or Racket reader knows
+;; (S21b): `:units units', not `&named units'. This is the protocol half of
+;; that change -- what the editor shows is whatever `describe' returns.
+(scm--request-sync 'eval '(:code "(define (area r #:units units) (* 3 r r))"))
+(cl-assert (equal (plist-get (scm--request-sync 'describe '(:name "area")) :signature)
+                  "(area r :units units)")
+           nil "signature: %S" (scm--request-sync 'describe '(:name "area")))
+;; The highlighting the README claims, asserted rather than claimed. Keywords
+;; are scheme-mode's job and every shape scm can read must come out fontified
+;; -- including `#:at' and the ones whose characters are not letters; the
+;; brackets and the lambda-list markers are this mode's own rules.
+(with-temp-buffer
+  (insert "(define (add-box size #:at (at [0 1 0]) :tex-scale s &named :-x m) 1)")
+  (scm-mode)
+  (font-lock-ensure)
+  (dolist (tok '("#:at" ":tex-scale" ":-x" "&named" "[" "]"))
+    (goto-char (point-min))
+    (search-forward tok)
+    (let ((start (- (point) (length tok))))
+      (dolist (i (number-sequence start (1- (point))))
+        (cl-assert (get-text-property i 'face) nil
+                   "%s: char %c at %d not fontified" tok (char-after i) i))))
+  ;; And the two faces this mode owns are the ones it means.
+  (goto-char (point-min))
+  (cl-assert (eq (get-text-property (1- (search-forward "[")) 'face)
+                 'font-lock-bracket-face))
+  (goto-char (point-min))
+  (cl-assert (eq (get-text-property (- (search-forward "&named") 6) 'face)
+                 'font-lock-keyword-face))
+  ;; The assertion that makes the six above mean something: an ordinary
+  ;; parameter is NOT fontified, so "has a face" is a real distinction here
+  ;; and not a property of every character in the buffer.
+  (goto-char (point-min))
+  (cl-assert (null (get-text-property (- (search-forward "size") 4) 'face))))
 (let ((r (scm--request-sync 'eval '(:code "(define (f v) (vector-ref v 9)) (f (vector 1))"))))
   (cl-assert (eq (plist-get r :status) 'error))
   (cl-assert (string-match-p "out of range" (plist-get r :message)))
