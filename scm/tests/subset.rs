@@ -161,8 +161,40 @@ fn the_documented_lambda_list_holds() {
     // One canonical output, whichever spelling was written.
     assert_eq!(
         eval("(define (f a #:at at) at) (signature 'f)"),
-        "\"(f a &named at)\""
+        "\"(f a :at at)\""
     );
+}
+
+#[test]
+fn the_documented_additions_hold() {
+    // 2. Keywords are a type of their own, and `#:at` is the same datum.
+    assert_eq!(eval("(list (keyword? :at) (symbol? :at) (eq? :at #:at))"), "(#t #f #t)");
+
+    // 3. `[a b c]` EVALUATES its elements; `#(a b c)` is a constant.
+    assert_eq!(eval("(let ((x 2)) [x x])"), "#(2 2)");
+    assert_eq!(eval("(let ((x 2)) '#(x x))"), "#(x x)");
+    // ... and reads as a list where a form expects one.
+    assert_eq!(eval("(let ([x 1] [y 2]) (+ x y))"), "3");
+    assert_eq!(eval("(cond [#f 1] [else 2])"), "2");
+    assert_eq!(eval("(case 2 [(1) 'one] [(2) 'two] [else 'other])"), "two");
+    // ... and a vector always prints `#(…)`, whichever spelling built it.
+    assert_eq!(eval("[1 2]"), "#(1 2)");
+    assert_eq!(eval("(equal? [1 2] #(1 2))"), "#t");
+
+    // 4. Vectors grow, in place, returning the vector.
+    assert_eq!(eval("(define v (vector 1)) (vector-push! v 2 3) v"), "#(1 2 3)");
+    assert_eq!(eval("(define v (vector)) (eq? v (vector-push! v 1))"), "#t");
+    // One vector type: the grown one is still a plain vector.
+    assert_eq!(eval("(define v (vector 1)) (vector-push! v 2) (vector? v)"), "#t");
+
+    // 5. `format`, in the spellings the document names.
+    assert_eq!(eval(r#"(format "~a ~s" "x" "x")"#), r#""x \"x\"""#);
+    assert_eq!(eval(r#"(format "~d~~~n" 5)"#), "\"5~\\n\"");
+    assert_eq!(eval(r#"(format "~,2f" 3.14159)"#), r#""3.14""#);
+    // Anything else is an error that names the directive, and a left-over
+    // argument is an error -- both sentences in the document.
+    assert!(eval(r#"(format "~b" 5)"#).contains("unknown directive ~b"));
+    assert!(eval(r#"(format "~a" 1 2)"#).contains("left over"));
 }
 
 #[test]

@@ -968,19 +968,26 @@ impl Vm {
                     out.push(' ');
                     out.push_str(self.engine.interner.sym_name(*p));
                 }
-                if !opt.is_empty() {
-                    out.push_str(" &opt");
-                    for p in opt.iter() {
-                        out.push(' ');
-                        out.push_str(self.engine.interner.sym_name(p.name));
-                    }
+                // The spellings a Scheme or Racket reader knows, rather than
+                // the markers: `[b]` for an optional and `:at at` for a
+                // keyword parameter. Both are legal input here, so what this
+                // prints **reads back as a declaration with the same call
+                // shape** -- same arity, same keywords, same rest -- which is
+                // the nearest a signature can come to `write`'s round trip
+                // and is asserted by a test. It is a call shape and not a
+                // definition: a default is still not shown, so the
+                // re-declaration binds `#f` where the original had one. The
+                // markers stay legal to write; they are simply not shown.
+                for p in opt.iter() {
+                    out.push_str(" [");
+                    out.push_str(self.engine.interner.sym_name(p.name));
+                    out.push(']');
                 }
-                if !named.is_empty() {
-                    out.push_str(" &named");
-                    for p in named.iter() {
-                        out.push(' ');
-                        out.push_str(self.engine.interner.sym_name(p.name));
-                    }
+                for p in named.iter() {
+                    out.push(' ');
+                    out.push_str(&format!(":{}", self.engine.interner.kw_name(p.kw)));
+                    out.push(' ');
+                    out.push_str(self.engine.interner.sym_name(p.name));
                 }
                 if let Some(k) = keys {
                     out.push_str(" &keys ");

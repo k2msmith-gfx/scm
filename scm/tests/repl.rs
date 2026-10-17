@@ -204,7 +204,9 @@ fn introspection_answers_what_a_name_is() {
         Outcome::Described(Some(d)) => {
             assert_eq!(d.kind, "procedure");
             assert_eq!(d.doc.as_deref(), Some("The area of a circle."));
-            assert_eq!(d.signature.as_deref(), Some("(area r &named units)"));
+            // The spelling a Scheme or Racket reader knows, not the marker
+            // (S21b): `:units units`, which is also legal input.
+            assert_eq!(d.signature.as_deref(), Some("(area r :units units)"));
         }
         other => panic!("{other:?}"),
     }

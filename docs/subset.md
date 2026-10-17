@@ -15,6 +15,11 @@ stops being true fails the build rather than quietly misleading a reader.
 features, plus keywords as a distinct type, plus a documented
 simplification of how imports bind.**
 
+The deviations are §*The deviations*; what is here *beyond* the standard —
+the lambda list, keywords, bracket vectors, growable vectors and `format` —
+is §*The additions*. Nothing in either changes the meaning of a program that
+uses only the standard.
+
 ## The baseline
 
 R7RS-small, as tested by Chibi-Scheme's `r7rs-tests.scm` run unedited:
@@ -119,10 +124,16 @@ wild relies on the other behaviour. Both engines implement the same
 simplification, which the differential fuzzer checks on every run. See
 [libraries.md](libraries.md).
 
-## The lambda list
+## The additions
 
-One addition beyond R7RS, because ray's API is keyword-shaped: 113 of its
-documented verbs take keyword arguments and 79 take optionals.
+Five things this language has that R7RS-small does not. Each is here for a
+named consumer rather than for taste, each is listed so a host knows what it
+is relying on, and none of them changes the meaning of a standard program.
+
+### 1. The lambda list
+
+Because ray's API is keyword-shaped: 113 of its documented verbs take keyword
+arguments and 79 take optionals.
 
     formals := sym | ( req* [&opt spec*] [&named spec*] [&keys sym] [. sym] )
     spec    := sym | (sym default) | [sym default] | kw spec
@@ -147,8 +158,57 @@ knows, and `:at` and `#:at` are the same datum:
 
 All three declare the same procedure, and a keyword parameter does **not**
 open a section — required parameters may follow one, as in Racket, because
-keyword arguments are order-independent. `(signature …)` prints `&named`
-whichever was written.
+keyword arguments are order-independent.
+
+`(signature …)` prints **one** of them, and prints the familiar one:
+`(add-box size [bevel] :at at :material material)`. What it prints is legal
+input that declares the same **call shape** — same arity, same keywords, same
+rest — though not the same definition, because a default is not shown.
+
+### 2. Keywords
+
+A first-class type, disjoint from symbols: see *The deviations* §3, since it
+is both an addition and the one place the reader departs from R7RS.
+`#:at` reads as the same datum and is never printed.
+
+### 3. `[a b c]` is a vector constructor
+
+R7RS reserves `[ ] { }` for future extensions, so this costs no conformance.
+Two uses, and they do not collide:
+
+- **a value.** `[a b c]` is a vector whose elements are **evaluated**, where
+  `#(a b c)` is a constant: `(let ((x 2)) [x x])` is `#(2 2)` and
+  `(let ((x 2)) '#(x x))` is a vector of two symbols. ray's scene files are
+  full of `[0 1 0]`, which is where this comes from.
+- **grouping.** Where a form expects a list — `let` bindings, `cond` and
+  `case` clauses, `guard`, `syntax-rules` rules — a bracket vector reads as
+  that list, so `(let ([x 1]) …)` is the same as `(let ((x 1)) …)`. That is
+  Racket's and R6RS's house style, and this prelude is written in it.
+
+**A vector always prints `#(…)`**, whichever spelling built it: the flag is
+not part of the value, so two `equal?` vectors cannot print differently
+depending on how each was born.
+
+### 4. Vectors grow
+
+`(vector-push! v x …)` appends, in place, and returns the vector. R7RS
+vectors are fixed-length and the standard has no growable sequence at all,
+while ray's scene corpus pushes onto an array 248 times across 48 files.
+
+There is one vector type and it grows; there is no second type and no
+`growable-vector?` for a predicate to forget. It is **not** the recommended
+idiom — accumulate-and-reverse onto a list is the faster path and the one a
+model should write — it is the idiom a converted script already has.
+
+### 5. `format`
+
+`(format "~a ~s~%" x y)` — SRFI 28's three directives (`~a`, `~s`, `~%`)
+plus `~d` for a number, `~n` for a newline, `~~` for a tilde, and `~,Nf` for
+a fixed precision. Anything else is an error naming the directive, and a
+left-over argument is an error too. R7RS has no `format` at all, and a
+renderer's scripts print numbers constantly;
+the Steel port measured rebuilding it from `number->string` and manual padding
+as one of three stdlib holes that turned up everywhere.
 
 ## The limits
 
@@ -204,3 +264,13 @@ intelligible. See the README's Rust API section.
 - **Performance characteristics**, which are measured in
   [s12-bytecode.md](s12-bytecode.md) and [vs-steel.md](vs-steel.md) rather
   than promised here.
+- **The Janet-compatibility names.** `seq`, `for`, `each`, `repeat`, `inc`
+  and `dec` are bound in the prelude and work, but they are **not part of
+  the supported language** and are expected to move to an optional library.
+  They were added so a converted scene could keep its 253 `seq`s and 174
+  `for`s; the port that would have done the converting now converts a scene
+  by re-saving it through a printer, so those loops never reach this language
+  at all, and the code that does reach it is to read as Scheme — `for-each`,
+  `map`, a named `let`. See
+  [scene-language-survey.md](scene-language-survey.md) §5 for the reversal.
+  Write the standard spellings.

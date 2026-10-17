@@ -374,12 +374,48 @@ fn every_tier_binds_a_keyword_parameter_the_same_way() {
 }
 
 #[test]
-fn the_canonical_signature_still_prints_one_spelling() {
-    // §4.9's policy, unchanged by S21: several accepted input spellings, one
-    // canonical output. `&named` is what `(signature …)` prints, whichever way
-    // the parameter was declared.
+fn the_canonical_signature_prints_the_familiar_spelling() {
+    // §4.9's policy holds -- several accepted input spellings, ONE canonical
+    // output -- and S21b changes which one that is: the spelling a Scheme or
+    // Racket reader knows, since a signature is read far more often than a
+    // lambda list is written.
+    for formals in ["(f a #:at at)", "(f a :at at)", "(f a &named at)"] {
+        assert_eq!(
+            eval(&format!("(define {formals} at) (signature 'f)")),
+            "\"(f a :at at)\"",
+            "formals {formals}"
+        );
+    }
+    // An optional prints as Racket's `[b]`, and `&keys` and a dotted rest keep
+    // their spellings, having no familiar equivalent to move to.
     assert_eq!(
-        eval("(define (f a #:at at) at) (signature 'f)"),
-        "\"(f a &named at)\""
+        eval("(define (f a &opt b &named at &keys r) 1) (signature 'f)"),
+        "\"(f a [b] :at at &keys r)\""
+    );
+    assert_eq!(
+        eval("(define (f a . rest) 1) (signature 'f)"),
+        "\"(f a . rest)\""
+    );
+}
+
+#[test]
+fn a_printed_signature_reads_back_with_the_same_call_shape() {
+    // The nearest a signature can come to `write`'s round trip, and the reason
+    // the familiar spellings are safe to print: what comes out is legal input
+    // that declares the same arity, the same keywords and the same rest.
+    //
+    // It is a call SHAPE and not a definition -- a default is not shown, so
+    // the re-declaration binds #f where the original had 1, which is why the
+    // comparison passes `:m` explicitly.
+    let src = r#"
+(define (f a &opt b &named at (m 1) &keys r) (list a b at m r))
+(define (g a [b] :at at :m m &keys r)        (list a b at m r))
+(list (equal? (f 1 2 :at 3 :m 4 :z 9) (g 1 2 :at 3 :m 4 :z 9))
+      (signature 'f)
+      (signature 'g))
+"#;
+    assert_eq!(
+        eval(src),
+        r#"(#t "(f a [b] :at at :m m &keys r)" "(g a [b] :at at :m m &keys r)")"#
     );
 }
