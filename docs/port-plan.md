@@ -480,6 +480,45 @@ scene-VM worker still depends on it), and **one verb reachable from Scheme by
 hand**. Exit: the four configurations build, and `(set-film 320 240)` moves a
 scene from a scm REPL.
 
+**P1 as built, 2026-10-18 (ray `scm-port`, branched from `main` @fe22ddd,
+tagged `api-refactor-complete`).** The merge was a fast-forward rather than
+the `--no-ff` §4 wrote down — Kevin's call on 10-16 — so the tag marks the
+branch point instead of a merge commit. What landed:
+
+- `schemers = { path = "../scm/scm", optional = true }` behind a ray
+  feature `scm`; `ray-scm` (`src/bin/ray-scm.rs`) is a stdin REPL and
+  `--serve ADDR` speaks scm's own protocol, so the Emacs mode connects
+  unchanged. Port 4009 by convention.
+- `ray/src/api/scheme.rs`, the sibling `janet.rs` promised: `Val` ↔
+  `ApiValue`, `%api-call` / `%api-error` / `%verb?` /
+  `%api-value-roundtrip`, and the shims generated for **every** verb (183
+  by the generator's count), in the familiar spelling S21 was built for —
+  `(define (add-sphere :at (at #f) …) "doc" …)`. `the_api_layer_names_no_vm`
+  now forbids `scm::` outside that file as it forbids `janet_` outside the
+  other.
+- **Three decisions that were not in this plan, made at the one place that
+  could make them.** (1) *No nil:* `#f` in a slot declared `Bool` crosses
+  as an explicit false, in any other slot as absent, inside a list as a
+  false — §3(b)'s six producers are closed by the parameter's declared
+  type rather than checked per verb. (2) *Nil out is `#f`, not
+  unspecified:* an unspecified value is true in Scheme, so a lookup's miss
+  would take the wrong `if` branch with no error; the price is `#f` echoed
+  after every setter at the REPL. (3) *The error is parked, not returned:*
+  `define_fn_with` prefixes an `Err` with the function's name, and the
+  refusals are verbatim or nothing, so the shim raises `(error msg)`
+  itself — `janet.rs`'s idiom, kept for the same reason.
+- **Left for P2, visibly:** `ApiValue::Map` refuses to cross
+  (`"a dictionary cannot cross into Scheme yet"`), so `(render-settings)`
+  and every curve value fail at the REPL today; the aside (`fit-curve`'s
+  deviation) is parked in one global `%api-aside` rather than given an
+  idiom; the backtrace of a refusal names the shim's `(error e)` line in
+  `api.rs` rather than the call site; `%rerun-form` (the modeler's door)
+  is not registered. A whole number returns **exact** (`320`, not `320.0`).
+- Verified in order: the seven tests in `scheme.rs` (set-film moves the
+  store, every verb defined with its docstring byte-for-byte, a refusal
+  and a type error verbatim through `guard`, `#f` absent-vs-false, a
+  keyword bag, the round trip), then the four build configurations.
+
 **P2 — the verb bridge (0.5; scm's B1).** `#[verb]`'s shim generator emits
 Scheme as it emits Janet: keywords, `&opt`, `&named`, **error strings
 verbatim**, and numeric coercion at the boundary so no `->f` appears in
