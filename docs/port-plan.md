@@ -592,6 +592,67 @@ Two findings that are **ray's, not the port's**, both pinned by tests:
   `(add-sphere #f :radius 2)` refuses. Worth knowing before P3 writes
   recipes.
 
+### First Janet-against-scm numbers in ray, 2026-10-18
+
+Asked for after P2 landed; no comparison existed before this. Both binaries
+from **one** `--release --features janet,scm,oidn` build, same machine, best
+of 3 (boot best of 5), in-script monotonic clocks for the work so process
+spawn is excluded. The scripts are matched form for form and are in the
+session's scratchpad; the calls are identical, `(add-mesh pts tris)` on
+both sides.
+
+| | Janet | scm | |
+|---|---|---|---|
+| boot: process start to exit, nothing to do | 16.7 ms | **6.1 ms** | scm 2.7× faster |
+| build loop: 2,000 spheres, trig per shape | **4.2 ms** | 12.1 ms | Janet 2.9× |
+| the same, per shape | **2.10 µs** | 6.06 µs | |
+| 20,000 points + 20,000 triangles built in-language | **2.2 ms** | 11.3 ms | Janet 5.1× |
+| `(add-mesh …)` with them — the crossing | **6.0 ms** | 61.1 ms | Janet 10.2× |
+| the same crossing, dictionary look bypassed | 6.0 ms | **6.9 ms** | a wash |
+
+**The value model crossing is a wash, and that is the result that matters.**
+6.9 ms against 6.0 ms for 40,000 structures over the boundary: the generated
+shim, `ApiValue`, the dispatcher and the verb cost the same in both
+languages, which is what P2 was built to find out and could not be known by
+reading.
+
+**The 10× is entirely §3's dictionary look**, measured rather than inferred:
+the look alone is **53–55 ms** of the 60 ms shim. It exists only because
+Rust cannot see a dotted pair — `embed::Val` has no pair variant, so an
+alist arrives as `Opaque` and the alist rule has to be applied in Scheme,
+on every argument, because a dictionary can be anywhere in one. Narrowing
+it per verb does not work: `add-mesh`'s `vertices` and `indices` are
+declared `Any` precisely because the verb reads them itself, so the verbs
+with the biggest arguments are exactly the ones a type mask cannot skip.
+
+**Recommendation, for the branch rather than for P2: add `Val::Pair` to
+scm's `embed` and delete the Scheme-side wire.** It removes the cost
+instead of reducing it — the crossing becomes the 6.9 ms already measured,
+level with Janet — and `Val` is `#[non_exhaustive]` for exactly this. It is
+a Track A change serving Track B, and the alternative (making the look
+cheaper by not recursing into scalars) buys maybe 3× on a cost that should
+be zero.
+
+**scm's interpreter is 3–5× slower at script arithmetic and list
+building**, which is the known price and not a surprise: [vs-steel.md](vs-steel.md)
+puts T1 at 0.91× Steel on ordinary code, and the Steel POC measured the
+same shape at ~6× Janet. §7 already says this branch buys no speedup except
+P5's, and the 2026-09-12 finding stands — scene loading is not
+interpreter-bound, with a ~3,200× gap between interpreter time and the real
+work.
+
+**Boot's 2.7× will narrow and should not be banked.** Janet's 16.7 ms loads
+8,161 prelude lines; scm's 6.1 ms installs 183 generated shims and has **no
+ray prelude at all** until P3. Re-measure it there.
+
+**A by-product worth recording, because it retires an old complaint.** The
+Steel POC's standing finding about ray was that `%add-mesh` cost 22.8 ms for
+a 3,507-vertex mesh — 6.5 µs a vertex — against 5.5 ms for the same data as
+a flat `Vec<f64>`, "a 4× boundary gap on every mesh-heavy scene". Janet's
+crossing here is 6.0 ms for 20,000 vertices, **0.30 µs a vertex**: roughly
+20× cheaper per vertex, across different builds of ray but the same machine
+class. A3's one dispatcher appears to have fixed it as a side effect.
+
 **P3 — the printer and the prelude (0.4).** `Form::to_scheme()` beside
 `to_janet()` (`ray/src/form.rs:376`), carrying §3.5's spelling table and §3's
 (a)–(d) — including the one decision §3.5 leaves open, the net's constructor;
