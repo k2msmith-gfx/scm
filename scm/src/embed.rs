@@ -867,12 +867,28 @@ pub(crate) fn read_val(engine: &crate::heap::Engine, v: Value, depth: usize) -> 
                 Obj::Pair(..) => {
                     let mut out = Vec::new();
                     let mut cur = v;
+                    // A LIST'S LENGTH IS NOT ITS DEPTH, and this guard used
+                    // to confuse the two: `MAX_DEPTH` here truncated any
+                    // list past 128 elements to `Val::Opaque`, silently, so
+                    // a host function taking a few hundred numbers saw
+                    // nothing. A flat list of 27,000 numbers is depth ONE.
+                    //
+                    // The bound that is still needed is the cycle one —
+                    // `set-cdr!` makes a loop constructible and an
+                    // unbounded walk would never return — and the honest
+                    // bound for that is the one [`read_val_rooting`] uses:
+                    // a proper list cannot have more elements than the heap
+                    // has objects, because each element costs a pair.
+                    // Found by ray's port, where `(field-code …)` answers
+                    // 27,017 numbers and the host function read `#f`
+                    // (2026-10-18).
+                    let cap = engine.obj_count() + 1;
                     loop {
                         match cur {
                             Value::Null => return Val::List(out),
                             Value::Obj(r2) => match engine.obj(r2) {
                                 Obj::Pair(car, cdr) => {
-                                    if out.len() > MAX_DEPTH {
+                                    if out.len() > cap {
                                         return Val::Opaque;
                                     }
                                     out.push(read_val(engine, *car, depth + 1));

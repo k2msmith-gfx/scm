@@ -548,3 +548,30 @@ fn an_improper_list_crosses_as_the_cons_chain_it_is() {
     let r = i.eval("(car-of (cons (lambda (x) (* x 2)) 'tail))").unwrap();
     assert_eq!(i.value(&r).unwrap(), Val::Int(40));
 }
+
+#[test]
+fn a_long_list_reaches_a_host_function_whole() {
+    // A LIST'S LENGTH IS NOT ITS DEPTH. `read_val` bounded the list branch
+    // with `MAX_DEPTH`, so any list past 128 elements arrived as
+    // `Val::Opaque` — silently, since a host cannot tell "too long" from
+    // "no host form". ray's port found it: `(field-code …)` answers 27,017
+    // numbers and the host function read `#f`.
+    let mut i = Interp::new().unwrap();
+    i.define_fn("count", |args| match args {
+        [Val::List(xs)] => Ok(Val::Int(xs.len() as i64)),
+        [other] => Err(format!("not a list: {other:?}")),
+        _ => Err("wants one list".into()),
+    })
+    .unwrap();
+    let src = "(define (nums n) (let loop ((i 0) (acc '())) \
+               (if (= i n) acc (loop (+ i 1) (cons i acc)))))";
+    i.eval(src).unwrap();
+    for n in [10, 129, 1000, 30000] {
+        let r = i.eval(&format!("(count (nums {n}))")).unwrap();
+        assert_eq!(i.value(&r).unwrap(), Val::Int(n), "a list of {n} came back short");
+    }
+    // The cycle it was really guarding against is still caught, by the
+    // bound that fits: a proper list cannot be longer than the heap.
+    let cyclic = i.eval("(let ([x (list 1 2)]) (set-cdr! (cdr x) x) x)").unwrap();
+    assert_eq!(i.value(&cyclic).unwrap(), Val::Opaque);
+}
