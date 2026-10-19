@@ -729,8 +729,24 @@ S1 round-trip gate, now run over ray's real output.
 
 **P4 — the corpus converts and agrees (0.3; scm's B2).** For each of the 191
 renderable scenes: load under Janet → save → print Scheme → load under scm →
-save → **compare the two `Form` trees**. Scene files, not image bytes —
-`reference_render_is_nondeterministic`. Reuse `run_corpus.sh`'s classifier for
+save → **compare the two `Form` trees**.
+
+**And compare the IMAGES too — this stage's reason for not doing so was
+wrong, measured 2026-10-18.** The plan said "scene files, not image bytes"
+on the authority of a note claiming rayon's work-stealing reorders float
+accumulation. It does not: `render.rs` parallelises over *pixels*, a pixel's
+samples are summed inside one task, and every random sequence is seeded from
+the pixel's global index. Checked by rendering one scene three times under
+`:whitted` and twice under `:path` — **byte-identical PNGs every time**,
+while the reported `Mpix/s` moved by 1.7x. The annotation stamp that used to
+burn a timing into the pixels is **no longer used**, and was off by default.
+
+So an image hash is available and is the *stronger* of the two checks,
+because it sees what the authoring form cannot describe: the Steel POC
+caught `%add-cuboid` building a mesh where ray builds an analytic cuboid,
+with the images indistinguishable and only the clock showing it. Do both —
+the form trees say the scenes are the same description, the hashes say they
+are the same picture. Reuse `run_corpus.sh`'s classifier for
 the 27 non-scenes; name the 8 `eval`-shaped files as exemptions in the gate
 itself, so the exemption is visible rather than a silent skip.
 Note what a save *is*, because it bounds the claim: `save-scene` preserves
