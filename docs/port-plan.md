@@ -791,21 +791,73 @@ needed the Scheme→Janet direction.
   minute, the terrain scenes ~20 s each). Last run reached 188 of 218 files:
   **140 printed as Scheme and read back, 48 not-a-scene, 0 failures.**
 
-**What P3 still owes, measured so the next session starts from facts.** All
-of it is authoring-side, so none of it blocks P4's saved-scene gate. Code
-sizes are small; the bulk of each Janet definition is its docstring, which
-is the manual's text and should be lifted rather than retyped (ray has
-`scripts/dev/extract_docstrings.py` for exactly that move):
+**THE PRELUDE IS DONE — 67 definitions, 1,351 lines**, with three items
+deliberately left to the stages that own them. Every port was checked
+against the Janet original rather than read over, and four of them
+numerically:
 
-| what | why it matters | where it is used |
+| | checked how |
+|---|---|
+| `load-gltf` | loads a real model, fails cleanly on a missing one, records a form that prints back |
+| `make-texture` | the same generator in both languages gives a **byte-identical texture** |
+| `camera-pixel` | three points, **identical to the last digit** |
+| `camera-match` | the docstring's own two-vanishing-point example, **all six outputs identical** |
+| `strut-mesh` | 163 verts and 216 tris both sides, same first vertex, normal and index |
+| `sphere-points` | five points of an unjittered lattice, identical |
+| `add-implicit` | a clipped gyroid round-trips byte-identically and **renders to the same hash** |
+| `camera-frame` | all six fields identical |
+| `render-settings` | the documents differ in **three explained lines** and nothing else |
+
+**§3(d) IS RESOLVED, with the mechanism the plan recommended.**
+`camera-match` reached `set-camera` out of the environment at call time so
+the modeler's shadowing definition won; scm copies bindings on import, so
+`*set-camera*` and `*set-film*` are parameters that default to the verb. A
+host that needs to intercept the write **binds the parameter** instead of
+shadowing a name — an explicit indirection the host owns, which is exactly
+what §3(d) asked for, and it is cheaper to read than the lookup it replaces.
+
+**Six prim bodies were lifted into shared Rust** (`scene_store`), so the two
+bindings cannot disagree: `open_group`, `close_group`, `load_gltf_group`,
+`add_generated_texture`, `add_implicit_field`, `frame_bounds`. Janet's prims
+are now three lines over each. Two conventions stopped being Janet's on the
+way: the material override is an **argument** rather than the pending slot
+`mat-emit` filled, and `%fnum` shares `form::format_num` so both languages'
+settings documents agree rather than nearly agreeing.
+
+**Four findings the ports turned up, each now carrying its comment:**
+
+- **A verb's `[x y z]` comes back as a LIST**, and `(scm linalg)` wants a
+  vector. Nothing in the value model can tell a coordinate from a list of
+  three radii, so `%v3` coerces where a verb's triple meets vector maths.
+- **In a captured form, a list with a SYMBOL head is a call and anything
+  else is data.** Janet got that from its reader's bracket flag; Scheme has
+  to get it from the head. Recording an implicit surface found it — the
+  field tree `(:intersect 0 …)` went in as a call and came back as "a
+  form's head must name a verb, not Int(0)".
+- **An empty list is an empty dictionary.** `(material)` with no options is
+  `'()`, and in Scheme that is both — so `mat_builder_of` reads an empty
+  list as the default material. A non-empty list is still refused.
+- **A `:seed` reproduces within a language, not across them.** The same
+  seeded tree has the same structure (15 branches at depth 4) and different
+  geometry, because Janet's `math/rng` and the Scheme generator are
+  different algorithms. **Kevin's call**: exempt seeded generators from
+  P4's render comparison, or move the RNG into Rust so both agree — which
+  would change what existing Janet seeds produce.
+- **The nil→`#f` collapse is visible in exactly one place**, and it is a
+  view: `render-settings` cannot tell "denoise never set" from "set to
+  false", so it says `off` where Janet says `default`. Both are true.
+
+**What is left, and each belongs to another stage rather than to P3:**
+
+| what | whose | why |
 |---|---|---|
-| `load-gltf` | a `*notify*` dynamic var → a parameter | 39 example files |
-| `make-texture` | a CLOSURE per texel — the `define_fn_with` case, and P5's subject | 25 example files |
-| `camera-frame` | a view over the live pose | 10 example files |
-| `sphere-points`, `strut-mesh` | pure math + `add-mesh` | 5 and 2 files |
-| `field-bake`, `add-implicit` | the closure branch again | 2 files |
-| `camera-match`, `camera-pixel` | §3(d)'s host hook is still undecided | the modeler |
-| `render-settings`, the generators (12), `origin-form`, `follow-curves` | REPL views and tree generators | 0 example files |
+| `field-bake`, and `add-implicit`'s authored-field branch | **P5** | the host must call a Scheme procedure per sample — the crossing the leaf compiler exists to make fast. `add-implicit` refuses it by name rather than half-working, and the whole corpus holds exactly ONE authored field |
+| `origin-form`, `follow-curves` | **B5** | modeler-facing: 30 call sites in `modeler/scripts`, **0 in `examples/`** |
+
+**And one number P5 should carry**: a 256² texture is Janet 502 ns/texel
+against Scheme 1,728 — **3.4×**. A texture-heavy scene is materially slower
+under Scheme until the leaf compiler lands, which makes P5 more valuable
+rather than less.
 
 **P4 — the corpus converts and agrees (0.3; scm's B2).** For each of the 191
 renderable scenes: load under Janet → save → print Scheme → load under scm →
