@@ -746,7 +746,20 @@ because it sees what the authoring form cannot describe: the Steel POC
 caught `%add-cuboid` building a mesh where ray builds an analytic cuboid,
 with the images indistinguishable and only the clock showing it. Do both —
 the form trees say the scenes are the same description, the hashes say they
-are the same picture. Reuse `run_corpus.sh`'s classifier for
+are the same picture.
+
+**Kevin's ruling, 2026-10-18: compare renders, but not the slow files.**
+So the image half is **bounded and reported**, exactly as
+`run_corpus.sh` already bounds its own run: render both sides at a cheap
+setting, give each scene a timeout, and print which scenes were skipped for
+time so a skip can never be read as a pass. Note *where* the time goes
+before choosing the knobs — at 64×48 and one sample the render is trivial
+and what remains is the **scene build**: `fruit-bowl` spends 15.22 s in
+`make-texture` and the terrain scenes spend ~20 s in fBm. That is why a
+timeout is the right instrument and a lower sample count is not: it bounds
+the cost wherever the cost actually is. It also means the slow scenes are
+precisely the ones P5 makes fast, so the skip list should shrink on its own
+rather than being curated. Reuse `run_corpus.sh`'s classifier for
 the 27 non-scenes; name the 8 `eval`-shaped files as exemptions in the gate
 itself, so the exemption is visible rather than a silent skip.
 Note what a save *is*, because it bounds the claim: `save-scene` preserves
