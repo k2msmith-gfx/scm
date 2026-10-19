@@ -262,6 +262,29 @@ impl Host<'_> {
         Ok(read_val_rooting(&mut self.vm.engine, out, 0, self.id, &self.pending))
     }
 
+    /// The VM this call is running inside — for a host that hands a
+    /// procedure to a COMPILER instead of to the interpreter.
+    ///
+    /// Narrow on purpose, and the only hole in the embedding API's rooting
+    /// discipline. `scm-llvm::compile_proc` takes `&mut Vm` and a `Value`,
+    /// and ray's `make-texture` is the caller: a texel function arrives as
+    /// an argument, so there is no global to compile by name. Everything
+    /// else a host function needs is [`Host::call`] and [`Host::eval`],
+    /// which keep that discipline.
+    ///
+    /// The rules come with it: evaluate nothing while a raw `Value` is in
+    /// hand, and do not store one past the call — a handle is what keeps an
+    /// object alive, and a bare `Value` is not one.
+    pub fn vm_mut(&mut self) -> &mut Vm {
+        self.vm
+    }
+
+    /// The engine value a procedure handle names, for [`Host::vm_mut`]'s
+    /// caller. `None` if the handle has been dropped.
+    pub fn procedure_value(&self, f: &Proc) -> Option<Value> {
+        self.vm.engine.handle_value(f.0.handle)
+    }
+
     /// Evaluate source at top level.
     pub fn eval(&mut self, src: &str) -> Result<Val, String> {
         let out = self.vm.eval_str(src).map_err(|e| format!("{e}"))?;
