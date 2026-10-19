@@ -1069,6 +1069,46 @@ new number printed beside the old one, and the baked image compared against
 the interpreted bake. `make-texture` is already a bake, so this changes
 nothing observable except the seconds.
 
+**P5 MET, 2026-10-19 — 18x faster than Janet, and the same image.**
+ray's `scripts/dev/texel_bake.py`, `texel_bake.scm`, `texel_bake.janet`;
+`make-texture`'s fast path is `%bake-texels` in `ray/src/api/scheme.rs`,
+behind ray's new `jit` feature.
+
+The fixture is `examples/procedural/wood.janet`'s own texture — the quintic
+fade, the 127.1/311.7 hash, five octaves, the two-colour blend — translated
+faithfully and baked three ways on one machine, 512x512:
+
+| | ns/texel | one 512² texture |
+|---|---|---|
+| `make-texture`, scm **compiled** | **215** | **56 ms** |
+| `make-texture`, janet | 3,925 | 1,029 ms |
+| `make-texture-interpreted`, scm | 30,900 | 8,102 ms |
+
+**18.2x against Janet and 144x against the interpreter.** The compiled
+figure INCLUDES the ~20 ms compile, which is 76 ns of it amortised over
+262,144 texels; the steady-state texel is ~140 ns.
+
+**And the images are byte-identical — all three of them.** That is the exit
+criterion's other half, and the comparison is stronger than it was asked to
+be: not only does the compiled bake match the interpreted one, it matches
+JANET's bake of the same texel, bit for bit. `%bake-texels` carries the
+prelude's `%texel-byte` rule into Rust and multiplies by the same reciprocal
+the Scheme loop does, so the two produce one image rather than two
+similar-looking ones.
+
+**The fallback is the design, not a safety net.** `%bake-texels` answers
+`#f` when the texel procedure is outside the leaf subset — printing the
+refusal, which names the call that did it — and the prelude runs the
+interpreted loop. Without the `jit` feature the prim answers `#f` always.
+So the Scheme has no build test in it, a scene behaves identically either
+way, and ray's five gate legs are untouched: the feature needs LLVM, so it
+is in no leg, exactly as `scm-llvm` is not a default workspace member here.
+
+**What this cost on the scm side was a stage of its own**, because the
+corpus writes its texel functions as closures and S11 could only compile a
+global: see S11b above, which is the prerequisite and where most of the
+work was.
+
 **The path dependency makes a lone clone of ray unbuildable, and that is
 P6's problem rather than P1's (measured 2026-10-18).** A missing optional
 path dependency breaks even a *default* `cargo build` — Cargo resolves the
