@@ -28,7 +28,7 @@
 //! leaf has none of those to integrate with, which is why this is 0.8 of a
 //! stage and the general tier (S13) is not.
 
-mod codegen;
+pub(crate) mod codegen;
 mod jit;
 mod live;
 mod subset;
@@ -214,6 +214,42 @@ pub fn compile(vm: &mut Vm, name: &str, shape: Shape) -> Result<Compiled, Refusa
         _owner: built.owner,
         _data: built.data,
     })
+}
+
+/// Compile a procedure handed over as a VALUE, under a label of your own.
+///
+/// The entry ray's `make-texture` needs: a texel function arrives as an
+/// argument, is usually an anonymous `lambda`, and closes over the numbers
+/// and colours of the procedure that built it. Free variables resolve
+/// through that captured environment — a number becomes a constant in the
+/// code, and a captured colour list is a sequence `map` is unrolled over.
+///
+/// `label` names the leaf in the emitted symbol and in a refusal, so a host
+/// can say *which* texture it could not compile.
+pub fn compile_proc(
+    vm: &mut Vm,
+    label: &str,
+    proc: scm::Value,
+    shape: Shape,
+) -> Result<Compiled, Refusal> {
+    let summary = Analysis::new(vm).verdict_proc(proc, label)?;
+    let parts = codegen::Cg::parts_of(vm, proc, label)
+        .map_err(|m| Refusal { message: m, via: vec![label.to_string()] })?;
+    let built = jit::build_of(vm, label, parts, shape, &summary)?;
+    Ok(Compiled {
+        name: label.to_string(),
+        arity: summary.arity,
+        shape,
+        addr: built.addr,
+        _owner: built.owner,
+        _data: built.data,
+    })
+}
+
+/// The verdict for a procedure value, with no code emitted — what a host
+/// asks when it wants to explain a refusal and then fall back.
+pub fn verdict_proc(vm: &mut Vm, label: &str, proc: scm::Value) -> Result<Summary, Refusal> {
+    Analysis::new(vm).verdict_proc(proc, label)
 }
 
 /// The purity verdict alone, with no code emitted: what a REPL asks before

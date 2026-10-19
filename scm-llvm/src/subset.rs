@@ -15,7 +15,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use scm::heap::Obj;
-use scm::{SymId, Value, Vm};
+use scm::{ObjRef, SymId, Value, Vm};
 
 use crate::Refusal;
 
@@ -69,11 +69,48 @@ pub struct Analysis<'a> {
     seen: HashMap<SymId, Result<Summary, Refusal>>,
     /// The call chain, so a refusal can say how it was reached.
     chain: Vec<String>,
+    /// The captured environment of the procedure being walked (S11b).
+    ///
+    /// A free variable is resolved HERE before the globals, which is both
+    /// the lexical order and safe: a top-level closure has no environment
+    /// at all — the global table is a separate structure — so only a
+    /// procedure created inside another procedure has one, and that is
+    /// exactly ray's texel idiom. Verified rather than assumed: `tex` from
+    /// `(define tex (wood-texel …))` carries an env and `ring` does not.
+    envs: Vec<Option<ObjRef>>,
+}
+
+/// Walk an environment chain for `sym`. `None` means "not in any frame",
+/// which is where the global lookup takes over.
+pub fn env_lookup(vm: &Vm, mut env: Option<ObjRef>, sym: SymId) -> Option<Value> {
+    while let Some(r) = env {
+        let Obj::Env { parent, slots } = vm.engine.obj(r) else { return None };
+        if let Some((_, v)) = slots.iter().rev().find(|(s, _)| *s == sym) {
+            return Some(*v);
+        }
+        env = *parent;
+    }
+    None
+}
+
+/// Can a leaf read this captured value? A number becomes a constant in the
+/// emitted code and a sequence of numbers becomes data; anything else is
+/// refused, and the refusal prints the value so the author can see what
+/// their closure actually caught.
+pub fn captured_readable(vm: &Vm, v: Value) -> bool {
+    match v {
+        Value::Fixnum(_) | Value::Flonum(_) => true,
+        Value::Obj(r) => matches!(
+            vm.engine.obj(r),
+            Obj::Vector { .. } | Obj::NumVector(_) | Obj::Array { .. } | Obj::Pair(..)
+        ),
+        _ => false,
+    }
 }
 
 impl<'a> Analysis<'a> {
     pub fn new(vm: &'a mut Vm) -> Self {
-        Self { vm, seen: HashMap::new(), chain: Vec::new() }
+        Self { vm, seen: HashMap::new(), chain: Vec::new(), envs: Vec::new() }
     }
 
     pub fn verdict(&mut self, name: &str) -> Result<Summary, Refusal> {
@@ -103,10 +140,23 @@ impl<'a> Analysis<'a> {
         let Some(v) = self.vm.global(sym) else {
             return Err(self.refuse(format!("`{name}` is unbound")));
         };
+        self.procedure(Some(sym), v, name)
+    }
+
+    /// A procedure given as a VALUE rather than by name — S11b's entry for
+    /// `make-texture`, which receives its texel function as an argument and
+    /// never as a global. `sym` is `Some` only when the value did come from
+    /// a global, which is what the recursion memo is keyed on.
+    pub fn verdict_proc(&mut self, v: Value, name: &str) -> Result<Summary, Refusal> {
+        self.procedure(None, v, name)
+    }
+
+    fn procedure(&mut self, sym: Option<SymId>, v: Value, name: &str) -> Result<Summary, Refusal> {
         let Value::Obj(r) = v else {
             return Err(self.refuse(format!("`{name}` is not a procedure")));
         };
-        let Obj::Closure { params, opt, named, keys, rest, body, .. } = self.vm.engine.obj(r).clone()
+        let Obj::Closure { params, opt, named, keys, rest, body, env, .. } =
+            self.vm.engine.obj(r).clone()
         else {
             return Err(self.refuse(format!("`{name}` is not an authored procedure")));
         };
@@ -117,13 +167,19 @@ impl<'a> Analysis<'a> {
         }
         // Recursion: assume compilable while inside it -- the ordinary
         // fixed-point start, and what lets a self-recursive helper pass.
-        self.seen.insert(
-            sym,
-            Ok(Summary { arity: params.len(), calls: BTreeSet::new(), captured: BTreeSet::new() }),
-        );
+        if let Some(sym) = sym {
+            self.seen.insert(
+                sym,
+                Ok(Summary { arity: params.len(), calls: BTreeSet::new(), captured: BTreeSet::new() }),
+            );
+        }
         let mut locals: Vec<SymId> = params.to_vec();
         let mut acc = Acc::default();
         self.chain.push(name.to_string());
+        // A HELPER'S FREE VARIABLES ARE ITS OWN, not the caller's: each
+        // procedure is walked against the environment it was created in, so
+        // two closures that both call a variable `k` cannot be confused.
+        self.envs.push(env);
         let mut out = Ok(());
         for form in body.iter() {
             if let Err(why) = self.walk(*form, &mut locals, &mut acc) {
@@ -131,6 +187,7 @@ impl<'a> Analysis<'a> {
                 break;
             }
         }
+        self.envs.pop();
         self.chain.pop();
         out.map(|()| Summary { arity: params.len(), calls: acc.calls, captured: acc.captured })
     }
@@ -171,8 +228,36 @@ impl<'a> Analysis<'a> {
             return Ok(());
         }
         let name = self.sym_name(resolved);
+        // S11b: THE CAPTURED ENVIRONMENT COMES FIRST, because that is
+        // lexical scope — a closure's `rings` is its own even if a global of
+        // that name exists. It cannot change what an existing capture means,
+        // because a top-level procedure has no environment at all.
+        let env = self.envs.last().copied().flatten();
+        let captured = env_lookup(self.vm, env, resolved).or_else(|| env_lookup(self.vm, env, s));
+        if let Some(v) = captured
+            && captured_readable(self.vm, v)
+        {
+            acc.captured.insert(name);
+            return Ok(());
+        }
+        // A CAPTURED PROCEDURE FALLS THROUGH TO THE GLOBAL PATH, which is
+        // the one that knows how to analyse a call. A library's procedures
+        // close over the library's own frame, so `value-noise-2` finds
+        // `noise-fade` in its environment as well as in the global table —
+        // and taking the environment's answer refused five of `(scm noise)`
+        // for holding a procedure (found by the S11 gate, 2026-10-19). Only
+        // DATA is read from a frame; everything else is resolved as before.
         match self.vm.global(resolved) {
-            None => Err(format!("`{name}` is unbound")),
+            None => match captured {
+                // Captured, but not something a leaf can read or call: say
+                // what it holds, because "unbound" would be a lie.
+                Some(v) => Err(format!(
+                    "`{name}` is captured from a closure and holds `{}`, and a leaf can only \
+                     read numbers and sequences of them",
+                    scm::write_str(&self.vm.engine, v)
+                )),
+                None => Err(format!("`{name}` is unbound")),
+            },
             // Judged by *which primitive it is*, not by the name it was
             // reached through: `f64vector-ref` is an alias of
             // `numvector-ref`, and so are the other nine element types, so
@@ -258,23 +343,45 @@ impl<'a> Analysis<'a> {
         Ok(())
     }
 
-    /// `(map f SEQ)` with a literal `SEQ` -> `f` followed by the elements.
+    /// `(map f SEQ …)` with sequences of known length -> `f` once per
+    /// position. One sequence gives `f` followed by the elements, which is
+    /// what the analysis walks; TWO give the corpus's colour blend,
+    /// `(map (lambda (e l) …) early late)`, and are zipped.
     fn specialise_map(&mut self, parts: &[Value]) -> Result<Option<Vec<Value>>, String> {
-        let [head, f, arg] = parts else {
+        let [head, f, args @ ..] = parts else {
             return Ok(None);
         };
+        if args.is_empty() {
+            return Ok(None);
+        }
         let Value::Symbol(h) = *head else {
             return Ok(None);
         };
         if self.sym_name(self.vm.engine.resolve(h)) != "map" {
             return Ok(None);
         }
-        let Some(items) = literal_sequence(self.vm, *arg)? else {
-            return Ok(None);
-        };
-        let mut out = Vec::with_capacity(items.len() + 1);
+        let env = self.envs.last().copied().flatten();
+        let mut seqs = Vec::new();
+        for a in args {
+            match literal_sequence_in(self.vm, *a, env)? {
+                Some(items) => seqs.push(items),
+                None => return Ok(None),
+            }
+        }
+        let n = seqs[0].len();
+        if seqs.iter().any(|s| s.len() != n) {
+            return Err(format!(
+                "`map` over sequences of different lengths ({})",
+                seqs.iter().map(|s| s.len().to_string()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        // Every element of every sequence is an argument `f` is applied to,
+        // and the walk only needs to see each of them once.
+        let mut out = Vec::with_capacity(n * seqs.len() + 1);
         out.push(*f);
-        out.extend(items);
+        for s in &seqs {
+            out.extend(s.iter().copied());
+        }
         Ok(Some(out))
     }
 
@@ -374,7 +481,25 @@ fn kind(o: &Obj) -> &'static str {
 
 /// The elements of `(list a b c)`, `(vector a b c)`, `[a b c]` or `'(a b c)`,
 /// or `None` if the length is not statically known.
-pub fn literal_sequence(vm: &mut Vm, v: Value) -> Result<Option<Vec<Value>>, String> {
+/// The elements of a sequence whose LENGTH is known at compile time, so
+/// `map` over it can be unrolled: a literal `(list …)`, `(vector …)`,
+/// `[…]`, a quoted list — or, S11b, a variable captured from a closure that
+/// holds one. The last case is what ray's textures need: `early` and `late`
+/// are a procedure's colour arguments, closed over by the texel lambda, and
+/// `(map f early late)` is how every one of them blends two colours.
+pub fn literal_sequence_in(
+    vm: &mut Vm,
+    v: Value,
+    env: Option<ObjRef>,
+) -> Result<Option<Vec<Value>>, String> {
+    if let Value::Symbol(s) = v
+        && let Some(found) = {
+            let r = vm.engine.resolve(s);
+            env_lookup(vm, env, r).or_else(|| env_lookup(vm, env, s))
+        }
+    {
+        return Ok(sequence_items(vm, found));
+    }
     let Value::Obj(r) = v else {
         return Ok(None);
     };
@@ -394,6 +519,31 @@ pub fn literal_sequence(vm: &mut Vm, v: Value) -> Result<Option<Vec<Value>>, Str
             None => Ok(None),
         },
         _ => Ok(None),
+    }
+}
+
+/// The elements of a sequence value, as literals. `None` for anything that
+/// is not a sequence of numbers — the caller turns that into its own
+/// refusal, which can say what it was looking at.
+pub fn sequence_items(vm: &Vm, v: Value) -> Option<Vec<Value>> {
+    let Value::Obj(r) = v else { return None };
+    match vm.engine.obj(r) {
+        Obj::Vector { items, .. } => Some(items.clone()),
+        // `get` already hands back a `Value`, exact or inexact as the
+        // element type is; the leaf's one numeric type sorts that out.
+        Obj::NumVector(nv) => (0..nv.len()).map(|i| nv.get(i)).collect(),
+        Obj::Pair(..) => {
+            // A proper list, walked by hand: `list` in the Vm would allocate.
+            let mut out = Vec::new();
+            let mut cur = v;
+            while let Value::Obj(p) = cur {
+                let Obj::Pair(h, t) = vm.engine.obj(p) else { return None };
+                out.push(*h);
+                cur = *t;
+            }
+            matches!(cur, Value::Null).then_some(out)
+        }
+        _ => None,
     }
 }
 

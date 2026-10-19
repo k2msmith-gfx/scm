@@ -1033,6 +1033,34 @@ port's, two are not**:
    own language, and scm loads neither file either because the driver never
    gets that far.
 
+**P5's prerequisite, measured 2026-10-19: the corpus writes its texel
+functions as closures, and the leaf compiler cannot read a closure's
+environment.** Every `make-texture` call in ray's 25 texture scenes passes
+an INLINE LAMBDA that closes over local numbers — `(make-texture res res
+(fn [u v] … rings warp early late …))` in `wood.janet`, the same shape in
+`marquetry.janet` and `fruit-bowl.janet`. S11 resolves a free variable as a
+local, a global procedure, a pure primitive or a global table; a variable
+that is none of those is unbound. Probed directly rather than inferred:
+
+```
+(define (plank rings warp) (lambda (u v) (* rings (+ u (* warp v)))))
+(define tex (plank 7.0 0.25))
+→ `rings` is unbound (in tex)          ; the closure
+→ Ok(arity 2)                          ; the same body with a global instead
+```
+
+So P5 starts in THIS repo, not in ray: the leaf compiler needs a free
+variable to resolve through the compiled procedure's captured environment
+(a number as a constant, a vector as the snapshot item (2) already takes),
+and an entry point that takes a PROCEDURE VALUE, because `make-texture`
+receives `f` as an argument and never as a global name. **S11b.**
+
+**T2 is not the alternative, also measured (S13):** 1.3× on `tak` and `fib`,
+0.65× across the 53 programs once compilation is paid for, and the native
+code is 6% of the profile — the call protocol is the ceiling. The leaf
+compiler's 77 ns/texel against Janet's 4,112 is the only lever that moves
+this number, and it is restricted to a subset for exactly that reason.
+
 **P5 — compiled texels (0.4; scm's B3, goal (d)).** The one measured number
 in the whole argument: `make-texture` at **4,112 ns/texel**, one 2048² texture
 at **17.2 s**, `fruit-bowl.janet`'s whole scene build at **15.22 s**. S11's

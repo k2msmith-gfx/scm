@@ -121,7 +121,28 @@ pub struct Built {
 }
 
 /// Emit, optimise, JIT, and look up the entry point.
-pub fn build(vm: &mut Vm, name: &str, shape: Shape, _summary: &Summary) -> Result<Built, Refusal> {
+pub fn build(vm: &mut Vm, name: &str, shape: Shape, summary: &Summary) -> Result<Built, Refusal> {
+    let parts = match crate::codegen::Cg::parts_of(vm, global_or_err(vm, name)?, name) {
+        Ok(p) => p,
+        Err(m) => return Err(Refusal { message: m, via: vec![name.to_string()] }),
+    };
+    build_of(vm, name, parts, shape, summary)
+}
+
+/// A procedure to look up by name, for the by-name entry points.
+fn global_or_err(vm: &Vm, name: &str) -> Result<scm::Value, Refusal> {
+    let refuse = |m: String| Refusal { message: m, via: vec![name.to_string()] };
+    let sym = vm.engine.interner.lookup(name).ok_or_else(|| refuse(format!("`{name}` is unbound")))?;
+    vm.global(sym).ok_or_else(|| refuse(format!("`{name}` is not defined")))
+}
+
+pub fn build_of(
+    vm: &mut Vm,
+    name: &str,
+    parts: crate::codegen::Parts,
+    shape: Shape,
+    _summary: &Summary,
+) -> Result<Built, Refusal> {
     init();
     let refuse = |m: String| Refusal { message: m, via: vec![name.to_string()] };
     unsafe {
@@ -134,7 +155,7 @@ pub fn build(vm: &mut Vm, name: &str, shape: Shape, _summary: &Summary) -> Resul
         let ctx = ContextRef::new(raw_ctx);
 
         let mut cg = Cg::new(ctx);
-        cg.entry(vm, name, shape).map_err(refuse)?;
+        cg.entry_of(vm, name, parts, shape).map_err(refuse)?;
         cg.module.verify().map_err(|s| refuse(format!("the emitted IR does not verify: {s}")))?;
         let tm = target_machine().map_err(refuse)?;
         cg.module

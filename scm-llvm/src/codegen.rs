@@ -25,7 +25,7 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use scm::heap::Obj;
 use scm::{SymId, Value, Vm};
 
-use crate::subset::{binding_items, expand, list, literal_sequence};
+use crate::subset::{binding_items, expand, list, literal_sequence_in};
 use crate::{Shape, Vec3Abi};
 
 type R<T> = Result<T, String>;
@@ -95,6 +95,11 @@ struct ArrayShape<'c> {
 struct Fun<'c> {
     f: FunctionValue<'c>,
     shape: Shape,
+    /// The captured environment of the procedure this body came from
+    /// (S11b), so a free variable resolves the way the analysis resolved
+    /// it. A top-level procedure has none; a texel lambda made inside
+    /// `wood-texture` has the frame holding `rings` and `warp`.
+    env_obj: Option<scm::ObjRef>,
     trap: Option<BasicBlock<'c>>,
     /// Loop names in scope: a call to one anywhere but tail position is a
     /// refusal, since a loop is a branch and not a procedure.
@@ -102,6 +107,14 @@ struct Fun<'c> {
     /// Booleans bound by a `let` in test position -- which is how `or`
     /// expands, through a hygienic temporary -- visible only to tests.
     bools: HashMap<SymId, IntValue<'c>>,
+}
+
+/// What a procedure is, to the emitter: its signature, its code, and the
+/// frame its free variables close over.
+pub struct Parts {
+    pub params: Vec<SymId>,
+    pub body: Vec<Value>,
+    pub env: Option<scm::ObjRef>,
 }
 
 pub struct Cg<'c> {
@@ -140,9 +153,17 @@ impl<'c> Cg<'c> {
 
     /// The entry point: `name` with the requested shape, under its own symbol.
     pub fn entry(&mut self, vm: &mut Vm, name: &str, shape: Shape) -> R<()> {
+        let parts = self.closure(vm, name)?;
+        self.entry_of(vm, name, parts, shape)
+    }
+
+    /// The same, for a procedure handed over as a VALUE (S11b): a texel
+    /// function reaches `make-texture` as an argument, so there is no global
+    /// to name it by. `name` is then a label for symbols and refusals.
+    pub fn entry_of(&mut self, vm: &mut Vm, name: &str, parts: Parts, shape: Shape) -> R<()> {
         match shape {
             Shape::Scalar => {
-                let f = self.function(vm, name)?;
+                let f = self.function_of(vm, name, parts)?;
                 // An alias under the entry symbol: a scalar leaf IS its helper.
                 let fty = f.get_type();
                 let alias = self.module.add_function(&entry_symbol(name), fty, None);
@@ -155,19 +176,29 @@ impl<'c> Cg<'c> {
                 self.b.build_return(Some(&v)).map_err(e)?;
                 Ok(())
             }
-            Shape::Vec3 => self.function3(vm, name),
+            Shape::Vec3 => self.function3_of(vm, name, parts),
         }
     }
 
-    fn closure(&self, vm: &Vm, name: &str) -> R<(Vec<SymId>, Vec<Value>)> {
+    fn closure(&self, vm: &Vm, name: &str) -> R<Parts> {
         let sym = vm.engine.interner.lookup(name).ok_or_else(|| format!("`{name}` is unbound"))?;
-        let Some(Value::Obj(r)) = vm.global(sym) else {
+        let Some(v) = vm.global(sym) else {
             return Err(format!("`{name}` is not defined"));
         };
-        let Obj::Closure { params, body, .. } = vm.engine.obj(r).clone() else {
+        Self::parts_of(vm, v, name)
+    }
+
+    /// A procedure's parameters, body and captured environment, from the
+    /// VALUE — S11b's entry, since a texel function is an argument rather
+    /// than a global.
+    pub fn parts_of(vm: &Vm, v: Value, name: &str) -> R<Parts> {
+        let Value::Obj(r) = v else {
+            return Err(format!("`{name}` is not a procedure"));
+        };
+        let Obj::Closure { params, body, env, .. } = vm.engine.obj(r).clone() else {
             return Err(format!("`{name}` is not an authored procedure"));
         };
-        Ok((params.to_vec(), body.to_vec()))
+        Ok(Parts { params: params.to_vec(), body: body.to_vec(), env })
     }
 
     /// A scalar function: `f64`s in, `f64` out. Compiled once per module;
@@ -176,7 +207,12 @@ impl<'c> Cg<'c> {
         if let Some(f) = self.done.get(name) {
             return Ok(*f);
         }
-        let (params, body) = self.closure(vm, name)?;
+        let parts = self.closure(vm, name)?;
+        self.function_of(vm, name, parts)
+    }
+
+    fn function_of(&mut self, vm: &mut Vm, name: &str, parts: Parts) -> R<FunctionValue<'c>> {
+        let Parts { params, body, env: env_obj } = parts;
         let f64t = self.ctx.f64_type();
         let args: Vec<BasicMetadataTypeEnum> = vec![f64t.into(); params.len()];
         let f = self.module.add_function(&format!("leaf_{name}"), f64t.fn_type(&args, false), Some(Linkage::Private));
@@ -188,7 +224,8 @@ impl<'c> Cg<'c> {
         for (i, p) in params.iter().enumerate() {
             env.insert(*p, f.get_nth_param(i as u32).unwrap().into_float_value());
         }
-        let mut fun = Fun { f, shape: Shape::Scalar, trap: None, loops: Vec::new(), bools: HashMap::new() };
+        let mut fun =
+            Fun { f, shape: Shape::Scalar, env_obj, trap: None, loops: Vec::new(), bools: HashMap::new() };
         let out = self
             .body(vm, &body, &mut env, &mut fun)
             .and_then(|v| self.b.build_return(Some(&v)).map(|_| ()).map_err(e));
@@ -211,8 +248,8 @@ impl<'c> Cg<'c> {
     }
 
     /// A texture-shaped function: three `f64`s out, by the ABI hook.
-    fn function3(&mut self, vm: &mut Vm, name: &str) -> R<()> {
-        let (params, body) = self.closure(vm, name)?;
+    fn function3_of(&mut self, vm: &mut Vm, name: &str, parts: Parts) -> R<()> {
+        let Parts { params, body, env: env_obj } = parts;
         let f64t = self.ctx.f64_type();
         let v3 = self.ctx.struct_type(&[f64t.into(), f64t.into(), f64t.into()], false);
         let abi = crate::vec3_abi();
@@ -233,7 +270,8 @@ impl<'c> Cg<'c> {
         for (i, p) in params.iter().enumerate() {
             env.insert(*p, f.get_nth_param((i + skip) as u32).unwrap().into_float_value());
         }
-        let mut fun = Fun { f, shape: Shape::Vec3, trap: None, loops: Vec::new(), bools: HashMap::new() };
+        let mut fun =
+            Fun { f, shape: Shape::Vec3, env_obj, trap: None, loops: Vec::new(), bools: HashMap::new() };
         let three = (|| {
             if body.is_empty() {
                 return Err("an empty body".into());
@@ -345,16 +383,35 @@ impl<'c> Cg<'c> {
                 Ok(out)
             }
             "list" | "vector" if parts.len() == 4 => self.three_of(vm, &parts[1..], env, fun),
-            "map" if parts.len() == 3 => {
-                let Some(items) = literal_sequence(vm, parts[2])? else {
-                    return Err("`map` over a sequence of unknown length cannot be specialised".into());
-                };
-                if items.len() != 3 {
-                    return Err(format!("a colour has 3 components, this `map` produces {}", items.len()));
+            // `(map f SEQ …)`: one sequence is the corpus's `(map (lambda
+            // (c) …) (list a b c))`, two are its colour blend `(map (lambda
+            // (e l) …) early late)` — zipped, so `f` is applied once per
+            // component with one element from each sequence. The sequences
+            // may be captured variables (S11b), which is how every texture
+            // in ray's corpus names its two colours.
+            "map" if parts.len() >= 3 => {
+                let mut seqs = Vec::new();
+                for a in &parts[2..] {
+                    match literal_sequence_in(vm, *a, fun.env_obj)? {
+                        Some(items) => seqs.push(items),
+                        None => {
+                            return Err(
+                                "`map` over a sequence of unknown length cannot be specialised"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+                if seqs.iter().any(|q| q.len() != 3) {
+                    return Err(format!(
+                        "a colour has 3 components, this `map` produces {}",
+                        seqs[0].len()
+                    ));
                 }
                 let mut out = Vec::new();
-                for item in &items {
-                    out.push(self.apply_inline(vm, parts[1], &[*item], env, fun)?);
+                for i in 0..3 {
+                    let args: Vec<Value> = seqs.iter().map(|q| q[i]).collect();
+                    out.push(self.apply_inline(vm, parts[1], &args, env, fun)?);
                 }
                 Ok([out[0], out[1], out[2]])
             }
@@ -411,6 +468,21 @@ impl<'c> Cg<'c> {
                 let r = vm.engine.resolve(s);
                 if let Some(v) = env.get(&r) {
                     return Ok(*v);
+                }
+                // S11b: a free variable captured from a closure is a
+                // CONSTANT in the emitted code, resolved here exactly as
+                // the analysis resolved it — environment first, which is
+                // lexical scope, and safe because a top-level procedure has
+                // no environment at all.
+                match crate::subset::env_lookup(vm, fun.env_obj, r)
+                    .or_else(|| crate::subset::env_lookup(vm, fun.env_obj, s))
+                {
+                    Some(Value::Flonum(x)) => return Ok(f64t.const_float(x)),
+                    Some(Value::Fixnum(n)) => return Ok(f64t.const_float(n as f64)),
+                    // Anything else in a frame is resolved as it was before
+                    // this existed — a captured procedure is a call, not a
+                    // value. See the same fall-through in `subset::var`.
+                    _ => {}
                 }
                 match vm.global(r) {
                     Some(Value::Flonum(x)) => Ok(f64t.const_float(x)),
@@ -566,7 +638,7 @@ impl<'c> Cg<'c> {
                 let [table, index] = args else {
                     return Err(format!("`{hn}` wants a table and an index"));
                 };
-                let t = self.table(vm, *table)?;
+                let t = self.table(vm, *table, fun.env_obj)?;
                 let i = self.expr(vm, *index, env, fun)?;
                 self.load(&t, i, fun)
             }
@@ -574,7 +646,7 @@ impl<'c> Cg<'c> {
                 let [table] = args else {
                     return Err(format!("`{hn}` wants a table"));
                 };
-                let t = self.table(vm, *table)?;
+                let t = self.table(vm, *table, fun.env_obj)?;
                 Ok(f64t.const_float(t.len() as f64))
             }
             // `(array-ref img y x)`: the shape and strides are known now,
@@ -584,7 +656,7 @@ impl<'c> Cg<'c> {
                 let [array, subs @ ..] = args else {
                     return Err("`array-ref` wants an array and subscripts".into());
                 };
-                let shape = self.array_shape(vm, *array)?;
+                let shape = self.array_shape(vm, *array, fun.env_obj)?;
                 if subs.len() != shape.dims.len() {
                     return Err(format!(
                         "`array-ref`: this array has rank {}, but {} subscripts were given",
@@ -708,17 +780,25 @@ impl<'c> Cg<'c> {
     /// Item (2): a global holding bulk numbers becomes a snapshot, taken
     /// now. A `vector` becomes a constant array, a `numvector` a pointer;
     /// see [`Store`] for why they differ.
-    fn table(&mut self, vm: &mut Vm, form: Value) -> R<Store<'c>> {
+    fn table(&mut self, vm: &mut Vm, form: Value, env_obj: Option<scm::ObjRef>) -> R<Store<'c>> {
         let Value::Symbol(s) = form else {
-            return Err("a table must be named by a global variable".into());
+            return Err("a table must be named by a variable".into());
         };
         let r = vm.engine.resolve(s);
         let name = name_of(vm, r);
         if let Some(t) = self.tables.get(&name) {
             return Ok(t.clone());
         }
-        let Some(Value::Obj(o)) = vm.global(r) else {
-            return Err(format!("`{name}` is not a global table"));
+        // A CAPTURED TABLE IS A TABLE (S11b): the snapshot is the same, and
+        // only where the name is found differs. The analysis accepts a
+        // captured sequence, so this has to be able to emit one, or the two
+        // vocabularies of refusal this file exists to avoid come back.
+        let found = crate::subset::env_lookup(vm, env_obj, r)
+            .or_else(|| crate::subset::env_lookup(vm, env_obj, s))
+            .filter(|v| matches!(v, Value::Obj(_)))
+            .or_else(|| vm.global(r));
+        let Some(Value::Obj(o)) = found else {
+            return Err(format!("`{name}` is not a table"));
         };
         let store = match vm.engine.obj(o).clone() {
             Obj::Vector { items, .. } => {
@@ -800,17 +880,27 @@ impl<'c> Cg<'c> {
 
     /// A captured array: its shape and strides read now, its store
     /// snapshotted like any other bulk data.
-    fn array_shape(&mut self, vm: &mut Vm, form: Value) -> R<ArrayShape<'c>> {
+    fn array_shape(
+        &mut self,
+        vm: &mut Vm,
+        form: Value,
+        env_obj: Option<scm::ObjRef>,
+    ) -> R<ArrayShape<'c>> {
         let Value::Symbol(s) = form else {
-            return Err("an array must be named by a global variable".into());
+            return Err("an array must be named by a variable".into());
         };
         let r = vm.engine.resolve(s);
         let name = name_of(vm, r);
         if let Some(a) = self.arrays.get(&name) {
             return Ok(a.clone());
         }
-        let Some(Value::Obj(o)) = vm.global(r) else {
-            return Err(format!("`{name}` is not a global array"));
+        // Captured or global, as for a table.
+        let found = crate::subset::env_lookup(vm, env_obj, r)
+            .or_else(|| crate::subset::env_lookup(vm, env_obj, s))
+            .filter(|v| matches!(v, Value::Obj(_)))
+            .or_else(|| vm.global(r));
+        let Some(Value::Obj(o)) = found else {
+            return Err(format!("`{name}` is not an array"));
         };
         let (dims, strides, offset, store_v) = match vm.engine.obj(o).clone() {
             Obj::Array { dims, strides, offset, store } => (

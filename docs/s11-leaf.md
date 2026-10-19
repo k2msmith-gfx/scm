@@ -141,6 +141,99 @@ crash; the pass in flight finishes with the old code; the next pass uses
 the new; the last pass's generation matches the definition it used.
 
 
+## S11b — a leaf compiled from a closure (2026-10-19)
+
+`scm_llvm::compile_proc`, `verdict_proc`; `scm-llvm/tests/leaf_closure.rs`;
+the number in `examples/closure_texel_cost.rs`.
+
+**Why, and it is not a hypothetical.** Track B's P5 is ray's texel bake, so
+the leaf to compile is whatever `make-texture` is handed — and every one of
+the 25 texture scenes in ray's corpus hands it an INLINE LAMBDA that closes
+over the numbers and colours of the procedure that built it:
+
+```scheme
+(define (wood-texture early late rings warp res)
+  (make-texture res res
+    (lambda (u v)
+      (let* ((r (ring u v rings warp))
+             (fiber (* 0.06 (- (vnoise (* u 4.0) (* v 70.0)) 0.5))))
+        (map (lambda (e l) (+ e (* (- l e) r) (* e fiber))) early late)))))
+```
+
+S11 resolved a free variable as a local, a global procedure, a pure
+primitive or a global table. `rings` is none of those, so the verdict was
+`` `rings` is unbound (in tex)`` — and there was no entry point that could
+take the procedure at all, because `compile` starts from a global name and a
+texel function is an argument.
+
+**Three things were needed, and the corpus named them in order** — each
+refusal pointed at the next, which is why the gaps were found by handing the
+analysis ray's real texel rather than by reading:
+
+1. **A free variable resolves through the captured environment**, before the
+   globals, which is both lexical order and safe: a top-level procedure has
+   no environment at all (the global table is a separate structure), so only
+   a procedure created inside another one has a frame. Verified rather than
+   assumed. A number becomes a constant in the emitted code.
+2. **`map` over two sequences**, zipped. `(map (lambda (e l) …) early late)`
+   is how every texture in the corpus blends two colours, and S11
+   specialised one sequence only.
+3. **A sequence may be a captured variable.** `early` and `late` are the
+   procedure's arguments, so the length that makes the unroll possible is
+   known from the frame rather than from the source.
+
+**A captured procedure falls through to the global path**, and that is not a
+detail: a library's procedures close over the library's own frame, so
+`value-noise-2` finds `noise-fade` in its environment *as well as* in the
+global table. Taking the environment's answer for everything refused five of
+`(scm noise)` for "holding a procedure". Only DATA is read from a frame.
+Caught by the S11 gate within a minute of the change, which is what that
+gate is for.
+
+**Each emitted function carries the frame its body came from**, rather than
+the compile carrying one — so a helper's free variables are its own, and two
+closures from one procedure cannot be confused. `oak` and `pine` from the
+same `wood-texel` hold different colours under the same names, and the test
+asserts both against the interpreter *and* that they differ from each other,
+because a test where they happen to agree proves nothing.
+
+**A captured table is a table.** The analysis accepts a captured sequence,
+so codegen must be able to emit one, or the two vocabularies of refusal this
+file exists to prevent come straight back. Same snapshot, same bounds check;
+only where the name is found differs.
+
+### The number
+
+ray's own `wood.janet` texel — three 5-octave `fbm` calls, a `vnoise`, and
+the two-colour blend — compiled from the closure value:
+
+```
+compile                 20.1 ms
+native                 203.5 ns/texel   (512x512)
+interpreted (T1)     25083.6 ns/texel   (123x)
+
+one 512x512 texture:   53.4 ms native, 6575.5 ms interpreted
+```
+
+**Janet is not in that table on purpose.** The 4,112 ns/texel from
+[leaf-survey.md](leaf-survey.md) is a *different* texture, and a ratio
+against it would be arithmetic rather than measurement. The Janet number for
+this texel is measured on ray's side, where both languages can run the same
+scene, which is P5's own exit criterion.
+
+### What is not here
+
+- **Staleness of a captured value.** `Live` recompiles when a global the
+  leaf reads has been rebound; a captured value lives in a frame, and the
+  frame changes only by the closure being made again. For ray that is the
+  texture being redefined, which produces a new procedure value and so a new
+  compile. Nothing tracks it *inside* one closure, because nothing can
+  change there.
+- **A captured procedure as a call target.** It falls through to the global
+  lookup, so a helper that exists only in a frame — a lambda bound by the
+  enclosing `let` and called by the texel — is still refused. No scene in
+  the corpus writes one.
+
 ## Sampling data: numeric vectors and arrays (2026-10-14)
 
 The S11 number was a *procedural* texture: arithmetic only, no data. The
