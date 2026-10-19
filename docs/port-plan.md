@@ -880,7 +880,41 @@ with the images indistinguishable and only the clock showing it. Do both —
 the form trees say the scenes are the same description, the hashes say they
 are the same picture.
 
-**Kevin's ruling, 2026-10-18: compare renders, but not the slow files.**
+**Kevin's ruling, 2026-10-18: a scene that draws random numbers is compared
+by its SCENE, not its pixels.** "If they can't generate exactly the same
+results between Janet and scm, then leave [the generators] in scm and
+exclude from the rendering test compare."
+
+Why they cannot: Janet's `math/rng` and the Scheme generator are different
+algorithms, so the same seed walks a different sequence. Matching exactly
+would mean reproducing `janet_rng_u32` and its seeding bit for bit. The
+state's *shape* is recoverable — `struct JanetRNG { uint32_t a, b, c, d; }`
+is in the installed `janet.h`, so it is a four-word 32-bit generator Scheme
+could carry — but the mixing function and the seed constants are in
+`math.c`, which the Nix package does not ship, and three sample outputs are
+not enough to identify an algorithm *and* its warm-up. So: not matched, and
+the exclusion stands until someone has the source in front of them.
+
+**The exclusion is narrow, and only the image half of the check is dropped.**
+A generator's recorded form is identical in both languages — the same call
+with the same `:seed` — so the **form-tree comparison still covers these
+scenes**, and it is the comparison that proves the port. Only the pixels are
+skipped.
+
+**Measured, so the skip list is not curated:** 24 of the 191 renderable
+scenes draw a random number while building — 14 call `math/random`, 10
+`math/seedrandom`, 5 `grow-branches`, 5 `sphere-points`, 2 `strut-mesh`, 1
+`math/rng` (the sets overlap). The rule a gate can apply is textual: a scene
+mentioning any of those names is compared by scene only, and says so in its
+report.
+
+**And note what this is NOT.** Janet is reproducible against *itself* either
+way: the same generator scene rendered twice gives one hash, seeded or not
+(measured). So the default RNG is deterministically seeded, the 167 other
+scenes are fully render-comparable, and nothing here weakens the check for
+them.
+
+**Kevin's other ruling, same day: compare renders, but not the slow files.**
 So the image half is **bounded and reported**, exactly as
 `run_corpus.sh` already bounds its own run: render both sides at a cheap
 setting, give each scene a timeout, and print which scenes were skipped for
