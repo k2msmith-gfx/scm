@@ -181,14 +181,17 @@ fn host_values_go_in_and_come_back() {
 #[test]
 fn what_has_no_host_form_says_so_instead_of_guessing() {
     let mut it = Interp::new().unwrap();
-    // A port, an improper list and a cycle are all Opaque rather than a
-    // lie or a hang. The cycle is the one that matters: `set-cdr!` makes
-    // them constructible, and an unbounded walk would never return. A
-    // procedure is the exception: it comes back as a callable `Proc`.
-    for src in ["'(1 . 2)", "(open-input-string \"x\")"] {
-        let r = it.eval(src).unwrap();
-        assert_eq!(it.value(&r).unwrap(), Val::Opaque, "{src}");
-    }
+    // A port and a cycle are Opaque rather than a lie or a hang. The cycle
+    // is the one that matters: `set-cdr!` makes them constructible, and an
+    // unbounded walk would never return. A procedure is the exception: it
+    // comes back as a callable `Proc`.
+    //
+    // An improper list was in this list and is not any more — it crosses as
+    // `Val::Pair`, which `an_improper_list_crosses_as_the_cons_chain_it_is`
+    // covers. The cycle is still caught, by the length cap rather than by
+    // the improper arm, because a cycle's tail is always another pair.
+    let port = it.eval("(open-input-string \"x\")").unwrap();
+    assert_eq!(it.value(&port).unwrap(), Val::Opaque);
     for src in ["car", "(lambda (x) x)"] {
         let r = it.eval(src).unwrap();
         assert!(matches!(it.value(&r).unwrap(), Val::Proc(_)), "{src}");
@@ -468,4 +471,80 @@ fn an_exact_integer_too_wide_for_a_word_crosses_the_boundary_as_text() {
     // Text that is not an exact integer is the host's mistake and is
     // reported rather than silently becoming something else.
     assert!(matches!(i.make(&Val::BigInt("1.5".into())), Err(Error::Syntax(_))));
+}
+
+#[test]
+fn an_improper_list_crosses_as_the_cons_chain_it_is() {
+    // Added for ray's port, which needs an ASSOCIATION LIST to cross: a
+    // language with no dictionary type spells one `((:a . 1) (:b . 2))`,
+    // and that is a proper list whose every element is an improper pair.
+    // Those elements used to arrive as `Val::Opaque`, so a host could not
+    // tell an alist from any other list of unknowable things and had to
+    // apply the rule in Scheme — which ray measured at 53 ms against a
+    // 6.9 ms boundary on a 40,000-element argument.
+    let mut i = Interp::new().unwrap();
+
+    // One cons cell.
+    let r = i.eval("(cons 1 2)").unwrap();
+    assert_eq!(i.value(&r).unwrap(), Val::Pair(Box::new(Val::Int(1)), Box::new(Val::Int(2))));
+
+    // A partly-improper list nests, innermost last.
+    let r = i.eval("'(1 2 . 3)").unwrap();
+    assert_eq!(
+        i.value(&r).unwrap(),
+        Val::Pair(
+            Box::new(Val::Int(1)),
+            Box::new(Val::Pair(Box::new(Val::Int(2)), Box::new(Val::Int(3))))
+        )
+    );
+
+    // A PROPER list is still a `List`, which is the compatibility promise:
+    // a host that only knows `List` sees exactly what it saw before.
+    let r = i.eval("'(1 2 3)").unwrap();
+    assert_eq!(i.value(&r).unwrap(), Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]));
+
+    // The shape the port is here for.
+    let r = i.eval("'((:degree . 3) (:closed . #t))").unwrap();
+    let Val::List(items) = i.value(&r).unwrap() else { panic!("an alist is a proper list") };
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0],
+        Val::Pair(Box::new(Val::Keyword("degree".into())), Box::new(Val::Int(3)))
+    );
+
+    // Both directions: built on the host side, it reads back as Scheme data.
+    let built = i
+        .make(&Val::List(vec![Val::Pair(
+            Box::new(Val::Keyword("at".into())),
+            Box::new(Val::Float(1.5)),
+        )]))
+        .unwrap();
+    assert_eq!(i.write(&built).unwrap(), "((:at . 1.5))");
+    i.define_fn("alist", |_| {
+        Ok(Val::List(vec![Val::Pair(Box::new(Val::Keyword("k".into())), Box::new(Val::Int(7)))]))
+    })
+    .unwrap();
+    let r = i.eval("(cdr (assq ':k (alist)))").unwrap();
+    assert_eq!(i.value(&r).unwrap(), Val::Int(7));
+
+    // A list whose tail is an object rather than an immediate — the other
+    // improper arm — keeps its tail too.
+    let r = i.eval("(cons 1 \"tail\")").unwrap();
+    assert_eq!(
+        i.value(&r).unwrap(),
+        Val::Pair(Box::new(Val::Int(1)), Box::new(Val::Str("tail".into())))
+    );
+
+    // And a procedure inside one is still rooted, which is the rooting
+    // reader's own job: this goes through the host-function path.
+    i.define_fn_with("car-of", |host, args| match args {
+        [Val::Pair(car, _)] => match car.as_ref() {
+            Val::Proc(f) => host.call(f, &[Val::Int(20)]),
+            other => Ok(other.clone()),
+        },
+        _ => Err("wants one pair".into()),
+    })
+    .unwrap();
+    let r = i.eval("(car-of (cons (lambda (x) (* x 2)) 'tail))").unwrap();
+    assert_eq!(i.value(&r).unwrap(), Val::Int(40));
 }

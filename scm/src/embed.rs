@@ -188,9 +188,28 @@ pub enum Val {
     /// First-class and distinct from a symbol, which is the §4 decision ray
     /// needs.
     Keyword(String),
-    /// A proper list. An improper one comes back as [`Val::Opaque`] rather
-    /// than quietly losing its tail.
+    /// A proper list — one whose chain of pairs ends in `'()`.
+    ///
+    /// An improper one comes back as [`Val::Pair`], so the two are told
+    /// apart by *shape* rather than one of them being lost: a host that
+    /// only knows `List` sees exactly what it saw before.
     List(Vec<Val>),
+    /// One cons cell, which is how an **improper** list crosses: `(1 2 . 3)`
+    /// is `Pair(1, Pair(2, 3))` and `(:a . 1)` is `Pair(Keyword("a"),
+    /// Int(1))`.
+    ///
+    /// **Why a host wants this.** An association list is the natural
+    /// dictionary in a language that has no dictionary type, and it is a
+    /// *shape*: `((:a . 1) (:b . 2))` is a proper list whose every element
+    /// is an improper pair. Without this variant each of those elements
+    /// arrives as [`Val::Opaque`], so a host cannot tell an alist from any
+    /// other list of unknowable things and has to apply the rule in Scheme
+    /// instead — which ray measured at **53 ms against a 6.9 ms boundary**
+    /// on a 40,000-element argument, because recognising a shape means
+    /// visiting every cell and the visiting was happening in the
+    /// interpreter. With it the host recognises the shape during the one
+    /// walk it was already doing.
+    Pair(Box<Val>, Box<Val>),
     Vector(Vec<Val>),
     Bytes(Vec<u8>),
     /// A procedure, rooted while any clone of this exists. Call it with
@@ -754,6 +773,15 @@ impl Interp {
     }
 }
 
+/// The elements read so far, plus an improper tail, as a chain of
+/// [`Val::Pair`]. Iterative, so a long improper list costs no Rust stack.
+fn improper(elements: Vec<Val>, tail: Val) -> Val {
+    elements
+        .into_iter()
+        .rev()
+        .fold(tail, |acc, car| Val::Pair(Box::new(car), Box::new(acc)))
+}
+
 /// A `Value` as host data, to `MAX_DEPTH`.
 ///
 /// A free function rather than a method because the host-function dispatch in
@@ -795,9 +823,16 @@ pub(crate) fn read_val_rooting(engine: &mut crate::heap::Engine, v: Value, depth
                                     return Val::Opaque;
                                 }
                             }
-                            _ => return Val::Opaque,
+                            // An improper tail — see [`read_val`].
+                            _ => {
+                                let tail = read_val_rooting(engine, cur, depth + 1, id, pending);
+                                return improper(out, tail);
+                            }
                         },
-                        _ => return Val::Opaque,
+                        _ => {
+                            let tail = read_val_rooting(engine, cur, depth + 1, id, pending);
+                            return improper(out, tail);
+                        }
                     }
                 }
             }
@@ -843,11 +878,14 @@ pub(crate) fn read_val(engine: &crate::heap::Engine, v: Value, depth: usize) -> 
                                     out.push(read_val(engine, *car, depth + 1));
                                     cur = *cdr;
                                 }
-                                // An improper tail. Saying `Opaque` is better
-                                // than returning a list that lost it.
-                                _ => return Val::Opaque,
+                                // An improper tail, which the host gets as
+                                // the cons chain it is. It used to be
+                                // `Opaque`, on the reasoning that a list
+                                // which lost its tail is worse — true, and
+                                // [`Val::Pair`] loses nothing instead.
+                                _ => return improper(out, read_val(engine, cur, depth + 1)),
                             },
-                            _ => return Val::Opaque,
+                            _ => return improper(out, read_val(engine, cur, depth + 1)),
                         }
                     }
                 }
@@ -897,6 +935,14 @@ pub(crate) fn build_val(
                     built.push(build_val(engine, i, depth + 1)?);
                 }
                 engine.vector(built, false)
+            }
+            // Nothing is rooted while this runs, which is safe for the same
+            // reason the two branches above are: `Engine::alloc` never
+            // collects, because collection happens only at a safepoint.
+            Val::Pair(car, cdr) => {
+                let a = build_val(engine, car, depth + 1)?;
+                let d = build_val(engine, cdr, depth + 1)?;
+                engine.cons(a, d)
             }
             // A host cannot manufacture a procedure or a port, and silently
             // substituting something would be worse than refusing.

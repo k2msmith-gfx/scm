@@ -631,6 +631,53 @@ instead of reducing it — the crossing becomes the 6.9 ms already measured,
 level with Janet — and `Val` is `#[non_exhaustive]` for exactly this. It is
 a Track A change serving Track B.
 
+**DONE the same day, at Kevin's word.** `scm::Val::Pair(Box<Val>,
+Box<Val>)`: a pair chain ending in `'()` is still a `List`, so a host that
+only knows `List` sees exactly what it saw before, and an improper one is
+the cons chain it is. One variant, one fold, three sites in `embed.rs`
+(both readers and the builder), and **one existing test had to change its
+mind** — `what_has_no_host_form_says_so_instead_of_guessing` asserted that
+`'(1 . 2)` was `Opaque`, which was the limitation, not a property. A cycle
+is still `Opaque`, caught by the length cap rather than the improper arm,
+because a cycle's tail is always another pair. ray's `%api-wire`,
+`%api-unwire`, `%api-any?`, `%api-alist?` and the `%map` wire tag are all
+deleted; the rule is `as_alist` in `scheme.rs`, applied during the walk
+`to_api` was already doing.
+
+**The rule has a subtlety that cost an afternoon, and it is cons being
+cons.** An entry has two spellings that are *the same datum*: `(cons :k v)`
+is a pair, but when `v` is itself a list that very cons **is** a proper
+list, so `(:points (0 0 0) (1 1 1))` arrives as `Val::List` and never as a
+`Val::Pair`. The first Rust rule looked only for pairs and refused every
+real curve. An entry's value is its **cdr** under either spelling, which is
+what the Scheme rule it replaced computed as `(cdar l)`.
+
+| | Janet | scm before | scm after |
+|---|---|---|---|
+| boot | 18.4 ms | 6.6 ms | 6.6 ms |
+| build loop, 2,000 spheres | 4.8 ms | 12.1 ms | **6.3 ms** |
+| the `add-mesh` crossing | 6.3 ms | 61.1 ms | **7.8 ms** |
+
+**The wire was taxing every call, not only the mesh ones** — which is
+obvious afterwards and was not predicted: the build loop halved too,
+because each of its 2,000 calls was walking a three-element vector for
+dictionaries that could not be there. Janet's own figures moved 5–10%
+between runs on an idle machine, so **1.24× on the crossing and 1.31× on
+the loop are the same class**, not a measured deficit. The remaining ~1.5 ms
+on the mesh is the Rust-side alist check: 40,000 `entry` calls that each
+refuse at their first element.
+
+Every gate on both sides is green, conformance unmoved at 1112/71, zero
+clippy warnings.
+
+**One hazard this turned up for P3, recorded where the printer will meet
+it: the two languages print the same `f64` differently.** Janet writes 14
+significant digits (`3.06161713146292e-17`), scm writes round-trip 17
+(`3.0616171314629196e-17`), and `1e+21` against `1.0e+21`. P4 compares
+`Form` trees rather than text precisely so this cannot matter — but anyone
+who reaches for a text diff between a scene saved under each language will
+find differences that are not differences.
+
 **The look cannot be fixed in Scheme, and that is measured too.** On the
 same argument: walking only the two spines is 2.9 ms, *visiting* all
 160,000 cells with a one-line `touch` is **26–29 ms**, and the shipped

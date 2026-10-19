@@ -251,10 +251,14 @@ are the sentences most likely to rot unnoticed.
 | `Host` | what a re-entrant host function gets, so it can call back into Scheme |
 
 `Val` covers `Null` `Unspecified` `Bool` `Int` `BigInt` `Float` `Char`
-`Str` `Sym` `Keyword` `List` `Vector` `Bytes` `Proc`, and `Opaque` for
-anything with no host representation — a port, a parameter, an improper
-list. A `BigInt` is decimal text: lossless both ways, and it normalises,
-so an integer that fits a word is always `Int` whichever side built it.
+`Str` `Sym` `Keyword` `List` `Pair` `Vector` `Bytes` `Proc`, and `Opaque`
+for anything with no host representation — a port, a parameter, a cycle. A
+`BigInt` is decimal text: lossless both ways, and it normalises, so an
+integer that fits a word is always `Int` whichever side built it. A proper
+list is a `List` and an improper one is a `Pair` chain, so an association
+list — the dictionary of a language that has no dictionary type — crosses
+as the data it is, and a host recognises `((:a . 1) (:b . 2))` without
+asking Scheme.
 
 ### Evaluating, and exchanging values
 

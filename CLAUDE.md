@@ -135,6 +135,16 @@ before trusting it.
   taken on crates.io. A dependent names `schemers` in its manifest and
   writes `use scm::…`.
 - `embed::Val` and `embed::Error` are `#[non_exhaustive]`. Keep them so.
+  The reason is not hypothetical: `Val::BigInt` (S18) and `Val::Pair`
+  (2026-10-18, for ray's association lists) were both added after the API
+  was published, and each produced exactly one non-exhaustive match inside
+  the crate and nothing outside it.
+- **A proper list is `Val::List`, an improper one is a `Val::Pair` chain**,
+  and the difference is load-bearing for a host: an association list is a
+  proper list whose elements are improper pairs, which is how ray carries a
+  dictionary. Note the trap — **`(cons :k v)` where `v` is a list IS a
+  proper list**, so an alist entry reaches a host as a `List` as often as
+  a `Pair`, and an entry's value is its cdr either way.
 - Check a `.sld` for paren balance before building: an imbalance reports
   only as `read error: incomplete datum`, **with no line number**. A short
   scanner that tracks depth (skipping strings, `;` comments and `#\`
