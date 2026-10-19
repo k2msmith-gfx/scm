@@ -746,6 +746,23 @@ new number printed beside the old one, and the baked image compared against
 the interpreted bake. `make-texture` is already a bake, so this changes
 nothing observable except the seconds.
 
+**The path dependency makes a lone clone of ray unbuildable, and that is
+P6's problem rather than P1's (measured 2026-10-18).** A missing optional
+path dependency breaks even a *default* `cargo build` — Cargo resolves the
+manifest before it looks at features, so `scm = []` being off does not save
+it; verified with a throwaway crate pointing at a path that does not exist.
+So while `scm-port` lives, ray builds only on a machine with `../scm`
+beside it, and `git clone ray && cargo build` fails at the manifest with
+*No such file or directory*.
+
+Nothing breaks today: ray's CI triggers on push to **`main`**, on
+`pull_request` and on `workflow_dispatch` only, and this is a branch. But it
+is a **merge blocker for P6**, which has to pick one of: a git dependency
+(needs `k2msmith-gfx/scm` reachable by the build — it is private, so this
+means a token or making it public), publishing `schemers` to crates.io
+(which [plan.md](plan.md) gates on Track B finishing, i.e. on this), or
+vendoring. Decide it in P6 rather than at the merge.
+
 **P6 — scm becomes the default; Janet stays reachable (0.2).** Flip the
 default feature, run the corpus gate on the scm build, and keep
 `--features janet` building with its tests passing. Exit: the merge.
