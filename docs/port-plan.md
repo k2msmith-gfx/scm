@@ -629,9 +629,26 @@ with the biggest arguments are exactly the ones a type mask cannot skip.
 scm's `embed` and delete the Scheme-side wire.** It removes the cost
 instead of reducing it — the crossing becomes the 6.9 ms already measured,
 level with Janet — and `Val` is `#[non_exhaustive]` for exactly this. It is
-a Track A change serving Track B, and the alternative (making the look
-cheaper by not recursing into scalars) buys maybe 3× on a cost that should
-be zero.
+a Track A change serving Track B.
+
+**The look cannot be fixed in Scheme, and that is measured too.** On the
+same argument: walking only the two spines is 2.9 ms, *visiting* all
+160,000 cells with a one-line `touch` is **26–29 ms**, and the shipped
+predicate is 52–54 ms. So a perfect Scheme predicate still costs ~27 ms —
+**four times the entire rest of the call** — because the work is visiting
+every cell in interpreted code. Rust already walks the same structure
+inside `to_api` as part of the 6.9 ms.
+
+The asymmetry has a one-sentence cause. **Janet's dictionary is a distinct
+type the boundary recognises in passing; Scheme's alist is a *shape*, and a
+shape can only be recognised by inspecting every element** — which is
+exactly the information `Val` withholds. Nothing about the choice of an
+alist was wrong (§3's reasons stand, and it reads well); what is wrong is
+where the recognition has to happen.
+
+Worth fixing before P4 rather than after: P4 loads all 191 scenes, and the
+tax is ~2.5 µs a vertex, so a 200,000-vertex import pays half a second of
+pure look.
 
 **scm's interpreter is 3–5× slower at script arithmetic and list
 building**, which is the known price and not a surprise: [vs-steel.md](vs-steel.md)
