@@ -933,6 +933,106 @@ Note what a save *is*, because it bounds the claim: `save-scene` preserves
 flat calls they made. This stage proves the corpus's *scenes* port. It does
 not prove its *source* ports, and nothing on this branch does.
 
+**P4 MET, 2026-10-18 — all 218 example scenes, nothing failing.** The whole
+corpus, four ray processes and two renders per scene, 150 s per step:
+
+| | scenes |
+|---|---|
+| scene AND render agree | 150 |
+| scene agrees, render skipped — the scene draws random numbers | 21 |
+| scene agrees, nothing to render — mesh data, no camera | 19 |
+| not a scene — mesh data, or another harness | 9 |
+| over the step timeout | 0 |
+| ray cannot reload its own save (not the port) | 3 |
+| differ only by a zero's sign, which is Janet's (not the port) | 16 |
+| **FAILED** | **0** |
+
+So **190 of the 218 are compared and agree**, 150 of them on their pixels
+as well; 9 are not scenes; and the 19 remaining are ray's or Janet's, named
+one by one below. No scene is skipped silently and no class is curated — a
+scene lands in a column because of what it DID, which is why four of these
+columns were discovered rather than designed.
+
+**The driver, and the five things it found.**
+`scripts/dev/scm_corpus.py` in ray. Per scene: load under Janet and save
+twice over, once as Scheme and once as Janet; put the Janet save through
+Janet (the **control**) and the Scheme save through scm (the **subject**);
+compare the two results byte for byte; then render both and compare hashes.
+
+**Why a control rather than the first save.** `save-scene` is not idempotent
+in its own language — a scene holding a GENERATED texture says "referenced
+by their live ids" the first time and "a texture with no path of its own"
+the second, and a group whose members cannot be expanded comes back empty
+and an empty group is deliberately not stored, so it vanishes. Measured on
+`arcology.janet` and `baked-field.janet`. Comparing Scheme's round trip
+against Janet's cancels every one of those, because both sides have been
+through one load-and-save. What is left is the port.
+
+Four classes of disagreement came out of it, and **two of them are the
+port's, two are not**:
+
+1. **A material's key order is the host language's, not the scene's** (the
+   port's, fixed). Janet printed `:reflectivity` before `:specular`,
+   Scheme the other way, and five scenes differed by nothing else
+   (`calder-arch-2`, `calder-spire`, the three `krell` scenes). A Janet
+   dictionary is a hash table and hands its pairs over in bucket order; a
+   Scheme association list hands them over in source order. `sort_pairs`
+   already sorted — but only at `Lit9`, and a captured group body prints at
+   full precision. Now it sorts at every precision, in both printers.
+2. **A material arriving as a CALL had to print as Janet's literal** (the
+   port's, fixed earlier in P4). A scene that went out through Scheme comes
+   back with `(material …)` inside a captured body; printing it verbatim
+   made the Janet output differ from Janet's own by exactly the material's
+   spelling. Each dialect now renders a material in its own idiom whichever
+   shape it arrived in.
+3. **A dialect's SPELLING has to come back canonical** (the port's, fixed).
+   The texture header binds `%tex` to a vector of `load-texture` results;
+   Janet's data structures are callable so a material says `(%tex 5)`, and a
+   Scheme vector is not, so the Scheme printer renders the same index as
+   `(vector-ref %tex 5)`. Reading that back as a call to `vector-ref` made
+   the captured body non-portable, so the entry was EXPANDED rather than
+   re-emitted — identical geometry, in block layout, and
+   `dining-room-baked.janet` differed from Janet's own save by six newlines.
+   The reader now turns the spelling back into the canonical `%tex` head, so
+   one shape sits in the store whichever dialect typed it and each printer
+   renders its own sugar. The lesson generalises past this case: a printer
+   that spells something for its dialect owes a reader that spells it back,
+   or the store ends up holding two shapes for one value.
+4. **Janet cannot round-trip the sign of a zero** (not the port). Ten
+   scenes — the five ASK-21s, two Calders, three Krells — differed in one
+   coordinate: a curve whose first and last control points hold the same
+   numbers, the first `-0` and the last `0`, came back from JANET with the
+   last one `-0`. Janet's compiler puts a literal tuple in the constant
+   pool, deduplicates value-equal constants, and in Janet `-0` equals `0`,
+   so both points become the one that got there first. Three literal points
+   reproduce it with no curve and no ray involved. **Scheme keeps the file,
+   Janet rewrites it**, so the port is the faithful side.
+
+   **Either orientation shows up, and both are the same fault.** Which copy
+   survives is whichever the list holds first: on `ask-21-drawn` the control
+   gained a `-0` the file did not have, and on
+   `ask-21-measured/ask21-controls` it lost one the file did. A first cut at
+   the test assumed the first orientation and turned the second into a
+   failure. What the test actually asserts is narrow in the way that
+   matters: every differing token must be a zero on BOTH sides, differing in
+   nothing but its sign. A number that moved by any amount at all is still a
+   failure.
+5. **Three scenes ray cannot reload from its own save** (not the port,
+   pre-existing). Its save contains `(with-group :railing (railing))`
+   — a captured body calling a function that lived in the original scene and
+   is absent from the save — so the reload dies on `unknown symbol railing`
+   in Janet and `unbound variable: railing` in Scheme. **A partial save is
+   not a successful reload**: `load-scene` aborts but ray's stdin REPL runs
+   the next form, so the `save-scene` after it wrote a 39-line file from a
+   48-line scene and the file's existence read as success. The driver reads
+   what ray SAID, not whether a file appeared. The other two are
+   `fall-tree.janet` and `tree-with-leaves.janet`, which fail differently
+   and for a reason of Janet's: **"ran out of internal registers"** — a
+   generated tree's save is one enormous form and Janet's compiler has a
+   per-function register budget. Both are ray's own saves failing in ray's
+   own language, and scm loads neither file either because the driver never
+   gets that far.
+
 **P5 — compiled texels (0.4; scm's B3, goal (d)).** The one measured number
 in the whole argument: `make-texture` at **4,112 ns/texel**, one 2048² texture
 at **17.2 s**, `fruit-bowl.janet`'s whole scene build at **15.22 s**. S11's
