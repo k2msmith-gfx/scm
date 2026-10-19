@@ -727,6 +727,86 @@ the four prims and ~13 accessors registered rather than rewritten. Exit: every c
 printed as Scheme, **reads back to an equal datum** in scm. That is scm's own
 S1 round-trip gate, now run over ray's real output.
 
+**P3 as built, 2026-10-18 — the printer is done, the prelude is half.**
+
+The printer (`ray/src/form.rs`'s `Form::to_scheme`, `Line::to_scheme`)
+carries §3.5's table and closes two of §3's open questions. **The net needed
+no new verb**: P2's alist crossing let it print as the association list
+`nurbs-net` already returns and `add-nurbs-surface` already reads, which is
+better than either option §3(a) offered. And **one rule decides every
+container** — a constant when everything inside it is data, a constructor
+call when something has to evaluate — forced by a real scene holding
+`[(load-texture …)]`, where a quoted vector would store the list.
+
+Proved end to end on real scenes rather than hand-built forms, and the
+hardest one in the corpus works: `dining-room-baked.janet`, with six
+textures, split mesh files, includes, groups and materials, goes to Scheme,
+loads under scm, saves back as Janet, and **renders to the same hash as the
+original**. A plain scene and a grouped scene both round-trip
+**byte-identically** through scm.
+
+**What a saved scene can call turned out to be a closed, short list**, which
+is the measurement that scoped this stage: of every head
+`snapshot`/`src/api` can emit, exactly four are not registry verbs — `%tex`,
+`def`, `with-group` and `include`. So the prelude's *loading* half is
+complete at four items, and everything else in §3's residue is an
+*authoring* helper that no saved scene ever names.
+
+- `material` with its eager validation and its once-per-session specular
+  advice; `shader-code`; the three packed-buffer unpackers; `with-scene`,
+  `with-group`, `defshape`, `defgroup`, `in-group`; `include`. The seven
+  vector helpers are deleted, as §3 said.
+- `scene_store::open_group` / `close_group` are **lifted out of the Janet
+  prim**, so both bindings share one rule about when a group is stored, and
+  the Scheme side registers the prims rather than reimplementing them —
+  which is what §3's "registered rather than rewritten" asks for.
+- A captured group body crosses as DATA through a new `to_form`, simpler
+  than Janet's because a Scheme reader already distinguishes a list from a
+  vector, where Janet needs a parse flag to know which tuple was a call.
+- `save-scene` picks its dialect from the extension, and a `.scm` scene's
+  split mesh parts are Scheme too.
+
+**A CAPTURED BODY CANNOT CROSS DIALECTS, and that is now a rule rather than
+a bug.** `with-group` records its body as the author wrote it, and that body
+is arbitrary code: a Scheme session's is `(vector-ref %tex 5)` where Janet's
+is `(%tex 5)`. Saving a Scheme session as `.janet` emitted the former and
+the reload died on `unknown symbol vector-ref`. The origin now records
+*which* dialect captured it, and a save to the other one **expands** the
+entry instead — which is what `repro: false` has always meant and is
+dialect-neutral by construction. Found only because the render comparison
+needed the Scheme→Janet direction.
+
+**Two pre-existing ray findings, neither the port's:**
+
+- **`save-scene` can write a scene that cannot be reloaded.**
+  `examples/models/lighthouse.janet` saves `(with-group :railing (railing))`
+  — the captured body calls a function defined in the *original* scene file,
+  which the save does not carry. The Janet save fails to reload with
+  `unknown symbol railing`, so this is not about Scheme at all. Source
+  capture records the text, and the text can reference an environment the
+  saved file does not reconstruct. P4 has to exempt such scenes or ray has
+  to stop claiming them reproducible.
+- The corpus read gate is **opt-in, not a leg**, because 190 scenes in one
+  process is an hour and the cost is the scene *build* (`arcology` over a
+  minute, the terrain scenes ~20 s each). Last run reached 188 of 218 files:
+  **140 printed as Scheme and read back, 48 not-a-scene, 0 failures.**
+
+**What P3 still owes, measured so the next session starts from facts.** All
+of it is authoring-side, so none of it blocks P4's saved-scene gate. Code
+sizes are small; the bulk of each Janet definition is its docstring, which
+is the manual's text and should be lifted rather than retyped (ray has
+`scripts/dev/extract_docstrings.py` for exactly that move):
+
+| what | why it matters | where it is used |
+|---|---|---|
+| `load-gltf` | a `*notify*` dynamic var → a parameter | 39 example files |
+| `make-texture` | a CLOSURE per texel — the `define_fn_with` case, and P5's subject | 25 example files |
+| `camera-frame` | a view over the live pose | 10 example files |
+| `sphere-points`, `strut-mesh` | pure math + `add-mesh` | 5 and 2 files |
+| `field-bake`, `add-implicit` | the closure branch again | 2 files |
+| `camera-match`, `camera-pixel` | §3(d)'s host hook is still undecided | the modeler |
+| `render-settings`, the generators (12), `origin-form`, `follow-curves` | REPL views and tree generators | 0 example files |
+
 **P4 — the corpus converts and agrees (0.3; scm's B2).** For each of the 191
 renderable scenes: load under Janet → save → print Scheme → load under scm →
 save → **compare the two `Form` trees**.
