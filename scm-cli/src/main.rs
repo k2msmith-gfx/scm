@@ -467,13 +467,20 @@ fn repl(session: Session) -> ExitCode {
         let took = t0.elapsed();
         match outcome {
             Outcome::Value { value, output } => {
+                // Flushed, not left to the next newline: a `display` with no
+                // trailing newline sits in stdout's LineWriter, and the line
+                // editor writes the next prompt through its own handle -- so
+                // the prompt appears and the output surfaces an entry late.
                 print!("{output}");
+                let _ = io::stdout().flush();
                 if value != "#<unspecified>" {
                     println!("{value}");
                 }
             }
             Outcome::Failed { message, output, backtrace, .. } => {
+                // Before the message, which goes to unbuffered stderr.
                 print!("{output}");
+                let _ = io::stdout().flush();
                 eprintln!("{message}");
                 for f in &backtrace {
                     eprintln!("  in {f}");
