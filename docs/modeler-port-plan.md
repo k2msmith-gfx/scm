@@ -196,16 +196,123 @@ and it takes ten minutes and a binary that cannot be rebuilt while it runs
 run, and no cargo build against `target/release/modeler` while a run is in
 flight.
 
+**M2 needs a BRIDGE, and that was not in the first draft of this plan.**
+A prelude file's definitions call each other across files — `09-menus`
+calls `02-scene`'s `tint-warm` — so a file translated to Scheme would
+strand every Janet caller it has, and "divisible by file" would be a lie
+however neatly the files are split.
+
+So `%scm-call` (built 2026-10-19): apply a Scheme procedure to Janet
+values. A moved section lives in `modeler/scripts/scm/`, and what stays in
+the Janet prelude is a one-line shim per name:
+
+```janet
+(defn tint-warm
+  "Tint the pattern warm (sunset amber)."
+  [] (%scm-shim "tint-warm"))
+```
+
+Every caller — the menus, the keymap, the REPL, the agent — is untouched
+and never learns which language answered. The shims come out when the last
+Janet caller does.
+
+**The bridge runs BOTH WAYS, and the second direction is what makes the
+rest of the prelude movable.** `%scm-call` carries a Janet caller into
+Scheme; `(janet "name" args…)` carries a moved section back into
+everything that has not moved — the other prelude files, and every prim
+still written only for Janet. Without it only a LEAF function could move,
+and the prelude has almost none: `02-scene`'s tint commands were leaves and
+they are the exception.
+
+The door resolves a name by evaluating the WRAPPER `(fn [& a] (NAME ;a))`,
+which is the one form that reaches everything the prelude calls. Two
+earlier attempts each missed a kind, and each was found by a test rather
+than by reading:
+
+- `call_hook` refuses a VAR. Half the prelude's cross-section handles are
+  vars — `*undo-clear*`, `*outliner-refresh*`, declared in `00-decls` and
+  bound by a later section — and `janet_resolve` hands a var's REF back,
+  an array and not a function, so it answered *"hook not a function"*.
+- Resolving the bare name and type-checking it refuses a PRIM. A C
+  function is `JANET_CFUNCTION`, not `JANET_FUNCTION`, so every `%`-prim in
+  the binding was unreachable. The async-load test caught it — the only one
+  that drives a moved command whose body calls a prim through this door.
+
+The wrapper costs one eval per call; caching the compiled wrapper per name
+is the obvious step if it ever matters.
+
+**A failure crosses as a VALUE and the shim raises it.** A prim has no way
+to raise in Janet: its only channel is `guarded_cfn`, which reports a Rust
+panic as a DEFECT, and a script error is not one. So `%scm-call` answers a
+TAGGED PAIR — `["%scm-ok" value]` or `["%scm-error" message]` — and
+`%scm-shim` unwraps it. A typo in a moved name raises rather than quietly
+answering nil.
+
+**The tag is not decoration, and the first version got this wrong.** It
+marked a failure with an `"error: "` prefix on the message; the modeler's
+own loader answers `"error: no such file"` as a perfectly good VALUE, so
+`(load-model "/nope.gltf")` raised the summary it was meant to return. A
+marker the callee cannot forge is the only honest one.
+
+**A moved section needs the `scm` feature, and says so where it is called.**
+In a build without it the `%scm-call` fallback answers *"… lives in the
+scheme image, and this modeler was built without the scm feature"*, which
+the shim raises. That is the honest state of a transition: the alternative
+is keeping both implementations, which is the duplication this is meant to
+remove.
+
 **M2 — the prelude moves (1.0).** 892 definitions across 23 files, and the
 division B5 asked for is already there: 22 numbered prelude files in boot
 order, plus `unify.janet` last. A file lands when the harness is green with
 it, so the unit of work and the unit of proof are the same thing.
+
+**The first section is across, 2026-10-19**: `02-scene.janet`'s four tint
+commands, which were the first Janet the modeler ever had and are the M2
+gate's own target — *"redefine a trivial command live and call it, no
+rebuild, the window follows."* They live in
+`modeler/scripts/scm/02-scene.scm`, loaded from disk like the Janet prelude
+beside them, and the Rust test
+`a_moved_prelude_section_answers_through_its_shim` asserts the whole path
+by reading the KERNEL STATE at the end of it — Janet caller, shim,
+`%scm-call`, the Scheme procedure, the `%set-tint` prim — because "the call
+returned nil" is also what a shim forwarding to nothing would say.
 
 A first draft of this document said the layer was one 6,538-line file and
 that M2 would have to divide it first. That was `unify.janet` alone — the
 bridge — and it missed `modeler/scripts/prelude/`, which is three times the
 size and already split. Corrected the same day, before anything was built
 on it.
+
+### Moving a file: the recipe, and what decides the ORDER
+
+Each file is the same five steps, and the harness is the gate after every
+one of them:
+
+1. **Convert the prims it calls** through `prim!` (M1), or leave them to the
+   `janet` door. The door costs a round trip and reads honestly; converting
+   is better where the prim is simple.
+2. **Translate the definitions** into `modeler/scripts/scm/<file>.scm` and
+   add the file to `load_scheme_prelude`'s list, which is ordered because
+   load order is the dependency contract on this side too.
+3. **Replace each Janet body with a shim**, keeping the DOCSTRING in Janet:
+   `(doc load-model)` and the generated manual read Janet's, so a shim with
+   no docstring empties both. The docstrings move with the last file.
+4. **Run the harness**, all 103.
+5. **Push.**
+
+**What decides the order is the shape of the VALUES a file's functions
+return, not its size.** The bridge carries numbers, strings, keywords,
+booleans and lists of those. A function answering a Janet struct — `(perf)`
+hands back `{:phase … :last …}` rows, `(hybrid-state)` a table — would
+reach its Janet callers as something else, so those files wait for the
+bridge to carry dictionaries, which `ApiValue::Map` and scm's association
+lists already have the pieces for.
+
+So the order is: files whose functions return nil, a number or a string
+first; files that return structures after the bridge grows; and files that
+own DATA other sections read — `04-theme`'s `*themes*` table, which
+`(keys *themes*)` reaches directly — last or never, since a moved table is
+not reachable by a Janet caller at all.
 
 **M2a — the sync window becomes dialect-neutral (0.2), and M3 needs it.**
 `%sync-begin`, `%sync-end` and `%sync-abort` are written against the Janet
