@@ -61,6 +61,46 @@ and that is already done on ray's side. Four things stand in the way:
    *"unexpected end of source, ( opened at line 7"*, because `#(0 1 5)`
    was read as a comment.
 
+## 2a. The strategy changed, 2026-10-20 — translate, do not interoperate
+
+Kevin, on seeing M2 measured in sessions rather than hours: *"when we did
+the SBCL lisp port of an earlier version of ray (from rust), the port was
+done in one day and that was the entire renderer, here we are porting janet
+files to scheme which both are lisp dialects. Why is this translation
+process taking so long?"*
+
+The answer is that it was not translation. The Lisp port was a REWRITE with
+no interoperation: read Rust, write Lisp, compare images, one language out
+the other end. What M0–M2 built instead was incremental interoperation —
+every moved function kept working for its Janet callers, in the same
+process, with both VMs loaded. That is where the time went:
+
+- a bridge one way, then the other, then a value door;
+- three resolution failures (vars, prims, a forgeable error marker);
+- a name two VMs both register;
+- a return shape that had to stay nested;
+- feature wiring, because shims in a build with no second VM broke 39 tests.
+
+**None of that is translating Janet into Scheme**, and all of it is deleted
+at M4. The two files that moved took longer to make coexist than to rewrite.
+
+**So the rest of M2 is a wholesale translation on a branch**, the way the
+Lisp port was done: no shims, no doors, no dual registration. The harness is
+the oracle exactly as the rendered image was, and a failure is bisected by
+reverting files rather than by threading another call across a boundary.
+
+What that needs first, and only this:
+
+1. **Every prim reachable from Scheme.** Mechanical, permanent, and the
+   only prerequisite — `prim!` plus the rewriter at
+   `/tmp/convert_prims.py`'s successor.
+2. **The harness's 1,861 Janet forms**, translated in the same sweep or
+   left speaking Janet through a reader kept for them alone.
+
+**What survives from M0–M2** is the permanent half: 248 prims declared once
+for both VMs, the two moved files, and the knowledge in this document. The
+scaffolding goes.
+
 ## 3. The stages
 
 **M0 — the modeler speaks Scheme for SCENES (0.5).** A second `Interp` on
