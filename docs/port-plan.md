@@ -1130,6 +1130,45 @@ vendoring. Decide it in P6 rather than at the merge.
 default feature, run the corpus gate on the scm build, and keep
 `--features janet` building with its tests passing. Exit: the merge.
 
+**P6 as built, 2026-10-19 — the flip and the blocker, with two steps left.**
+
+`default = ["scm"]` in ray's manifest. A bare `cargo build` is the Scheme
+build and produces `ray-scm`; `--no-default-features` is pure Rust;
+`--features janet` is one flag away and green on its own (884 tests) and
+beside the Scheme (901). Counts for the legs are in ray's CLAUDE.md, which
+now spells all seven.
+
+**The flip moved a leg that nobody would have noticed.** `modeler` depended
+on ray with default features, and Cargo unifies features across a workspace
+build — so `cargo test --no-default-features` at the root still compiled
+the Scheme in, because the modeler asked for it. The pure leg reported 681
+where it should report 664. Fixed by `default-features = false` on the
+modeler's dependency, which is also the honest statement: the modeler names
+the scripting layer it wants.
+
+**THE MERGE BLOCKER IS RESOLVED, and the plan's reason for it was wrong.**
+It said the git-dependency option needed "a token or making it public"
+because the scm repository is private. It is not: `k2msmith-gfx/scm` is
+PUBLIC (ray is the private one). So ray now takes `schemers` and `scm-llvm`
+from `https://github.com/k2msmith-gfx/scm.git` with `branch = "main"`, with
+no token, no crates.io release and no vendored copy, and Cargo.lock pins
+the commit. Publishing the crate stays [plan.md](plan.md)'s business and is
+no longer in ray's way.
+
+Developing the two together is a gitignored `.cargo/config.toml` holding a
+`paths` override at the sibling checkout — `paths` rather than `[patch]`
+because a patch is recorded in Cargo.lock and toggling it would never leave
+the working tree clean.
+
+**What is left, and both need Kevin:**
+
+1. **Push scm.** The pinned commit is the last PUSHED one, which predates
+   S11b and the embedding accessor, so a clone of ray today would fetch an
+   scm that cannot compile a closure. Push, then `cargo update -p schemers
+   -p scm-llvm` in ray to move the pin, and verify a clone with no `../scm`
+   beside it builds.
+2. **The merge itself.**
+
 Total: **2.0** after P0's 0.4.
 
 ---
