@@ -154,6 +154,41 @@ harness is the only thing that drives a prim the way a hand does.
 Exit: every prim reachable from both VMs, with a conformance corpus like
 ray's `tests/conformance.jsonl` driving both.
 
+**M1's macro as built, 2026-10-19** (`modeler/src/script/prims.rs`), with
+`text.rs` as the first module through it — ten `%pane-*` prims, one
+declaration each:
+
+```rust
+prim! {
+    /// `(%pane-clear id)` — empty a pane's transcript.
+    "%pane-clear", fn pane_clear(id: num) {
+        crate::textpane::clear(id as u32);
+        Out::Nil
+    }
+}
+```
+
+The body is written against neither VM. The macro puts it in a module named
+after the function and generates the Janet wrapper, the registration and the
+Scheme host function beside it — a module rather than pasted identifiers
+because `guarded_cfn!` takes an IDENT, and inside the module `janet` is one.
+
+Three things that had to be got right, and one that bit:
+
+- **`Out::Nil` is `#f` in Scheme**, not unspecified: scm has no nil, and
+  unspecified is TRUE there. Same rule ray's binding settled on.
+- **Absent arguments read as zero on both sides**, matching `num_arg`'s
+  default, or a prim would behave differently depending on who called it.
+- **A keyword returns through a C string**, as every hand-written keyword
+  return in the binding already does.
+- **The module is `prims`, not `prim`.** Every prim file glob-imports its
+  parent, so a module named `prim` shadows the `prim!` macro — and
+  `#[macro_use]` scoping is textual, so the declaration has to come before
+  every module that uses it.
+
+Proven by calling `%pane-append` from Scheme and counting the row from
+Janet: one body, two callers, one pane.
+
 **The ordering risk, named in advance.** A module converted to the macro
 changes 20-odd Janet-facing functions at once. The harness is the proof,
 and it takes ten minutes and a binary that cannot be rebuilt while it runs
