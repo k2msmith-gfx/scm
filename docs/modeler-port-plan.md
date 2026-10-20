@@ -314,6 +314,26 @@ own DATA other sections read — `04-theme`'s `*themes*` table, which
 `(keys *themes*)` reaches directly — last or never, since a moved table is
 not reachable by a Janet caller at all.
 
+**A NAME IN JANET IS NOT A NAME: two VMs register `%get-camera`.** ray
+registers one for the SCENE camera, the modeler one for the viewport, and
+whichever registers last owns the name. The Janet prelude kept working
+because it compiled against the modeler's binding before the shadowing —
+`(camera)` answered the pose while a fresh `(%get-camera)` from the eval
+channel answered nil, in the same session, and had done so long before the
+port. A moved function resolves at CALL time and got ray's.
+
+So a moved section calls the modeler's prims DIRECTLY, through `prim!`,
+rather than through the `janet` door: installed into the second VM there is
+no name to shadow. The door stays for what has not been converted, and the
+shadowing is one more reason to convert rather than to forward.
+
+**A moved function must keep the SHAPE of what it answers.** Converting
+`%get-camera` first flattened `[eye target fov]` into seven numbers, which
+compiles and breaks the dozen Janet callers that destructure it; `Out::Many`
+exists for exactly that. And `set-camera!`'s refusal of `:up` — *"a
+scene-camera key, use (set-camera …)"* — is not the same as its refusal of
+a typo, which a translation flattened into one message until a test said so.
+
 **M2a — the sync window becomes dialect-neutral (0.2), and M3 needs it.**
 `%sync-begin`, `%sync-end` and `%sync-abort` are written against the Janet
 FFI in `ray/src/scripting/store.rs`, and ray's Janet prelude wraps them as
