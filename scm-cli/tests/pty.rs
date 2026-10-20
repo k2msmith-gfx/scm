@@ -160,11 +160,17 @@ impl Repl {
             }
         }
         let seen = self.seen.lock().unwrap();
-        strip_ansi(&String::from_utf8_lossy(&seen[from..]))
+        String::from_utf8_lossy(&seen[from..]).into_owned()
     }
 
     fn len(&self) -> usize {
         self.seen.lock().unwrap().len()
+    }
+
+    /// The whole transcript as the terminal would be showing it.
+    fn screen(&self) -> Vec<String> {
+        let seen = self.seen.lock().unwrap();
+        Screen::render(&String::from_utf8_lossy(&seen))
     }
 
     /// One entry: the bytes the REPL wrote in answer to this form alone.
@@ -185,80 +191,154 @@ impl Drop for Repl {
     }
 }
 
-/// Enough of a filter to assert on: CSI and OSC sequences out, carriage
-/// returns out. The REPL redraws its line constantly, so the raw bytes
-/// are unreadable in a failure message as well as unmatchable.
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => match chars.next() {
-                // CSI: parameters, then one byte in @-~ ends it.
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('@'..='~').contains(&c) {
-                            break;
+/// What the terminal *shows*, which is not what the REPL wrote.
+///
+/// The first version of this file stripped the escapes and asserted on the
+/// remaining text. That is precisely the wrong model, and it passed on a
+/// bug the user could see: rustyline redraws its prompt with `\r` followed
+/// by erase-to-end-of-line, so an entry's last line is wiped unless it
+/// ended with a newline. Dropping the escapes drops the erase -- the one
+/// sequence that decides whether anything is visible.
+///
+/// So: a cursor, a line buffer, and the four operations that matter --
+/// `\r`, `\n`, backspace, and `ESC[K`. `ESC[<n>C` moves right because the
+/// prompt redraw uses it; every other CSI is ignored, which is right for
+/// the colour and bracketed-paste ones and harmless for the rest.
+#[derive(Default)]
+struct Screen {
+    lines: Vec<String>,
+    row: usize,
+    col: usize,
+}
+
+impl Screen {
+    fn render(bytes: &str) -> Vec<String> {
+        let mut s = Screen::default();
+        let mut chars = bytes.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => match chars.next() {
+                    Some('[') => {
+                        let mut params = String::new();
+                        let mut final_byte = None;
+                        for c in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                final_byte = Some(c);
+                                break;
+                            }
+                            params.push(c);
+                        }
+                        match final_byte {
+                            // Erase from the cursor to the end of the line.
+                            Some('K') if !params.starts_with('?') => s.erase_to_end(),
+                            // Cursor forward, which the redraw uses to put
+                            // the cursor after the prompt.
+                            Some('C') => s.col += params.parse::<usize>().unwrap_or(1),
+                            _ => {}
                         }
                     }
-                }
-                // OSC: ends at BEL or ESC \.
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\x07' {
-                            break;
-                        }
-                        if c == '\x1b' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
+                    // OSC, ended by BEL or ESC \.
+                    Some(']') => {
+                        while let Some(c) = chars.next() {
+                            if c == '\x07' {
+                                break;
+                            }
+                            if c == '\x1b' && chars.peek() == Some(&'\\') {
+                                chars.next();
+                                break;
+                            }
                         }
                     }
+                    _ => {}
+                },
+                '\r' => s.col = 0,
+                '\n' => {
+                    s.row += 1;
+                    s.col = 0;
                 }
-                _ => {}
-            },
-            '\r' => {}
-            c => out.push(c),
+                '\x08' => s.col = s.col.saturating_sub(1),
+                c if c.is_control() => {}
+                c => s.put(c),
+            }
         }
+        s.lines
     }
-    out
+
+    fn line(&mut self) -> &mut String {
+        while self.lines.len() <= self.row {
+            self.lines.push(String::new());
+        }
+        &mut self.lines[self.row]
+    }
+
+    fn put(&mut self, c: char) {
+        let col = self.col;
+        let line = self.line();
+        // Columns are chars here: the REPL writes no wide ones, and a byte
+        // index would split the UTF-8 in the banner's em dash.
+        let mut cs: Vec<char> = line.chars().collect();
+        while cs.len() <= col {
+            cs.push(' ');
+        }
+        cs[col] = c;
+        *line = cs.into_iter().collect();
+        self.col += 1;
+    }
+
+    fn erase_to_end(&mut self) {
+        let col = self.col;
+        let line = self.line();
+        *line = line.chars().take(col).collect();
+    }
 }
 
 /// `hello` is built with `string-append` so that it cannot be confused
 /// with the terminal's echo of the form that produced it: the echo shows
 /// `"he"` and `"llo"`, and only the output is the whole word.
+///
+/// The assert is on the rendered screen, not the byte stream, because
+/// those disagreed on exactly this bug -- see [`Screen`].
 #[test]
-fn display_without_a_newline_reaches_the_terminal_at_once() {
+fn display_without_a_newline_is_visible_on_the_terminal() {
     let mut repl = Repl::start();
 
-    let entry = repl.send("(display (string-append \"he\" \"llo\"))");
+    repl.send("(display (string-append \"he\" \"llo\"))");
+    let screen = repl.screen();
     assert!(
-        entry.contains("hello"),
-        "`display` with no trailing newline printed nothing at the prompt. \
-         It is sitting in stdout's LineWriter: the REPL must flush after \
-         writing an entry's output, because rustyline writes the next \
-         prompt through its own handle. Entry was {entry:?}"
+        screen.iter().any(|l| l.contains("hello")),
+        "`hello` is nowhere on the terminal. Either it was never flushed, or \
+         it was flushed onto the line rustyline then redrew: the prompt redraw \
+         is `\\r` + erase-to-end-of-line, so an entry whose output does not end \
+         in a newline gets wiped. The REPL must end that line itself. \
+         Screen was {screen:#?}"
     );
 
     // The symptom that named the bug: the buffered text came out glued to
     // whatever the next form printed.
-    let entry = repl.send("(+ 1 2)");
-    assert!(entry.contains('3'), "the next form printed no value: {entry:?}");
+    let hellos = repl.screen().iter().filter(|l| l.contains("hello")).count();
+    repl.send("(+ 1 2)");
+    let screen = repl.screen();
     assert!(
-        !entry.contains("hello"),
-        "the previous entry's output arrived an entry late: {entry:?}"
+        screen.iter().any(|l| l.trim() == "3" || l.ends_with('3')),
+        "the next form printed no value: {screen:#?}"
+    );
+    assert_eq!(
+        screen.iter().filter(|l| l.contains("hello")).count(),
+        hellos,
+        "the previous entry's output arrived again, an entry late: {screen:#?}"
     );
 }
 
-/// The failure arm had the same missing flush, and one consequence more:
+/// The failure arm needs the same newline, and has one consequence more:
 /// the message goes to stderr, which is unbuffered, so it could overtake
-/// the output that was produced before it.
+/// the output produced before it.
 ///
 /// Reaching that arm from a terminal goes through the break REPL, because
 /// an uncaught error at a tty breaks rather than returns -- `,abort` is
 /// what turns the break into the `Outcome::Failed` this is about. Note
 /// what the break itself does *not* show: the form's output is still
-/// inside `eval_capturing`'s port while the break prompt is up, so the
-/// assert below is about the abort's entry and not the break's.
+/// inside `eval_capturing`'s port while the break prompt is up, so this
+/// asserts after the abort and not at the break.
 #[test]
 fn output_precedes_the_error_that_followed_it() {
     let mut repl = Repl::start();
@@ -269,16 +349,19 @@ fn output_precedes_the_error_that_followed_it() {
         "expected the break REPL, got {broke:?}"
     );
 
-    let entry = repl.send(",abort");
-    let out = entry
-        .find("out")
-        .unwrap_or_else(|| panic!("the output before the error never printed: {entry:?}"));
-    let err = entry
-        .find("not a pair")
-        .unwrap_or_else(|| panic!("the error message never printed: {entry:?}"));
+    repl.send(",abort");
+    let screen = repl.screen();
+    let out = screen
+        .iter()
+        .position(|l| l.contains("out") && !l.contains("string-append"))
+        .unwrap_or_else(|| panic!("the output before the error is not on screen: {screen:#?}"));
+    let err = screen
+        .iter()
+        .position(|l| l.contains("not a pair") && !l.contains("break:"))
+        .unwrap_or_else(|| panic!("the error message is not on screen: {screen:#?}"));
     assert!(
-        out < err,
+        out <= err,
         "the error reached the terminal before the output that preceded it, \
-         because stderr is unbuffered and stdout was not flushed: {entry:?}"
+         because stderr is unbuffered and stdout was not flushed: {screen:#?}"
     );
 }

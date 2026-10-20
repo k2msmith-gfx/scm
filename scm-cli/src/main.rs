@@ -467,20 +467,14 @@ fn repl(session: Session) -> ExitCode {
         let took = t0.elapsed();
         match outcome {
             Outcome::Value { value, output } => {
-                // Flushed, not left to the next newline: a `display` with no
-                // trailing newline sits in stdout's LineWriter, and the line
-                // editor writes the next prompt through its own handle -- so
-                // the prompt appears and the output surfaces an entry late.
-                print!("{output}");
-                let _ = io::stdout().flush();
+                emit(&output, editor.is_some());
                 if value != "#<unspecified>" {
                     println!("{value}");
                 }
             }
             Outcome::Failed { message, output, backtrace, .. } => {
                 // Before the message, which goes to unbuffered stderr.
-                print!("{output}");
-                let _ = io::stdout().flush();
+                emit(&output, editor.is_some());
                 eprintln!("{message}");
                 for f in &backtrace {
                     eprintln!("  in {f}");
@@ -498,6 +492,27 @@ fn repl(session: Session) -> ExitCode {
         ed.borrow_mut().save();
     }
     ExitCode::SUCCESS
+}
+
+/// An entry's output, written so that it is still there afterwards.
+///
+/// Two separate reasons, both of which cost a bug. Rust's stdout is a
+/// `LineWriter`, so output with no trailing newline is not flushed, and the
+/// line editor writes the next prompt through its own handle -- so without
+/// the flush the text surfaced an entry late, glued to the next result.
+///
+/// And flushing alone is not enough on a terminal: the editor redraws the
+/// prompt with `\r` followed by erase-to-end-of-line, which wipes a final
+/// partial line. `(display "hello")` was flushed, then erased, and looked
+/// exactly as broken as before. So on a terminal the line is ended here.
+/// Piped output is left as it is: nothing redraws over it, and
+/// `scm FILE | scm -e EXPR` should pass the bytes through unchanged.
+fn emit(output: &str, terminal: bool) {
+    print!("{output}");
+    if terminal && !output.is_empty() && !output.ends_with('\n') {
+        println!();
+    }
+    let _ = io::stdout().flush();
 }
 
 fn refresh_names(session: &Rc<RefCell<Session>>, names: &Rc<RefCell<Vec<String>>>) {
