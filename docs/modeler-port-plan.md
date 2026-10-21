@@ -826,6 +826,35 @@ Ordered by how many files each item unblocks. ☐ = open.
       is the drift guard, since it already round-trips both.
 ☐ A3. Migrate the ~64 call sites to the helper. Mechanical.
 
+A1 and A2 are DONE (2026-10-20). The rule: textual twins by
+`janet_to_scheme.py`, committed beside the originals, with the corpus
+driver's round-trip as the check. Eleven of the thirteen ray scenes verify
+IDENTICAL to their Janet originals; `city-block` and `cookbook-fixtures`
+are modeler scenes and verify inside the modeler at A3. Getting there
+found five translation bugs, each silent, each in the compat layer's
+guesses about SHAPE:
+
+- `seq`'s body is a `do` and the LAST form is the element; wrapping the
+  whole body in one `(list …)` gave two elements per iteration.
+- `get` guessed "alist" from a list-of-pairs; a list of POINTS has that
+  shape, and `(poly i)` with an integer is positional. The key's type
+  decides now, and `eachp-of` tests the car for a key the same way.
+- A ray verb answers its dictionary as an ALIST, so a scene that `put`s
+  into a curve value needs `put!` to update an association in place.
+- An ARRAY built with `array/push` is this layer's record, and at the verb
+  boundary a record is `Val::Opaque`; `99-scheme-only.scm` now wraps
+  `%api-call` to unwrap arrays — with a cons walk, because the dictionary
+  it also carries is made of dotted pairs.
+- `(include "x.janet")` must include the TWIN.
+
+**Stiletto is deferred, and the reason is a number: 2 s in Janet, 515 s in
+Scheme.** Its glyph outlines index a list inside a loop over its length,
+and this layer's tuple is a LIST — O(n) to index, so the walk is quadratic
+and `janet-length` re-walks per call. Janet's tuple is O(1). The honest fix
+is translating `[…]` to a VECTOR (every compat accessor already takes one),
+which is a prelude-wide change to make deliberately, not at nine minutes a
+try. It also still fails after the wait, on an `array-items` of a list.
+
 **B. Booleans print as `#t`/`#f` — 36 files compare a reply to the text
 `true`/`false`.**
 ☐ B1. One helper in `modeler_client`: `truthy(reply)`, which reads `true`,
