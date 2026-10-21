@@ -1040,6 +1040,50 @@ A–C, 24 before), 42 real, 8 timeouts, 7 absent, 5 dialect; the Janet gate
 rule: a procedure reaches a plain `define_fn` host function as
 `Val::Opaque` — only `define_fn_with` is handed a `Proc`.
 
+**I — the timeouts, and three more rules (2026-10-20, later).** Six of
+the eight timeouts were not hangs: a wait loop reading Janet's spelling of
+"nothing came back" — `val(…) in ("nil", "")` — never sees `#f`, so it
+waits out its own deadline (`Modeler.nilish`, a migrator pass). The rest
+of what the timeouts hid:
+
+- **A string is its bytes.** `(each c src …)`, `(src i)`, `(get src i)`
+  all answer a byte in Janet; the compat layer answered a char and the
+  editor's span scanner compared `#\(` to 34, so no editor send authored
+  anything (tree_live, live_coding).
+- **A body is sequential.** `(f) (def n (count)) (use n)` counts AFTER the
+  call in Janet; scm hoists an internal `define` to the top of its body, so
+  `history-read` counted the shapes before evaluating the form that built
+  them and every scene had "no stages". `seq_body` wraps a body from its
+  first define-after-an-expression in `(let () …)`, as a post-walk over
+  every lambda, function define and let in the output (`fix_bodies`) —
+  the `eachp` rule builds lambdas `r_fn` never sees.
+- **`(eval f)` with one argument is not the live top level** in scm;
+  Janet's is. `janet-eval` evaluates in `(interaction-environment)`.
+- **`parse-all` answers an ARRAY**, as Janet's does: a list of forms whose
+  first car is a symbol reads as an alist to `eachp-of`.
+- **A procedure reaches a `define_fn` host function as `Val::Opaque`**;
+  only `define_fn_with` is handed a `Proc`. The closure prims are host-aware.
+- **A rest-bag shim** (`(add-point-light . args)`) carries keyword pairs as
+  given, so `:name #f` from a caller whose own `name` was absent needs the
+  nil reading inside the bag (`%rest-absent-as-nil`, in place — never
+  dropped).
+- `unify.janet` is a prelude file beside `prelude/`, and the scene-mode
+  rule is "outside modeler/scripts", not "outside prelude/".
+- Two timeouts are not the port's: `test_scene_load_camera` loads stiletto
+  (1.1 M interpreted texels, the jit case), and `test_agent_mcp` waits on
+  the MCP server's own round trip.
+
+**An scm GC panic, found by the history tool.** With `eachp-of` reading
+arrays, `history-read` stages doric-column (7 of 48 forms), the tool arms,
+`history-shots` renders frame 00 — and the `on-render-done` hook then
+raises `the interpreter panicked: gc: a root points at free slot 3931`,
+which poisons the image for the rest of the test. That is a Track A defect
+(a `Rooted` outliving its slot across a render that completes from the
+event loop), to reproduce in scm with the modeler's shape: a global set to
+a closure from inside a `dynamic-wind`, a render that completes later, a
+hook that calls the closure. `test_history_tool` stays a timeout until it
+is found.
+
 **Known and left: nil versus false at a keyword parameter.** `(set-toolbox
 :auto-hide false …)` and `(set-toolbox …)` both hand the prelude `#f`, and
 its `(if (nil? auto-hide) 1 …)` reads the explicit false as "not given" —
