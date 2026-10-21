@@ -575,3 +575,56 @@ fn a_long_list_reaches_a_host_function_whole() {
     let cyclic = i.eval("(let ([x (list 1 2)]) (set-cdr! (cdr x) x) x)").unwrap();
     assert_eq!(i.value(&cyclic).unwrap(), Val::Opaque);
 }
+
+#[test]
+fn a_callback_stored_by_a_host_function_that_then_reenters_survives() {
+    // THE MODELER'S SHAPE (ray's modeler-port-plan §2o). A host function is
+    // handed a procedure, keeps it, and then calls back into Scheme before
+    // returning — arming a tool echoes its prompt line, which dispatches
+    // through the prelude. The capture outlives that re-entry and is called
+    // later, from the event loop. The panic to prevent is
+    // "gc: a root points at free slot".
+    let mut i = Interp::new().unwrap();
+    let kept: std::rc::Rc<std::cell::RefCell<Option<Proc>>> = Default::default();
+    let slot = kept.clone();
+    i.define_fn_with("arm", move |host, args| {
+        let [Val::Proc(f)] = args else { return Err("expects a procedure".into()) };
+        *slot.borrow_mut() = Some(f.clone());
+        // …and now dispatch back into Scheme, allocating enough to collect.
+        host.eval("(let loop ((i 0) (acc '())) (if (= i 20000) (length acc) (loop (+ i 1) (cons (make-vector 3 i) acc))))")?;
+        Ok(Val::Unspecified)
+    })
+    .unwrap();
+    i.eval("(let ((n 0)) (arm (lambda (x) (set! n (+ n x)) n)))").unwrap();
+    i.eval("(let loop ((i 0) (acc '())) (if (= i 20000) (length acc) (loop (+ i 1) (cons (make-vector 3 i) acc))))")
+        .unwrap();
+    let f = kept.borrow().clone().unwrap();
+    assert_eq!(i.call(&f, &[Val::Int(5)]).unwrap(), Val::Int(5));
+
+    // …and the lifecycle that found it: arm, replace (dropping the previous
+    // procedure's root), churn, arm again. The modeler does this once per
+    // tool use and panicked on the fifth.
+    for n in 0..8 {
+        i.eval(&format!("(let ((n {n})) (arm (lambda (x) (+ n x))))")).unwrap();
+        i.eval("(let loop ((i 0) (acc '())) (if (= i 5000) (length acc) (loop (+ i 1) (cons (make-vector 3 i) acc))))")
+            .unwrap();
+        let f = kept.borrow().clone().unwrap();
+        assert_eq!(i.call(&f, &[Val::Int(1)]).unwrap(), Val::Int(n + 1), "round {n}");
+    }
+
+    // AND FIRED FROM INSIDE ANOTHER HOST FUNCTION, which is where the
+    // modeler fires it: a click arrives through a prim, and the tool calls
+    // the capture's closure through that prim's own `Host`.
+    let slot2 = kept.clone();
+    i.define_fn_with("tick", move |host, _args| {
+        host.eval("(let loop ((i 0) (acc '())) (if (= i 5000) (length acc) (loop (+ i 1) (cons (make-vector 3 i) acc))))")?;
+        let f = slot2.borrow().clone().ok_or("nothing armed")?;
+        host.call(&f, &[Val::Int(2)])
+    })
+    .unwrap();
+    for n in 0..8 {
+        i.eval(&format!("(let ((n {n})) (arm (lambda (x) (+ n x))))")).unwrap();
+        let v = i.eval("(tick)").unwrap();
+        assert_eq!(i.value(&v).unwrap(), Val::Int(n + 2), "fired from a host call, round {n}");
+    }
+}

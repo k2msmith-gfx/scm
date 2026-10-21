@@ -709,15 +709,24 @@ impl Interp {
             open: true,
         });
         // Root it: the eval below will collect, and the only other reference
-        // is the parameter slot, which is not a root.
+        // is the parameter slot.
         let keep = self.vm.engine.root(port);
+        // AND ROOT THE ONE IT DISPLACES, the same reason read the other way
+        // round: the old port's only reference was the slot this is about to
+        // overwrite, so from here to the write-back nothing holds it but a
+        // Rust local, which the collector cannot see. ray's modeler ran for
+        // a day on a `current-output-port` that named a freed slot, and then
+        // a list allocated over it (modeler-port-plan §2o);
+        // `capturing_output_roots_the_port_it_displaces` is the test.
         let saved = self.vm.param_value(slot);
+        let keep_saved = self.vm.engine.root(saved);
         self.vm.set_param_value(slot, port);
         let out = match source {
             Some(name) => self.eval_named(src, name),
             None => self.eval(src),
         };
         self.vm.set_param_value(slot, saved);
+        self.vm.engine.unroot(keep_saved);
         let text = match port {
             Value::Obj(r) => match self.vm.engine.obj(r) {
                 Obj::Port {

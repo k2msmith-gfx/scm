@@ -778,7 +778,25 @@ impl Engine {
                 // A root pointing at a free slot is a rooting bug, and it is
                 // far better to hear about it here than to watch a reused slot
                 // be mistaken for the object that used to be there.
-                Slot::Free { .. } => panic!("gc: a root points at free slot {i}"),
+                //
+                // WHICH ROOT, though: the answer decides where to look, and
+                // the three seeds come from different owners — the VM's own
+                // stack, the host's handle table, and a macro's definition
+                // environment. Searching them costs nothing until the panic
+                // fires, and the first time it did (ray's modeler, the
+                // modeler-port-plan §2o defect) a day went into guessing.
+                Slot::Free { .. } => panic!(
+                    "gc: a {} points at free slot {i}",
+                    if roots.contains(&v) {
+                        "vm root"
+                    } else if self.handles.iter().flatten().any(|&h| h == v) {
+                        "host handle"
+                    } else if self.aliases.values().any(|&(_, e)| e.map(Value::Obj) == Some(v)) {
+                        "macro environment"
+                    } else {
+                        "reference reached from a root"
+                    }
+                ),
                 Slot::Used(obj) => match obj {
                     Obj::Pair(a, d) => {
                         visited += 2;
@@ -950,6 +968,29 @@ impl Engine {
     }
 
     // ---- handles --------------------------------------------------------
+
+    /// Is this reference's slot still in use? For the root audits.
+    pub fn slot_is_live(&self, r: ObjRef) -> bool {
+        matches!(self.slots.get(r.0 as usize), Some(Slot::Used(_)))
+    }
+
+    /// Which group of a labelled root set holds a reference to a free slot,
+    /// panicking with its name. The VM calls this under `SCM_ROOT_AUDIT`;
+    /// see `Vm::collect` for why the plain panic cannot say.
+    pub fn audit_roots(&self, roots: &[Value], groups: &[(&str, usize)]) {
+        for (i, v) in roots.iter().enumerate() {
+            let Value::Obj(r) = v else { continue };
+            if matches!(self.slots.get(r.0 as usize), Some(Slot::Free { .. }) | None) {
+                let who = groups
+                    .iter()
+                    .rev()
+                    .find(|(_, start)| *start <= i)
+                    .map(|(name, _)| *name)
+                    .unwrap_or("an unlabelled root");
+                panic!("gc: {who} points at free slot {} (root {i} of {})", r.0, roots.len());
+            }
+        }
+    }
 
     /// Root a value. It stays live until [`Engine::unroot`]. This is what the
     /// embedding API (S7) gets built out of, and what the VM uses for source

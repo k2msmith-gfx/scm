@@ -843,6 +843,18 @@ impl Vm {
     }
 
     pub fn set_param_value(&mut self, slot: usize, v: Value) {
+        // CATCH THE WRITE, not the next collection: a parameter set to an
+        // already-freed object is a host path that held a raw `Value`
+        // across an evaluation, and a backtrace from here names it, where
+        // the collection's panic comes later and names nothing. In a debug
+        // build this guards every test in the suite, which is a better net
+        // than any single test; in release it costs an env lookup.
+        if (cfg!(debug_assertions) || std::env::var_os("SCM_ROOT_AUDIT").is_some())
+            && let Value::Obj(r) = v
+            && !self.engine.slot_is_live(r)
+        {
+            panic!("set_param_value: slot {slot} would hold free slot {}", r.0);
+        }
         self.param_values[slot] = v;
     }
 
@@ -1300,6 +1312,10 @@ impl Vm {
         self.break_base = base;
         let out_slot = self.param_slot("current-output-port");
         let saved_port = out_slot.map(|s| self.param_value(s));
+        // Rooted across the handler for the reason `Interp::eval_capturing`
+        // roots its own: the handler evaluates, the slot no longer refers to
+        // the port this is holding, and a Rust local is not a root.
+        let keep = saved_port.map(|p| self.engine.root(p));
         if let Some(s) = out_slot {
             let stdout = self.engine.port(crate::heap::PortKind::Stdout);
             self.set_param_value(s, stdout);
@@ -1308,9 +1324,38 @@ impl Vm {
         if let (Some(s), Some(p)) = (out_slot, saved_port) {
             self.set_param_value(s, p);
         }
+        if let Some(h) = keep {
+            self.engine.unroot(h);
+        }
         self.break_base = saved_base;
         self.break_handler = Some(handler);
         Some(action)
+    }
+
+    /// Under `SCM_ROOT_AUDIT`: a parameter whose current value is a freed
+    /// object, named. The slot alone is not enough to act on — the name is
+    /// what says which host path wrote it.
+    fn audit_params(&self) {
+        for (slot, v) in self.param_values.iter().enumerate() {
+            let Value::Obj(r) = v else { continue };
+            if !self.engine.slot_is_live(*r) {
+                let name = self
+                    .globals
+                    .iter()
+                    .enumerate()
+                    .find_map(|(sym, g)| match g {
+                        Some(Value::Obj(p)) => match self.engine.obj(*p) {
+                            Obj::Parameter { slot: s, .. } if *s == slot => {
+                                Some(self.engine.interner.sym_name(SymId(sym as u32)).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "(an unnamed parameter)".to_string());
+                panic!("gc: parameter {name} (slot {slot}) holds free slot {}", r.0);
+            }
+        }
     }
 
     fn param_slot(&self, name: &str) -> Option<usize> {
@@ -1562,18 +1607,44 @@ impl Vm {
         self.expansion_cache.clear();
         self.lambda_cache.clear();
         let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() * 2 + 8);
+        // WHERE EACH GROUP STARTS, for the audit below: a stale root says
+        // which of the VM's holdings is missing a trace, and that is the
+        // whole of the question when one turns up.
+        let mut groups: Vec<(&str, usize)> = Vec::new();
+        let mark = |groups: &mut Vec<(&str, usize)>, name, roots: &Vec<Value>| {
+            groups.push((name, roots.len()));
+        };
+        mark(&mut groups, "the step in flight", &roots);
         step.trace(&mut roots);
         // Held by the Vm, so it is a root like any other -- missing this is
         // the `macro_roots` bug again, and gc stress would find it.
+        mark(&mut groups, "current_call", &roots);
         roots.push(self.current_call);
+        mark(&mut groups, "a control-stack frame", &roots);
         for frame in &self.stack {
             frame.trace(&mut roots);
         }
+        mark(&mut groups, "the value stack", &roots);
         roots.extend(self.vstack.iter().copied());
+        mark(&mut groups, "a global", &roots);
         roots.extend(self.globals.iter().flatten().copied());
+        mark(&mut groups, "a macro", &roots);
         self.macro_roots(&mut roots);
-        self.param_roots(&mut roots);
+        mark(&mut groups, "a parameter's current value", &roots);
+        roots.extend(self.param_values.iter().copied());
+        mark(&mut groups, "a parameter's saved value", &roots);
+        roots.extend(self.param_bindings.iter().map(|(_, v)| *v));
+        mark(&mut groups, "a library", &roots);
         self.library_roots(&mut roots);
+        // `SCM_ROOT_AUDIT=1` names the group a stale root is in, which is
+        // the one thing the panic in `Engine::collect` cannot say — it sees
+        // a flat slice. Off by default because it is O(roots) per
+        // collection; on, it turns "a vm root points at free slot 3931"
+        // into the name of the field that forgot to trace itself.
+        if std::env::var_os("SCM_ROOT_AUDIT").is_some() {
+            self.audit_params();
+            self.engine.audit_roots(&roots, &groups);
+        }
         self.engine.collect(&roots);
     }
 

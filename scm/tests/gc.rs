@@ -359,3 +359,36 @@ fn the_heap_cap_collects_before_it_complains() {
         .unwrap_err();
     assert!(matches!(err, VmError::OutOfMemory), "{err:?}");
 }
+
+/// Capturing output must root the port it DISPLACES, not only the one it
+/// installs.
+///
+/// `eval_capturing` saved `current-output-port`, put its own string port in
+/// the slot, evaluated, and wrote the saved one back. While the eval ran,
+/// the displaced port's only reference WAS that slot — so a collection
+/// inside the eval freed it, and the write-back put a dangling value into
+/// `param_values`, which is a root. The next collection panics on it: "gc:
+/// a parameter's current value points at free slot".
+///
+/// ray's modeler found it (modeler-port-plan §2o) and it took a day,
+/// because every eval the modeler's channel runs is captured and only a
+/// long enough one collects inside the window. Hence the size of the
+/// program below: the collection has to land between the save and the
+/// write-back, which is what makes this deterministic rather than lucky.
+#[test]
+fn capturing_output_roots_the_port_it_displaces() {
+    let mut i = scm::Interp::new().expect("an interpreter");
+    // Enough allocation that the threshold triggers collections INSIDE the
+    // captured eval. Stress is not used: it collects before the port
+    // becomes garbage, which is the one timing that hides this.
+    let (out, text) = i.eval_capturing(
+        "(begin (display \"captured\")\n           (let loop ((n 0) (acc '()))\n             (if (= n 60000) (length acc) (loop (+ n 1) (cons (list n n n) acc)))))",
+    );
+    out.expect("the captured eval runs");
+    assert_eq!(text, "captured", "and its output went to the capture port");
+    // The displaced port is back in the slot. If it was freed while the
+    // slot pointed elsewhere, this collection finds a root on a free slot.
+    i.vm_mut().collect_now();
+    // …and it is still a usable port, not a reused slot.
+    i.eval("(display \"after\")").expect("the restored port still works");
+}
