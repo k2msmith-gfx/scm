@@ -933,6 +933,32 @@ Scheme camera path re-applies render settings; and `measure-lines` applies
 a world point (`not applicable: (0.0 -9.57 -17.6)`) somewhere under
 `measure-drawing`, after the `mapcat` fix let it get that far.
 
+### The twins spell a tuple `[…]`, 2026-10-20
+
+Kevin asked why a twin said `(set-camera :at (list 1.70 1.42 2.95) …)`.
+There was no reason: the translator was written for the PRELUDE, where the
+compat layer's tuple is a list so that `car`/`append`/`apply` and the
+pattern walks read as Scheme, and the twins reused it unchanged. In a
+scene the bracket is right — scm reads `[…]` as a vector that EVALUATES
+its elements (Track B S1), the verbs take one, ray's Scheme manual writes
+it, and it indexes in O(1). So `janet_to_scheme.py` has a scene mode
+(decided by path: anything outside `modeler/scripts/prelude`), the writer
+prints a bracket form with brackets, a twin is written BESIDE its
+original, and `scripts/dev/scm_twins.py` is the drift guard A2 asked for:
+Janet's round trip of the original against scm's of the twin, with the
+compat layer in front. Eleven of twelve verify (the same eleven); the
+first run found that `translate(path, fns)` REPLACED a scene's own `defn`s
+with the prelude's set, so `(rib 1)` had become `(nth rib 1)` — two twins
+failed with `+: not a number: #f` before that line was a union.
+
+**Stiletto is not a tuple problem.** With vectors it still runs past 240 s,
+and the source says why: four `make-texture` calls — 704×832, 320×1024,
+256×512, 256×256, about 1.1 M texels — each texel an interpreted Scheme
+closure doing glyph tests. That is P5's compiled-texels case exactly
+(`--features jit`), which is in no leg on purpose; `scm_twins.py` reports
+it as a timeout rather than failing the guard, and the jit build is the
+way to verify it.
+
 **D. Janet's `match` — 4 files** (eval_adds_object, group_objects,
 outliner, scene_editor).
 ☐ D1. Read the four usages. If they are the simple shapes (a keyword or a
