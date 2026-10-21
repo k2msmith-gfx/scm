@@ -1073,6 +1073,10 @@ of what the timeouts hid:
   (1.1 M interpreted texels, the jit case), and `test_agent_mcp` waits on
   the MCP server's own round trip.
 
+**Measured after I: 63 of 117 pass** (55 before it, 38 after A–C, 24 at
+§2m), 41 real, 6 absent, 5 dialect, 2 timeouts — and the two left are the
+two that are not the port's. Nothing regressed; the pass set is 63 files.
+
 **An scm GC panic, found by the history tool.** With `eachp-of` reading
 arrays, `history-read` stages doric-column (7 of 48 forms), the tool arms,
 `history-shots` renders frame 00 — and the `on-render-done` hook then
@@ -1135,11 +1139,27 @@ tree_live.
       time so far (§2i, §2k); these need the same look.
 
 **J. The gate itself.**
-☐ J1. Five self-asserting tests print no `RESULT:` line and are uncounted:
-      test_transform_roundtrip, test_editor_help_menu, test_editor_send_menu,
-      test_help_editor, test_image_markdown_view. Add the line; see what the
-      Janet count becomes before trusting it.
-☐ J2. `test_chair.py` calls `%update-material`, which exists in neither
+J1 is DONE (2026-10-21), and the warning was the right one: the five got
+their `RESULT:` line, the gate went 105 files to 110, and THREE of the five
+failed on Janet the moment they were counted — all stale expectations
+against features that had grown underneath them.
+
+- `test_editor_help_menu` asserted "menu has 5 items"; Copy and Paste were
+  appended to the editor menu later. What it means is that the four sends
+  and view help are the first five sectors, which is what it checks now.
+- `test_editor_send_menu` compared the armed pie to a printed vector of
+  exactly those five labels, and `(*editor-menu*)` to `""` for "no menu" —
+  it prints `nil` (and `#f` under Scheme), which is `Modeler.nilish`.
+- `test_image_markdown_view` asserted `"# ray" not in reading`, and the
+  fixture is the repo's own CLAUDE.md: `cargo test   # ray + scm` is a
+  shell comment inside a code fence, which the reading view leaves alone,
+  correctly. A heading mark is at a LINE START.
+
+None of the three was a port defect, and none would have been found
+without the line. 110/110 on Janet after the fixes.
+
+☐ J2.
+`test_chair.py` calls `%update-material`, which exists in neither
       dialect; the Janet run tolerates the error. Remove or replace it.
 
 **K. Two names of ray's own prelude residue** (§2h).
