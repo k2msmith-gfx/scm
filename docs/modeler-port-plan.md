@@ -959,6 +959,94 @@ closure doing glyph tests. That is P5's compiled-texels case exactly
 it as a timeout rather than failing the guard, and the jit build is the
 way to verify it.
 
+## 2n. D–K, 2026-10-20 — the second pile, and what it was made of
+
+With A–C's shared causes gone the next full run read 38 pass, 47 "real",
+and the real pile turned out to have shared causes of its own. Each was
+found by one probe against a Scheme modeler with its log open, and each
+unblocked a handful of files:
+
+- **`((options-state) :param)` and `(rim :id)` never reached the migrator**
+  — the FORM regex matched only `ev(`/`m.eval(` literals, and a per-file
+  `check(label, form, want)` helper, `num(`, `drawn(` send forms too. Now
+  any string literal whose first character is `(` is a sent form.
+- **`vadd`/`vsub` in the camera bridge used `list-ref`**, and a test sends
+  `[0 1 0]`, a vector. `vref` reads either.
+- **A macro body is a body.** `when-let` expanded to `(begin body …)`, and
+  scm hoists a `define` under `begin` to the enclosing lambda — so a nested
+  `(do (def h …))` inside `gizmo-press`'s `when-let` shadowed the `h` the
+  `when-let` bound, before it was initialised. The compat macros expand to
+  `(let () body …)`, and the TRANSLATOR emits `(let () …)` for any
+  `do`/`when`/`unless` block holding a `def` (`block`). No press had grabbed
+  a handle under Scheme until then.
+- **The prelude's own `dict` shadowed the compat layer's.** The Janet
+  `dict` is identity (Janet's table is already what a prim reads); its
+  translation loaded after 00-janet-compat.scm, and `%xf-arm` got a hash
+  table — "a table is needed" — so no drag moved anything. The translator
+  keeps a `COMPAT_OWNS` set (`dict`, `eval-file`, `eval-in-env`) and leaves
+  a marker where the prelude defines one.
+- **`set` answers its value in Janet**; `set!` answers nothing. `(or
+  *comp-origin* (set *comp-origin* …))` handed `unspecified` to `vsub`. The
+  translator emits `(begin (set! x v) x)`.
+- **A string indexes to its byte**: `(<= 48 (key 0) 57)` is how the
+  numeric-transform handler asks "is this a digit"; compat `nth` answered #f
+  and every typed number raised. Also missing: `not=`, `all`, `mod`, the
+  `print` family.
+- **A parameter shadows the closed world** (§2m C); and `compat_names` read
+  a `syntax-rules` template's `(define n e)` as a definition of `n`.
+- **The verb shim's vector is positional**, and an absent `&opt`/`&named`
+  parameter crossed as `#f` where Janet's shim sends `nil` — `(revolve c)`
+  refused its own default tolerance ("must be a number, got false"). The
+  shim wraps those parameters in `%absent-as-nil`, which turns `#f` into
+  `unspecified`, which `to_api` already reads as `Nil`; a `Bool` parameter
+  keeps its `#f`. (A first attempt filtered `:key #f` pairs out of the
+  vector, which ate a keyword-VALUED parameter followed by an absent one:
+  `(add-curve c :name :c)` came back as `curve-0`.)
+- **An array at the PRIM boundary reads as nothing.** The embed `Val` has
+  no record variant, so a `<janet-array>` handed to a `textv`/`nums`/`api`
+  parameter was empty: `%set-toolbox` drew a palette of blank buttons.
+  `prim!` records every installed name, `(%prim-names)` lists them, and
+  99-scheme-only wraps each once so its arguments go through `unarray`.
+  `(%show v)` does the same for what the eval channel PRINTS — the channel
+  wraps a non-defining form in it, so an array answers as its items and a
+  table as its alist instead of `#<<janet-array>>`.
+- **The harness's Scheme over the prelude's arrays**: `(map f *handlers*)`,
+  `(length arr)`, `(apply max arr)` are the SAME name in both dialects, so
+  the migrator cannot respell them. 99-scheme-only redefines `map`,
+  `for-each`, `apply`, `length`, `reverse` to read any sequence through
+  `to-list` — captured idempotently, and with their rest arguments taken
+  through `to-list` too, because a rest parameter is a VECTOR in this scm
+  (`ray-scm` on disk was older and said list; probe the binary you run).
+- **D — `match`**: one site in the prelude (13-outliner), flat tuple
+  patterns `[:kw a b]`; the translator's `r_match` writes the `cond` with
+  `janet=` on the head and `nth` binds. outliner and eval_adds_object pass.
+- **E — the closure prims**: `tools::pick` and `tools::script_tool` keep a
+  `Callback` — a rooted Janet function or a Scheme `Proc` — and fire it
+  through `scheme::call_proc` (the parked host inside a prim, the session
+  otherwise). `%pick-arm`/`%tool-arm-script` have Scheme twins.
+- **F — the eval path**: `with-dyns` is a compat macro (`:out`/`:err`
+  capture the body's printing into the buffer; other keys `setdyn` and
+  restore), `eval-in-env`/`eval-string` read the string's forms in order,
+  `debug/stacktrace` of a Janet fiber translates to `#f` (the guard's
+  message is already in the buffer), `help` reads `%verb-doc` for a ray
+  verb and scm's `doc` for the image's own definitions.
+- **K — `origin-form`** reads `%origin-source` (the record's Scheme spelling
+  now) with the material substituted; `%object-parent` and
+  `%transform-object` have Scheme twins.
+
+**Measured after D–K: 55 of 117 pass on the Scheme prelude** (38 after
+A–C, 24 before), 42 real, 8 timeouts, 7 absent, 5 dialect; the Janet gate
+105/105; the pass set is 55 files. The closure prims then found one more
+rule: a procedure reaches a plain `define_fn` host function as
+`Val::Opaque` — only `define_fn_with` is handed a `Proc`.
+
+**Known and left: nil versus false at a keyword parameter.** `(set-toolbox
+:auto-hide false …)` and `(set-toolbox …)` both hand the prelude `#f`, and
+its `(if (nil? auto-hide) 1 …)` reads the explicit false as "not given" —
+the palette auto-hides, and `test_toolbox`'s panel rect is #f. The value
+rule (nil IS #f) is right for the image; this one shape wants the Janet
+source to spell its default differently, not the port to grow a nil.
+
 **D. Janet's `match` — 4 files** (eval_adds_object, group_objects,
 outliner, scene_editor).
 ☐ D1. Read the four usages. If they are the simple shapes (a keyword or a
