@@ -800,3 +800,110 @@ a figure already reported:
   failure. The runner waits for the port, and a collision is its own class.
 - **An absent name must look like an identifier.** `unbound variable:
   0xff00ff` came out of a test's own output and read as a missing prim.
+
+## 2m. Before M4 — the list
+
+M4 makes Janet optional, and the harness is the only thing that drives a
+modal drag, a wheel detent or the options ladder. So "before M4" means: the
+harness green against `MODELER_PRELUDE=scheme`, as it is against Janet. 24
+of 117 pass today; 90 fail; 3 time out. The 90 were grouped by cause, and
+**three causes account for most of them** — a file is usually in more than
+one group.
+
+Ordered by how many files each item unblocks. ☐ = open.
+
+**A. The Janet scene files — 64 of the 90 failing files reference one.**
+☐ A1. Decide the rule: a Scheme-prelude modeler cannot evaluate a `.janet`
+      scene (`eval-string` refuses, on purpose, in 99-scheme-only.scm). The
+      harness loads `examples/*.janet` and its own `.janet` fixtures
+      everywhere. The honest answer is `.scm` TWINS of every scene the
+      harness loads, produced the way P4's corpus driver already produces
+      them — load in Janet, `save-scene` as `.scm` — and a test that picks
+      the twin by `Modeler.prelude()`. Not a per-test edit: one helper,
+      `scene_path("examples/x")`, that answers `.janet` or `.scm`.
+☐ A2. Generate the twins (a script under `scripts/dev/`), commit them beside
+      the originals, and keep them in step: the corpus driver's comparison
+      is the drift guard, since it already round-trips both.
+☐ A3. Migrate the ~64 call sites to the helper. Mechanical.
+
+**B. Booleans print as `#t`/`#f` — 36 files compare a reply to the text
+`true`/`false`.**
+☐ B1. One helper in `modeler_client`: `truthy(reply)`, which reads `true`,
+      `#t` and a non-nil value the same way, and `falsy` for `false`/`#f`/
+      `nil`. A COMPARISON helper, not a translation: the reply is what the
+      modeler said, and the test is asking a yes/no question of it.
+☐ B2. Migrate the 36 comparisons. Mechanical, and the same shape each time.
+
+**C. A function's own parameters are not in the migrator's closed world —
+39 files send a `fn`/`defn` whose body indexes a parameter.**
+☐ C1. `harness_migrate.py`: `bound_names` must include the parameters of
+      every `fn`, `defn`, `each` and `seq` in the sent forms, not only
+      `def`/`let` bindings. `(defn %pc [nm] (reduce (fn [a r] (if (= (r 0)
+      nm) (r 4) a)) …))` indexes `r`, which is bound by the lambda.
+☐ C2. Re-run the migrator; re-gate on Janet (it must stay 105/105).
+
+**D. Janet's `match` — 4 files** (eval_adds_object, group_objects,
+outliner, scene_editor).
+☐ D1. Read the four usages. If they are the simple shapes (a keyword or a
+      literal per arm), a `match` macro in the compat layer covers them —
+      scm's `syntax-rules` matches vector patterns and the dispatch can be
+      `janet=` at run time, as `case` already is.
+
+**E. The two closure-taking prims — 3 files** (arc_tool, curve_degree,
+curve_tool).
+☐ E1. Decide what a scm `Proc` means to the tool layer: `%pick-arm` and
+      `%tool-arm-script` take Janet closures and hand them to `tools/pick.rs`
+      and `tools/script_tool.rs`, which call them later, from the kernel,
+      possibly after the eval that made them has returned. A `Proc` is
+      rooted while a clone exists (`scm::Proc`), so the shape is storable;
+      the question is which image's prelude the callback runs in, and the
+      answer under a Scheme prelude is the Scheme session through `Host`.
+☐ E2. Convert the two prims; the `layering.rs` hatches stay by name.
+
+**F. The eval path — 4 files** (agent_during_render, ai_catalog_modes,
+history_tool, help_editor).
+☐ F1. The hand port §2c named: `with-dyns`, `parse-all`, `help`,
+      `debug/stacktrace`, and the agent sandbox (`table/setproto`). These are
+      Janet's REPL machinery; the Scheme side of each is `%scm-eval`'s job in
+      Rust, and `(help …)` wants the manual's text from the registry rather
+      than an environment walk.
+
+**G. Boot-time replay — 3 files** (toolbox, toolbox_sides, ui_config):
+"the prelude installs :default", "the booted palette reads back as data".
+☐ G1. Diagnose: 18-ui-config replays the saved toolbox over what every file
+      above defines, and the Scheme boot order or the session file's dialect
+      differs. Likely the `MODELER_SESSION_FILE` is Janet source.
+
+**H. The `.rec` recording format — 1 file** (recorder).
+☐ H1. A recording is written as Janet source (`@{:version 1 …}`) and read
+      with whichever reader owns the prelude. Decide the format for M4 —
+      the Scheme spelling, or a dialect-neutral one — and write both.
+
+**I. The three timeouts** (agent_mcp, render_film, render_out) and
+tree_live.
+☐ I1. Run each alone with the modeler log open. A hang with no output under
+      the Scheme prelude has been a double borrow or a self-recursion every
+      time so far (§2i, §2k); these need the same look.
+
+**J. The gate itself.**
+☐ J1. Five self-asserting tests print no `RESULT:` line and are uncounted:
+      test_transform_roundtrip, test_editor_help_menu, test_editor_send_menu,
+      test_help_editor, test_image_markdown_view. Add the line; see what the
+      Janet count becomes before trusting it.
+☐ J2. `test_chair.py` calls `%update-material`, which exists in neither
+      dialect; the Janet run tolerates the error. Remove or replace it.
+
+**K. Two names of ray's own prelude residue** (§2h).
+☐ K1. `origin-form` — answers the recorded call AS DATA; needs a Form→Val
+      conversion that does not exist yet (`%rerun-form` covers the rebuild).
+☐ K2. `record-origin` — a thin wrapper over an installed prim; unported
+      only because nothing has asked.
+
+**L. Whatever the measurement says after A–C.** Those three remove the
+causes shared across files; what is left is per-test, and
+`scripts/dev/harness_scheme.py` names the file and the first failing line
+for each. Expect the "real" pile to shrink to the genuinely behavioural.
+
+**Then M4**: `janet` stops implying `scm`, the 21 `janet` cfg sites answer
+to the binding that is present, `--features scm` alone builds a modeler
+with no Janet in it, and Janet still builds (§7 of the port plan).
