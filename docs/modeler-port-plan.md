@@ -1073,6 +1073,15 @@ of what the timeouts hid:
   (1.1 M interpreted texels, the jit case), and `test_agent_mcp` waits on
   the MCP server's own round trip.
 
+**Measured after the GC fix: 68 of 117** — `test_curve_degree`, and nothing
+lost. One revert came with it: `%rest-absent-as-nil` (§2n) turned `:key #f`
+inside a REST BAG into absence, and `in_a_bag_false_is_a_value_but_not_an_
+argument` forbids exactly that — `(add-sphere-mesh … :smooth #f)` means
+flat facets and a promoted `#f` rounds a model off silently. A bag's
+contents are the author's. The one call that needed it, `add-light`
+forwarding a nil `:name`, omits the key at the call site, which is the same
+call in both languages.
+
 **Measured after J and the manual family: 67 of 117 pass** (63 after I,
 55, 38, 24 at §2m), 38 real, 6 dialect, 3 absent, 3 timeouts; the Janet
 gate is 110/110 — five files more than it was, because J1 added the
