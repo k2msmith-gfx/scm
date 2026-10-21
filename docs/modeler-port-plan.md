@@ -409,3 +409,394 @@ difference is the harness, which that line did not count.
 - **The Scheme scanner is a variant, not a rewrite.** One scanner with a
   dialect argument, so a fix to the paren logic cannot land in one and not
   the other.
+
+## 2b. The translation, 2026-10-20 — all 22 files, 13,133 lines
+
+`scripts/dev/janet_to_scheme.py` now translates every prelude file, and the
+concatenation of `00-janet-compat.scm` plus all 22 in boot order EVALUATES in
+`ray-scm` with nothing left unresolved but prims the modeler has not
+converted yet (`%add-pane`, `%set-pane-home`, `%set-pane-ortho`,
+`%pane-anchor`, `%pane-append`, `%clear-status-toggles`, `%set-toolbox`,
+`%op-list`, `%tool-desc`, `%scm-call`) and `curenv`, which is a DESIGN
+question and not a missing function (§2c).
+
+The translator reports nothing it could not decide. What it took to get
+there, because each of these was a silent wrong answer rather than an error:
+
+- **Janet's data structures are callable.** `(t :group)` is an index and
+  `(set-theme :one-dark)` is a call, and the source does not say which. The
+  decision is the closed world: every `defn` across all 22 files is
+  collected first, every `%name` is a prim, and a one-argument call on
+  anything else with a LITERAL key is an index. 390 sites, listed in
+  `modeler/scripts/scm/INDEXED.txt`, which is there to be read.
+- **`=` is arithmetic in Scheme and polymorphic in Janet.** `(= kind "3d")`
+  raises under `=`; `(= n 2)` is quietly FALSE under `equal?`, because every
+  Janet number is a float. A literal picks the word and everything else goes
+  through `janet=`, which dispatches.
+- **`case` matches with `eqv?`**, which is false for two equal strings — and
+  the prelude dispatches on strings a prim answered. Every arm fell to the
+  default: def-tool reported that each of its nine ops was "not a selection
+  tool". `case` becomes a `cond` over `janet=`.
+- **`(string :extrude)` is `"extrude"`, not `":extrude"`.** The colon
+  belongs to the readable spelling (`%v`, `%j`), not to `(string x)`. With
+  the colon, def-tool could not find a single kernel op.
+- **Patterns are everywhere and Scheme has none**: `(def [w h] …)`,
+  `(each [k f] …)`, `(when-let [[id kind] …] …)`, `(defn f [[nm kind]] …)`,
+  `(seq [[px py] :in …] …)`. All flat, all positional, all through `nth` —
+  and `fit` where `define-values` needs a fixed arity, since `(def [on]
+  (%get-grid))` names one of four.
+- **`break` cannot be a macro**, because a `%break` the macro introduced is
+  invisible to the body that has to call it (hygiene). The translator names
+  the escape continuation itself.
+- **The short-fn reader was collapsing only atoms.** `|(= ($ 0) base)` left
+  the lambda bodyless and spliced its body in beside it, so `(filter |… xs)`
+  became a three-argument filter. One line, and it had been wrong since the
+  reader was written.
+- **The one `defmacro` is procedural** — `def-tool` reads `(%op-list)` and
+  the Rust descriptor at expansion time — so `syntax-rules` cannot hold it.
+  It becomes a FUNCTION whose template goes through `(eval … 
+  (interaction-environment))`: the nine tools are defined when the file
+  runs instead of when it is read, and nothing expands def-tool earlier.
+
+## 2c. What is left, and it is not translation
+
+- **`curenv`, 32 sites.** Janet environment reflection: `(get-in (curenv)
+  ['%object-parent :value])` asks "is this prim present", and 00-decls and
+  15-boot-audit walk the whole environment. Scheme's answer is a bound?
+  predicate over `(interaction-environment)`, which is a prim to write, not
+  a name to rename.
+- **`os/stat`, `os/dir`, `os/date`, `os/time`, `os/clock`, `os/mkdir`,
+  `os/rename`, `os/cwd`.** R7RS has `file-exists?`, `delete-file` and the
+  port procedures, which covered `slurp`/`spit`; the rest wants a small
+  `%os-*` prim family.
+- **The eval path in 01-repl-eval and 08-editor** — `with-dyns`,
+  `eval-in-env`, `parser/*`, `debug/stacktrace` — is Janet's REPL machinery,
+  and the Scheme side of it is `%scm-eval`'s job in Rust. Those sites are a
+  HAND port, not a mechanical one, and they are the only ones.
+
+## 2d. M2c done, 2026-10-20 — the kernel calls the Scheme prelude
+
+`MODELER_PRELUDE=scheme` boots the modeler on its translated prelude: all 23
+files plus the unification bridge, ray's prelude re-installed over them, and
+every kernel hook, dispatch and REPL form routed to the Scheme session.
+Janet remains the default. `modeler/tools/test_scheme_prelude.py` drives
+that modeler through authoring from both sides of the bridge, selection, the
+outliner, a theme slot, the pane registry and a key through the hook path —
+13 checks, and it is in the harness count (104 now).
+
+**The three value rules, which are the whole lesson of this stage.** Each
+was silent, and each broke something that looked like it worked:
+
+1. **nil IS `#f` in Scheme**, so a prim that answers `false` to mean one
+   thing and nil to mean another has one answer, not two. `%tool-desc` said
+   `false` for "this tool writes its own interactive verb" and nil for "take
+   the default"; the interactive half of nine tools was never defined.
+2. **`when` and `unless` ARE VALUES in Janet** and answer nil when the test
+   fails — Scheme answers `unspecified`, which is TRUE. `add-sphere` is
+   `(unless (authoring-locked?) …)` over a lock that is `(when (live-active?)
+   …)`, so with nothing live every authoring verb refused and the scene
+   stayed empty with nothing raised anywhere.
+3. **A `def` that rebinds a parameter is an assignment.** Janet's body `def`
+   shadows sequentially; Scheme's internal define is `letrec*`, where the
+   initialiser sees the new binding, so `(def who (or who "object"))` leaves
+   `who` unbound in its own definition. 40 sites.
+
+A fourth, of the same family: **`break` is an early RETURN as often as a
+loop exit**, and `(unless (outliner-visible?) (break))` is the prelude's
+`return`.
+
+**381 of 385 prims cross.** `%undo-push` went after all, because `ApiValue`
+NESTS — the array-of-arrays shape `prim!` will not carry is ordinary
+structure in ray's own value model, which both VMs already convert. The four
+left are `%tool-arm-script` and `%pick-arm` (they take CLOSURES and hand
+them to the tool layer; what a scm `Proc` means to a tool that outlives the
+call is a design question), `%get-repl-src` (Janet's own REPL C glue), and
+nothing else.
+
+**Nine ray prims gained Scheme twins** — `%shape-keys`, `%light-keys`,
+`%lights`, `%get-film`, `%get-integrator`, `%entry-size`, `%origin-state`,
+`%mat-literal`, `%sync-open?` — and `follow-curves` is now in ray's Scheme
+prelude, written as Scheme rather than translated. That is the pattern for
+the rest of ray's Janet-prelude residue: a reader over the one store belongs
+in Rust once, and prose logic belongs in whichever prelude asks for it.
+
+## 2e. M3, sized — the harness
+
+`python3 scripts/dev/harness_dialect.py`:
+
+```
+1775 eval forms, 1536 read in both dialects
+why the rest do not: bracket 128, atoms 80, vocab 62, shortfn 19, …
+59 of 117 test files have NO Janet-only form.
+```
+
+So **87% of the forms are already portable** and the Janet-only ones cluster
+in a dozen files. But that is only half of M3: the harness also compares
+PRINTED output, and Janet prints an array as `@["a" "b"]` where Scheme
+prints a list as `("a" "b")`. `test_options_ladder` caught exactly that
+during M1 and is the reason `Out::Arr` exists. So a migrated test file is one
+whose forms AND expectations have moved, and the honest estimate stands at
+the plan's 0.5.
+
+A whole-harness run under `MODELER_PRELUDE=scheme` fails early and often
+today, and that is expected rather than informative: the forms are Janet.
+The order to migrate in is the 59 files with no Janet-only form first.
+
+## 2f. What is left after M2c, by name
+
+Three probes keep the answer honest, and each is a script rather than a
+memory:
+
+```
+python3 scripts/dev/harness_dialect.py           # M3's size
+MODELER_PRELUDE=scheme … prim_gaps.py            # prims the sources name
+MODELER_PRELUDE=scheme … name_gaps.py            # every name they call
+```
+
+(The last two live in the session scratchpad; they are ten lines each and
+the pattern is in §2f's own numbers — read every `(name` out of
+`modeler/scripts/scm/*.scm`, ask the image `(procedure? name)`.)
+
+**1. ray's JANET prelude has a residue the Scheme prelude lacks**, and it is
+exactly ten names: `snapshot`, `group-objects`, `ungroup-object`,
+`origin-form`, `record-origin`, `sync-begin`, `sync-end`, `fnum`,
+`to-world`, `view-help`. They are prelude LOGIC over prims, not verbs, so
+P1's 183 shims never covered them. Three groups:
+
+- `snapshot` and `fnum` are one-liners over things the Scheme image has
+  (`save-scene` / `scene-source`, and the `%fnum` prim).
+- `sync-begin`/`sync-end`/`sync-abort` need their prims installed for
+  Scheme, and the sweep logic inside `sync_end` belongs in `scene_store`
+  first — the lift P3 did six times, for the same reason.
+- `group-objects`/`ungroup-object`/`origin-form`/`record-origin` carry
+  `*group-parts*` and the material-literal spelling with them; they are the
+  real port of that file's second half.
+
+`follow-curves` and `*scene-file*` already crossed this way, and the pattern
+held both times: a reader over the one store goes into Rust once and both
+images call it; prose logic is written as Scheme in ray's prelude rather
+than translated from Janet.
+
+**2. Four prims stay hand-written** (§2d), and only two of them are a design
+question: a Janet closure handed to the tool layer has no scm counterpart
+yet.
+
+**3. The compat layer's remaining shape** is the three eval-path families —
+`parser/*`, `with-dyns`/`eval-string`/`debug/stacktrace`, and the agent's
+sandbox (`table/setproto`) — plus the `os/*` family, which wants a small
+`%os-*` prim set. Everything else the prelude calls is defined: the type
+tests, the sequence shapes, `dyn`/`setdyn`, `flatten`, `partition`.
+
+## 2g. The residue, half crossed — and the next hang
+
+Of §2f's ten ray-prelude names, four crossed: `snapshot` and `fnum` are
+one-liners over `save-scene`/`scene-source` and the `%fnum` prim, and
+`sync-begin`/`sync-end`/`sync-abort` went the way P3's six went — the sweep
+lifted into `scene_store` (`sync_begin`/`sync_end`/`sync_abort`), the Janet
+prim reduced to a call, and a Scheme prim beside it. The six left are
+`group-objects`, `ungroup-object`, `origin-form`, `record-origin`,
+`to-world` and `view-help`, and the first four carry `*group-parts*` and
+the material-literal spelling with them.
+
+**The next thing a Scheme-prelude modeler hangs on is `open-scene`**, and it
+is the re-entrancy trap rather than a missing name: the prelude's
+`open-scene` reaches a .scm file through `%scm-load`, which is the Janet→
+Scheme door — so under a Scheme prelude it asks the session to load a file
+while the session is already borrowed, and the main thread stops with no
+panic and no output. The fix is in the eval-path hand port (§2c): with the
+prelude in Scheme, `open-scene` evaluates the file directly and `%scm-load`
+goes back to being what it is, a door for Janet.
+
+`test_save_load` is where that shows, and `os/stat` (the `%os-*` family,
+§2f.3) is what `toggle-scene-editor` wants two lines later.
+
+## 2h. Grouping crossed, and the residue is two
+
+`group-objects` and `ungroup-object` are in ray's Scheme prelude, over five
+new Scheme prims (`%group-objects`, `%ungroup-object`,
+`%capture-group-parts`, `%compose-group-origin`, `%restore-group-origins`,
+`%forget-origin`). The handoff between capture and compose — a thread-local
+that has to STRADDLE the grouping, because a member's state and matrix are
+unreadable once it is folded in — moved from the Janet prim module into
+`snapshot.rs`, since a `--features scm` build has no `scripting::store` to
+keep it in. Measured in ray-scm and in a Scheme-prelude modeler: two spheres
+group to one entry and come back as two.
+
+`*group-parts*` is an ALIST there rather than a table: ray's Scheme prelude
+imports nothing (it is embedded and loads before any library), the thing
+holds one entry per group a session makes by hand, and the operations are
+remember and take.
+
+**The residue is now two names**: `origin-form` and `record-origin`.
+`origin-form` is the interesting one — it answers the recorded call AS DATA,
+which needs a `Form`→`Val` conversion that does not exist yet (`%rerun-form`
+covers "rebuild it", which is most of what the modeler wants, and it is
+already installed). `record-origin` is a thin wrapper over a prim that is
+installed; it is unported only because nothing has asked for it yet.
+
+## 2i. Re-entering the session, and what the 59 measured
+
+**A prim that dispatches back into the prelude is the shape M2c had left
+broken.** `%route-escape` answers whether `(on-escape)` said true, the drag
+seams call `on-release`, and `tools::to_janet` is written that way
+throughout — so under a Scheme prelude those dispatches re-enter the
+session, a second `with_session` is a double borrow, and scm reports it as
+"the host function panicked", because from the outside that is what a panic
+inside a host function is.
+
+The fix is the `Host` every host function is already handed: `prim!` now
+installs through `define_fn_with` and parks that host in a thread-local for
+the length of its own body, and `scheme::call`, `eval_quiet` and
+`eval_to_triple` take it when it is there. The invariant is narrow — set for
+one call, cleared on the way out, and the `&mut` it came from is dormant
+while the body runs, because the body is our own Rust.
+
+**Then the 59 "portable" harness files were run against the Scheme
+prelude**, which is the measurement §2e asked for. None passed, and the
+reasons sort into four piles:
+
+- 12 send `(def …)` or `(set …)` — Janet's binding forms, in the TEST.
+- 8 hit one translation bug, now fixed: Janet's `map` and `filter` answer
+  ARRAYS where this layer answers lists, so `(array/concat (map …) …)` was
+  handed a list to grow. `janet-concat` and `array-slice` take any
+  indexable now, as Janet's own do.
+- 5 are "incomplete input" — bracket literals and short fns in the test.
+- 2 were the re-entrancy panic above; 2 index a table with a variable key
+  that the closed-world rule could not prove; 2 call `length` on a string.
+
+So the remaining work really is M3, and `test_theme.py` shows the shape it
+should take wherever it fits: the forms are the same datum in both
+languages, so the file names its ONE difference (the formatter) at the top
+and runs against either prelude. `Modeler.require_prelude(which)` is there
+for the files where that does not fit.
+
+## 2j. The callable data structure, decided at run time
+
+The closed-world rule proves 377 index sites and leaves 54 it cannot: a name
+the prelude does not define as a function, with a key that is not a literal,
+is `(xs i)` over a list as often as it is a higher-order call. Guessing
+either way is wrong somewhere.
+
+So those sites go to `janet-index`, which decides the way Janet decides — at
+RUN time, on what it was handed: `(if (procedure? f) (f k) (get f k))`. The
+provable sites still read as `(get *edit* :text)`, because that is what a
+reader wants to see and the proof is what makes it honest.
+
+Two heads must never take that path, and both bit: **`quote`**, written out
+in `def-tool`'s template as `(quote ,cmd)`, and **a PEG grammar**, whose
+heads are `*`, `<-`, `any`, `if-not`, `set` and `to` — a grammar is DATA and
+has to cross untouched. `NEVER_INDEX` names them.
+
+**With that, the prelude side of the Scheme run is clean.** The 59 portable
+harness files, run again: 1 passes (the migrated `test_theme`) and all 58
+failures are now the TEST's own Janet — `(def …)`, `(try …)`, `true`,
+`string/join`, `[0 1 0]`, and `((options-state) :camera)`, which in Scheme is
+`(get (options-state) :camera)`. Nothing left in that pile belongs to the
+prelude, the compat layer or the prims.
+
+## 2k. The harness sends Janet, and the client translates it
+
+M3 does not need 1,775 forms rewritten by hand. The harness keeps sending
+Janet, and `modeler_client` translates each form on the way out when the
+modeler's prelude is Scheme — through `scripts/dev/janet_to_scheme.py`, the
+same code that produced the prelude the modeler is running. It needs the
+whole vocabulary to do it: with only the builtins, `(tessellate! :b)` reads
+as a table index and becomes `(get tessellate! :b)`.
+
+Two guards earn their place:
+
+- **A form already written in Scheme crosses untouched.** `#` begins a
+  comment in Janet, so `#(0 1 0)` takes the rest of the line with it and the
+  form arrives unbalanced — which the modeler waits for more input on and
+  the test reads as `[no reply]`. A hang, from a reader.
+- **The paren count is the proof.** A form the reader mis-takes comes out
+  short, and a short form blocks the channel rather than failing, so an
+  unbalanced translation is thrown away and the original goes instead.
+
+What the client cannot do is move a test's EXPECTATIONS: Janet prints an
+array as `@["a"]` where Scheme prints a list as `("a")`. Those are per file.
+
+### And a warning, earned
+
+**A Scheme-prelude harness run can WRITE TO THE REPO.** `save-scene` refuses
+to overwrite a hand-written scene file, and the refusal read the file's
+first 400 bytes with `file/open` — which the Scheme image does not have, so
+the `try` around it answered "cannot read", which the guard takes as
+permission. `test_save_guard` then overwrote
+`examples/modeler/city-block.janet` with its own snapshot, 233 lines to 4,
+and three Janet tests failed on the next run for a reason that had nothing
+to do with the code they were testing.
+
+The guard asks `file-head` now, which each image defines its own way (the
+`dict` / `load-scene-source` pattern), and a Scheme-prelude run refuses as
+it should. The lesson generalises: a guard that depends on a Janet function
+inside a `try` is not a guard in the other image, and `git status` belongs
+in the loop when running the harness against a half-ported prelude.
+
+### Where M3 stands, measured
+
+The 59 portable files against the Scheme prelude, with the client
+translating: **2 pass**, and of the 57 failures **24 still name something**
+(a handful of Janet words the compat layer has since gained — `distinct`,
+`+=`, `table`, `identity` — plus `match`, `parse-all` and `fiber/new`, which
+belong to the eval-path hand port) while **33 are expectation mismatches**:
+`@["a"]` against `("a")`, a count, a printed table. Those are the per-file
+work M3 is, and the number to watch.
+
+## 2l. Where M3 landed, and what the rest of it belongs to
+
+**24 of 117 harness files pass against the Scheme prelude**, from 1 when the
+stage began. The work that got there was not 1,775 form rewrites:
+
+1. **The compat layer defines the Janet SPELLINGS** — the names and the
+   bracket-bound syntax (`def`, `set`, `fn`, `defn`, `try`, `each`, `seq`,
+   `loop`, `do`, `if-not`, plus `string/*`, `array/*`, `math/*`, `os/*`,
+   `true`/`false`/`nil`). A test's form is read by the modeler's own reader
+   and evaluated by its own evaluator; only the image knows more names. That
+   is categorically unlike the client-side translation this stage began with
+   and removed, where the modeler never saw what the test wrote.
+2. **`scripts/dev/harness_migrate.py` migrated 300-odd forms** whose spelling
+   has a bilingual form, so every file stays in BOTH gates:
+   `(*panes* :editor)` → `(get …)`, `|(…)` → `(fn [$] …)`, `(let [a 1] …)` →
+   `(do (def a 1) …)`, `0xff00ff` → decimal, `{:glyph …}` → `(struct …)`.
+3. **One number rule for the image.** A verb answered `1` and a prim
+   answered `1.0`; `scheme::number_val` is now shared by both.
+4. **Thirteen more prims crossed** — the `%os-*` family, the store readers
+   (`%get-film`, `%get-denoise`, `%get-tone-map`, `%get-environment`,
+   `%entry-size`, `%origin-state`, `%mat-literal`, `%sync-*`,
+   `%object-transform`) and the grouping six.
+
+**What is left is not M3's to finish**, and the measurement says so:
+
+- **~50 behavioural differences.** Each needs its own diagnosis — a count,
+  a geometry value, a refusal that reads differently. This IS the remaining
+  substance of M3 and it is per-test work with no leverage left in it.
+- **The eval path** (`match`, `with-dyns`, `parse-all`, `help`,
+  `debug/stacktrace`): §2c named it a HAND port before this stage started,
+  and four test files wait on it.
+- **`%pick-arm` and `%tool-arm-script`** (3 files): the two prims that take
+  Janet CLOSURES and hand them to the tool layer. What a scm `Proc` means to
+  a tool that outlives the call is a design question, not a shape — §2d.
+- **The `.rec` file format.** `test_recorder` writes a recording as Janet
+  source (`@{:version 1 …}`) and the recorder reads it with whichever
+  reader owns the prelude. A format that is one dialect's source is an M4
+  decision, not a test edit.
+
+### Two instruments, and what they cost to trust
+
+`scripts/dev/harness_scheme.py` classifies each file's failure. Three
+corrections before its numbers were worth quoting, and each had invalidated
+a figure already reported:
+
+- **A `RESULT:` line is what puts a file in the gate.** `run_all.py`
+  collects only the files that print one, so judging by that string called a
+  passing file a failure. It reads the exit code now. (The same audit found
+  the gate was 104 of 117 files: twelve print no such line, seven of which
+  are inspection scripts with no assertions, and five of which — including
+  `test_theme` — genuinely self-assert and were silently uncounted.)
+- **The port-squatter trap**, which `docs/modeler-screenshot-testing`
+  records and this stage walked into anyway: 102 of 117 files had failed
+  with "port 4008 is already in use", and every one was reported as a real
+  failure. The runner waits for the port, and a collision is its own class.
+- **An absent name must look like an identifier.** `unbound variable:
+  0xff00ff` came out of a test's own output and read as a missing prim.
