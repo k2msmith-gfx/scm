@@ -855,6 +855,19 @@ is translating `[…]` to a VECTOR (every compat accessor already takes one),
 which is a prelude-wide change to make deliberately, not at nine minutes a
 try. It also still fails after the wait, on an `array-items` of a list.
 
+A3 is DONE (2026-10-20), and it is a migrator PASS, not an edit: a scene
+path in a test — `SCENE = "examples/x.janet"`, `(open-scene "…")`,
+`(eval-string (slurp "…"))`, a `/tmp/….janet` a test saves to — goes
+through `Modeler.scene_path`, which answers the twin under the Scheme
+prelude and the path itself under Janet. 45 sites in 32 files. A test that
+AUTHORS a scene inline (six of them) calls `Modeler.scene_fixture(path,
+janet_text)`, which writes the Janet and, under Scheme, the twin beside it
+through the same translator. Two things the twins needed that the harness
+found and the corpus could not: the CLI and C-o routed only `.janet` to
+`open-scene` (a `.scm` boot model went to `load-model`), and `eval-string`
+refused every string rather than reading Scheme — it now evaluates the
+forms of its string in order.
+
 **B. Booleans print as `#t`/`#f` — 36 files compare a reply to the text
 `true`/`false`.**
 ☐ B1. One helper in `modeler_client`: `truthy(reply)`, which reads `true`,
@@ -863,6 +876,18 @@ try. It also still fails after the wait, on an `array-items` of a list.
       modeler said, and the test is asking a yes/no question of it.
 ☐ B2. Migrate the 36 comparisons. Mechanical, and the same shape each time.
 
+B is DONE (2026-10-20). `Modeler.truthy`/`falsy` read `true`/`#t`/a
+value and `false`/`#f`/`nil`; the migrator's boolean pass rewrites `X ==
+"nil"`, `X != "nil"`, `X == "true"`, `X == "false"` and `"true" in X` for
+X a name or a call — 70 sites in 54 files — and patches the ten per-file
+`check` helpers that tested `want in got`. The first version matched a
+call's argument with a lazy `[^)]*`, which stopped at the `)` inside
+`"(picking?)"` and mangled the one site it reached; the matcher is now a
+balanced walk that respects string literals (`call_span`). A second
+version then re-rewrote the patched helpers' own `want == "true"` on the
+next run — a pass has to be idempotent, since the migrator runs to a
+fixpoint, and the helper's `want` is a word, not a reply.
+
 **C. A function's own parameters are not in the migrator's closed world —
 39 files send a `fn`/`defn` whose body indexes a parameter.**
 ☐ C1. `harness_migrate.py`: `bound_names` must include the parameters of
@@ -870,6 +895,43 @@ try. It also still fails after the wait, on an `array-items` of a list.
       `def`/`let` bindings. `(defn %pc [nm] (reduce (fn [a r] (if (= (r 0)
       nm) (r 4) a)) …))` indexes `r`, which is bound by the lambda.
 ☐ C2. Re-run the migrator; re-gate on Janet (it must stay 105/105).
+
+C is DONE (2026-10-20): `bound_names` reads the parameter vector of every
+`fn`/`defn`/`each`/`seq`/`loop` in the sent forms; 10 more forms
+rewrote. The same closed-world gap was in the TRANSLATOR, twice, and the
+harness found both: a local `(defn at [i] …)` in 17-reference made `at` a
+function everywhere, so `(drawing-point pane at)`'s `(at 0)` stayed a call
+and Scheme refused to apply a vector — a parameter now shadows the function
+set in its body; and `compat_names` read a `syntax-rules` template's
+`(define n e)` as a definition of `n`, so every local `n` was a function
+too — it reads top-level defines only now.
+
+Two more migrator passes came out of the same run, both bilingual:
+`(f a ;(g))` → `(apply f a (g))` (Janet's `apply` takes leading
+arguments; a splice INTO A BRACKET, `[;vz :-z]`, has no spelling both
+dialects read and is left alone), and `(= x y)` with no numeric literal →
+`(deep= x y)`, since Scheme's `=` refuses a string; the compat layer's
+`deep=` is `janet=` now, so 1 and 1.0 still agree as they do in Janet.
+
+The compat gaps the twins and the sent vectors found: `mapcat` walked its
+collection with Scheme's `map` (a sent `[[…]]` is a vector); `mod` was
+missing (city-block uses it twelve times).
+
+**Measured after A–C: 38 of 117 pass on the Scheme prelude (24 before),
+47 real, 18 absent, 8 timeouts, 4 dialect, 2 printed; the Janet gate is
+105/105.** The 14 new passes are the hybrid/display family and the scene
+round trips (`save_load`, `delete_after_open`, `isoparms`, `light_glyphs`,
+`nurbs_kind`…), which the twins unblocked. The pass set
+(`modeler/tools/scheme-pass-set.txt`) is 39 files now — see `scripts/dev/harness_touched.py` for the
+per-change loop that replaced re-running everything: touched files in
+both dialects, `--pass-set` for the Scheme regression set, full gates at
+a stage end.
+
+Two per-file findings worth a line before L: `(%get-denoise)` reads `#f`
+after a scene whose LAST form is `set-camera`, and 1 without it — the
+Scheme camera path re-applies render settings; and `measure-lines` applies
+a world point (`not applicable: (0.0 -9.57 -17.6)`) somewhere under
+`measure-drawing`, after the `mapcat` fix let it get that far.
 
 **D. Janet's `match` — 4 files** (eval_adds_object, group_objects,
 outliner, scene_editor).
