@@ -1073,20 +1073,91 @@ of what the timeouts hid:
   (1.1 M interpreted texels, the jit case), and `test_agent_mcp` waits on
   the MCP server's own round trip.
 
+**Measured after J and the manual family: 67 of 117 pass** (63 after I,
+55, 38, 24 at §2m), 38 real, 6 dialect, 3 absent, 3 timeouts; the Janet
+gate is 110/110 — five files more than it was, because J1 added the
+`RESULT:` line they were missing. The pass set is 67 files.
+
 **Measured after I: 63 of 117 pass** (55 before it, 38 after A–C, 24 at
 §2m), 41 real, 6 absent, 5 dialect, 2 timeouts — and the two left are the
 two that are not the port's. Nothing regressed; the pass set is 63 files.
+
+## 2o. The in-image manual, and the one defect that is not the port's
+
+**The manual family (F's last piece).** ray's `(api)`/`(apropos)`/`(help)`/
+`(view-help)` and the agent's three projections live in `scripts/help.janet`
+and build their index by walking the Janet environment for a `:category`
+stamp. None of that is translated, and none of it needs to be: in this
+image the REGISTRY is the stamp. `%verb-index` answers every verb as
+`(name category summary)` — the summary derived by the same rule
+`api-summary` uses, so the two images' index lines read alike — `%verb-doc`
+adds the `(defined in …)` footer from the registry's own grouping, scm
+answers its globals (`(apropos)` with no argument is `global_names`) and
+their docstrings (`doc`), and `*help-display*` is the hook the modeler
+already binds for the editor's reading view. `api`, `api-display-taxonomy`,
+`api-prompt`, `api-brief`, `api-names`, `view-help` and `all-bindings` are
+in 99-scheme-only.scm; `help`/`view-help` are MACROS, as ray's are, because
+a bare verb name is how anyone asks.
+
+The catalog needed one more thing: **the vocabulary baseline is taken
+before the modeler's layer**, which is where `script::boot` takes Janet's.
+Snapshotted in pure Scheme (`(define %vocab-baseline-names (apropos))`)
+because the compat layer that spells a table is one of the files about to
+load; 99-scheme-only turns the names into the table `api-catalog` asks.
+Taken after the prelude instead, everything is baseline and the catalog is
+empty — which is what it was.
+
+**`string/find` is a BINDING OF ITS OWN.** The compat layer aliases the
+Janet spellings (`(define string/find string-find)`), and an alias holds
+the closure that existed when it was written: rebinding `string-find` to a
+fast version left every `string/find` caller — which is the harness and
+most of the prelude — on the slow one. The agent catalog's exhaustive walk
+took 31 s and the eval channel's read timed out; with both spellings
+rebound to a host search it is 0.3 s, and a 344 KB scan went 5.5 s to
+0.1 s. Two rules out of one bug: rebind the alias too, and a 25 M-iteration
+character loop belongs in a host function.
+
+**And the host search answers CHARACTER indices**, not bytes, because
+`substring`/`string-ref`/`string-slice` in this layer count characters. The
+first version answered bytes and `(string/slice s 12543 12622)` walked off
+the end of a 12 586-character buffer — one em dash in a comment. The same
+mistake, made twice in an hour: `length` on a string was byte-based for a
+while for the same "Janet counts bytes" reason, and it broke the same way.
+ONE UNIT FOR THE WHOLE LAYER, and it is the one the operations use. Where a
+test compared a buffer to a file's byte count it now asks the image for
+both lengths, which is the comparison it meant.
+
+**A host function that re-enters must park its Host** — `prim!` does it and
+my two hand-written closure prims did not, so arming a capture (which
+echoes its prompt line, which dispatches back into the prelude) reached for
+the session while the session was borrowed: "the host function `%pick-arm`
+panicked".
 
 **An scm GC panic, found by the history tool.** With `eachp-of` reading
 arrays, `history-read` stages doric-column (7 of 48 forms), the tool arms,
 `history-shots` renders frame 00 — and the `on-render-done` hook then
 raises `the interpreter panicked: gc: a root points at free slot 3931`,
-which poisons the image for the rest of the test. That is a Track A defect
-(a `Rooted` outliving its slot across a render that completes from the
-event loop), to reproduce in scm with the modeler's shape: a global set to
-a closure from inside a `dynamic-wind`, a render that completes later, a
-hook that calls the closure. `test_history_tool` stays a timeout until it
-is found.
+which poisons the image for the rest of the test. **It has a second reproduction now**, and the
+two together say more than either: arming the curve tool panics the same
+way (`[pick] curve-tool: the interpreter panicked: gc: a root points at
+free slot 3931`), and that path holds a `scm::Proc` — the capture's `then`
+closure — across a re-entrant call that echoes through the prelude.
+
+So the shape is: a host function is called with a `Val::Proc` among its
+arguments, it re-enters the interpreter (through the parked `Host`), and a
+collection during that re-entry frees the slot the argument's root points
+at. The embed API's contract is that a `Proc` is rooted while a clone
+exists, so either the host call's arguments are not in the root set during
+a re-entrant call, or the root table is not traced from there. Track A,
+with a minimal reproduction to write — and it has to be a RUST test, not a
+Scheme script: the same shape in pure Scheme (a global set to a closure, a
+long allocation, then a call) is fine, because nothing there crosses the
+host boundary. `define_fn_with` taking a procedure, calling back into
+Scheme through the `Host`, allocating enough to collect, then calling the
+procedure.
+
+It blocks `test_history_tool` and `test_curve_degree`, and anything else
+that hands a closure to a prim and then lets the event loop run.
 
 **Known and left: nil versus false at a keyword parameter.** `(set-toolbox
 :auto-hide false …)` and `(set-toolbox …)` both hand the prelude `#f`, and
