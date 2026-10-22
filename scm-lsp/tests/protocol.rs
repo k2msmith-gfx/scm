@@ -226,6 +226,18 @@ fn the_outline_is_the_files_definitions() {
     assert_eq!(syms[2]["kind"], 23);
     // The selection range is the name, on its own line.
     assert_eq!(syms[1]["selectionRange"]["start"]["line"], 1);
+
+    // The record's constructor and predicate are findable, but **nested**
+    // under the type rather than flattened beside it: they have to exist
+    // for go-to-definition, and six flat entries for one declaration is
+    // not the shape of the file.
+    let kids: Vec<&str> = syms[2]["children"]
+        .as_array()
+        .expect("the record type has children")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert_eq!(kids, vec!["make-point", "point?"]);
 }
 
 #[test]
@@ -454,4 +466,177 @@ fn a_server_that_goes_away_falls_back_instead_of_dying() {
         labels.iter().any(|l| l == "vector-ref"),
         "no fallback after the server went: {labels:?}"
     );
+}
+
+// --- go-to-definition across the workspace --------------------------------
+
+/// A little project on disk, since the index reads files rather than being
+/// told about them.
+fn project(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("scm-lsp-ws-{name}"));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    for (path, text) in files {
+        let full = root.join(path);
+        if let Some(dir) = full.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(full, text).unwrap();
+    }
+    root
+}
+
+impl Lsp {
+    /// A server that has indexed a workspace root.
+    fn start_in(root: &std::path::Path) -> Lsp {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_scm-lsp"))
+            .args(["--addr", "127.0.0.1:1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn scm-lsp");
+        let stdin = child.stdin.take().unwrap();
+        let out = BufReader::new(child.stdout.take().unwrap());
+        let mut lsp = Lsp { child, stdin, out, id: 0 };
+        let uri = format!("file://{}", root.display());
+        let init = lsp.request(
+            "initialize",
+            serde_json::json!({"capabilities": {},
+                               "workspaceFolders": [{"uri": uri, "name": "ws"}]}),
+        );
+        assert_eq!(init["result"]["capabilities"]["workspaceSymbolProvider"], true);
+        lsp
+    }
+}
+
+#[test]
+fn a_jump_leaves_the_file() {
+    // The case that matters most and the one that did not work: the
+    // definition is somewhere you are *not* looking.
+    let root = project(
+        "jump",
+        &[
+            ("src/lib.scm", "; a library\n(define (helper x)\n  (* x 2))\n"),
+            ("src/main.scm", "(define (go) (helper 21))\n"),
+            // Under `target`, which must not be walked: an entry from here
+            // would send a jump into a build directory.
+            ("target/stale.scm", "(define (helper x) 'wrong)\n"),
+        ],
+    );
+    let mut lsp = Lsp::start_in(&root);
+    let main = format!("file://{}/src/main.scm", root.display());
+    lsp.open(&main, "(define (go) (helper 21))\n");
+    let _ = lsp.diagnostics(&main);
+
+    let got = lsp.at("textDocument/definition", &main, 0, 14);
+    let sites = got.as_array().unwrap_or_else(|| panic!("no jump: {got}"));
+    assert_eq!(sites.len(), 1, "{got}");
+    assert!(
+        sites[0]["uri"].as_str().unwrap().ends_with("src/lib.scm"),
+        "jumped to the wrong file: {got}"
+    );
+    // The name is on line 1 of lib.scm, not line 0 -- so the position is
+    // real and not a jump to the top of the file.
+    assert_eq!(sites[0]["range"]["start"]["line"], 1, "{got}");
+}
+
+#[test]
+fn the_local_definition_wins_over_one_elsewhere() {
+    // A name defined where you are reading is the one you meant.
+    let root = project(
+        "shadow",
+        &[
+            ("src/other.scm", "(define (shared) 'far)\n"),
+            ("src/here.scm", "(define (shared) 'near)\n(shared)\n"),
+        ],
+    );
+    let mut lsp = Lsp::start_in(&root);
+    let here = format!("file://{}/src/here.scm", root.display());
+    lsp.open(&here, "(define (shared) 'near)\n(shared)\n");
+    let _ = lsp.diagnostics(&here);
+    let got = lsp.at("textDocument/definition", &here, 1, 2);
+    // One location, in this file, at line 0.
+    assert_eq!(got["uri"], here.as_str(), "{got}");
+    assert_eq!(got["range"]["start"]["line"], 0, "{got}");
+}
+
+#[test]
+fn a_record_accessor_is_reachable_from_another_file() {
+    // The gap that started this: `point-x` is bound by a form whose *name*
+    // is `point`, so nothing used to find it -- not even in the file that
+    // defines it.
+    let root = project(
+        "record",
+        &[
+            ("src/types.scm", "(define-record-type point\n  (make-point x y)\n  point?\n  (x point-x))\n"),
+            ("src/use.scm", "(define (f p) (point-x p))\n"),
+        ],
+    );
+    let mut lsp = Lsp::start_in(&root);
+    let use_uri = format!("file://{}/src/use.scm", root.display());
+    lsp.open(&use_uri, "(define (f p) (point-x p))\n");
+    let _ = lsp.diagnostics(&use_uri);
+    for (name, col, line_in_types) in [("point-x", 15, 3), ("make-point", 0, 1)] {
+        let text = if name == "point-x" {
+            "(define (f p) (point-x p))\n".to_string()
+        } else {
+            "(make-point 1 2)\n".to_string()
+        };
+        lsp.notify(
+            "textDocument/didChange",
+            serde_json::json!({"textDocument": {"uri": use_uri, "version": 2},
+                               "contentChanges": [{"text": text}]}),
+        );
+        let _ = lsp.diagnostics(&use_uri);
+        let got = lsp.at("textDocument/definition", &use_uri, 0, col + 1);
+        let sites = got.as_array().unwrap_or_else(|| panic!("{name} not found: {got}"));
+        assert!(sites[0]["uri"].as_str().unwrap().ends_with("src/types.scm"), "{name}: {got}");
+        assert_eq!(sites[0]["range"]["start"]["line"], line_in_types, "{name}: {got}");
+    }
+}
+
+#[test]
+fn workspace_symbol_finds_a_half_remembered_name() {
+    let root = project(
+        "symbols",
+        &[("src/a.scm", "(define (make-widget) 1)\n(define *widget-count* 0)\n")],
+    );
+    let mut lsp = Lsp::start_in(&root);
+    let got = lsp.request("workspace/symbol", serde_json::json!({"query": "widget"}));
+    let found = got["result"].as_array().expect("symbols");
+    let names: Vec<&str> = found.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert!(names.contains(&"make-widget"), "{got}");
+    assert!(names.contains(&"*widget-count*"), "{got}");
+    // With a location that is usable, not a stub.
+    let w = found.iter().find(|s| s["name"] == "make-widget").unwrap();
+    assert!(w["location"]["uri"].as_str().unwrap().ends_with("src/a.scm"));
+}
+
+#[test]
+fn an_unsaved_edit_is_what_a_jump_uses() {
+    // The buffer is the truth about itself: a definition just typed and not
+    // saved must still be a jump target from elsewhere.
+    let root = project(
+        "unsaved",
+        &[("src/a.scm", "(define (old-name) 1)\n"), ("src/b.scm", "(define (caller) 1)\n")],
+    );
+    let mut lsp = Lsp::start_in(&root);
+    let a = format!("file://{}/src/a.scm", root.display());
+    let b = format!("file://{}/src/b.scm", root.display());
+    lsp.open(&a, "(define (old-name) 1)\n");
+    let _ = lsp.diagnostics(&a);
+    lsp.notify(
+        "textDocument/didChange",
+        serde_json::json!({"textDocument": {"uri": a, "version": 2},
+                           "contentChanges": [{"text": "(define (brand-new) 1)\n"}]}),
+    );
+    let _ = lsp.diagnostics(&a);
+
+    lsp.open(&b, "(brand-new)\n");
+    let _ = lsp.diagnostics(&b);
+    let got = lsp.at("textDocument/definition", &b, 0, 3);
+    let sites = got.as_array().unwrap_or_else(|| panic!("unsaved edit not indexed: {got}"));
+    assert!(sites[0]["uri"].as_str().unwrap().ends_with("src/a.scm"), "{got}");
 }

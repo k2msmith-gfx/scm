@@ -19,14 +19,17 @@
 //! boot budget with a test enforcing it, and an editor server that lives
 //! for hours should not make a `--batch` sweep pay for a JSON parser.
 
+mod index;
 mod session;
 mod text;
+use text as scm_text;
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
 use serde_json::{Value as J, json};
 
+use index::Index;
 use session::Backend;
 use text::Doc;
 
@@ -37,6 +40,8 @@ const DEFAULT_ADDR: &str = "127.0.0.1:7000";
 
 struct Server {
     docs: HashMap<String, Doc>,
+    /// Every definition in the workspace, so a jump can leave the file.
+    index: Index,
     backend: Backend,
     /// What the backend is, reported in `initialize` and in a hover's
     /// footer: a user who gets no completion needs to know whether the
@@ -53,7 +58,13 @@ fn main() {
         .unwrap_or_else(|| DEFAULT_ADDR.to_string());
     let (backend, origin) = Backend::new(&addr);
     eprintln!("scm-lsp: {origin}");
-    let mut server = Server { docs: HashMap::new(), backend, origin, shutdown: false };
+    let mut server = Server {
+        docs: HashMap::new(),
+        index: Index::default(),
+        backend,
+        origin,
+        shutdown: false,
+    };
 
     let stdin = io::stdin();
     let mut input = stdin.lock();
@@ -123,6 +134,34 @@ impl Server {
                     self.origin = o;
                     eprintln!("scm-lsp: {}", self.origin);
                 }
+                // The workspace, scanned once. `workspaceFolders` is the
+                // current spelling and `rootUri` the old one; clients still
+                // send either, so both are read.
+                let mut roots: Vec<String> = params
+                    .pointer("/workspaceFolders")
+                    .and_then(J::as_array)
+                    .map(|fs| {
+                        fs.iter()
+                            .filter_map(|f| f.get("uri").and_then(J::as_str).map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if roots.is_empty()
+                    && let Some(u) = params.pointer("/rootUri").and_then(J::as_str)
+                {
+                    roots.push(u.to_string());
+                }
+                for uri in roots {
+                    if let Some(path) = index::path_of(&uri) {
+                        let n = self.index.scan_root(&path);
+                        eprintln!("scm-lsp: indexed {n} file(s) under {}", path.display());
+                    }
+                }
+                eprintln!(
+                    "scm-lsp: {} definitions in {} file(s)",
+                    self.index.names(),
+                    self.index.files()
+                );
                 Some(self.capabilities())
             }
             "initialized" => None,
@@ -141,6 +180,9 @@ impl Server {
                     .and_then(J::as_str)
                     .unwrap_or_default();
                 self.docs.insert(uri.clone(), Doc::new(text));
+                // An open buffer is the truth about itself, so its entries
+                // come from the text rather than from what is on disk.
+                self.index.update(&uri, text);
                 self.publish(&uri);
                 None
             }
@@ -156,13 +198,32 @@ impl Server {
                     .and_then(J::as_str)
                 {
                     self.docs.insert(uri.clone(), Doc::new(text));
+                    self.index.update(&uri, text);
                     self.publish(&uri);
+                }
+                None
+            }
+            "textDocument/didSave" => {
+                // The file on disk may have been formatted or reverted by
+                // something other than the editor.
+                let uri = uri_of(&params, "/textDocument/uri")?;
+                if let Some(path) = index::path_of(&uri) {
+                    self.index.scan_file(&path);
                 }
                 None
             }
             "textDocument/didClose" => {
                 let uri = uri_of(&params, "/textDocument/uri")?;
                 self.docs.remove(&uri);
+                // Not forgotten outright: the file still exists and its
+                // definitions are still jump targets. Re-read it from disk,
+                // so unsaved edits stop being visible -- and if it cannot
+                // be read it was deleted or renamed while open, so its
+                // entries have to go rather than become jumps to nowhere.
+                match index::path_of(&uri) {
+                    Some(path) if self.index.scan_file(&path) => {}
+                    _ => self.index.forget(&uri),
+                }
                 // Clear its diagnostics: a closed file's errors must not
                 // stay in the problems list for ever.
                 notify(
@@ -176,6 +237,7 @@ impl Server {
             "textDocument/signatureHelp" => Some(self.signature_help(&params)),
             "textDocument/documentSymbol" => Some(self.document_symbol(&params)),
             "textDocument/definition" => Some(self.definition(&params)),
+            "workspace/symbol" => Some(self.workspace_symbol(&params)),
             // An unknown request still needs an answer, or a client waits
             // for ever; an unknown notification is correctly ignored.
             _ => Some(J::Null),
@@ -200,7 +262,8 @@ impl Server {
                 "hoverProvider": true,
                 "signatureHelpProvider": { "triggerCharacters": [" ", "("] },
                 "documentSymbolProvider": true,
-                "definitionProvider": true
+                "definitionProvider": true,
+                "workspaceSymbolProvider": true
             },
             "serverInfo": {
                 "name": "scm-lsp",
@@ -355,36 +418,72 @@ impl Server {
             return J::Null;
         };
         let Some(doc) = self.docs.get(uri) else { return J::Null };
-        let symbols: Vec<J> = doc
-            .definitions()
-            .into_iter()
-            .map(|d| {
-                let (sl, sc) = doc.position(d.start);
-                let (el, ec) = doc.position(d.end);
-                let (nl, nc) = doc.position(d.name_at);
-                let (nel, nec) = doc.position(d.name_at + d.name.chars().count());
-                json!({
-                    "name": d.name,
-                    "detail": d.detail.unwrap_or(d.form.clone()),
-                    "kind": kind_of(&d.form),
-                    "range": {"start": {"line": sl, "character": sc},
-                              "end": {"line": el, "character": ec}},
-                    "selectionRange": {"start": {"line": nl, "character": nc},
-                                       "end": {"line": nel, "character": nec}}
-                })
+        let one = |d: &scm_text::Definition| -> J {
+            let (sl, sc) = doc.position(d.start);
+            let (el, ec) = doc.position(d.end);
+            let (nl, nc) = doc.position(d.name_at);
+            let (nel, nec) = doc.position(d.name_at + d.name.chars().count());
+            json!({
+                "name": d.name,
+                "detail": d.detail.clone().unwrap_or_else(|| d.form.clone()),
+                "kind": kind_of(&d.form),
+                "range": {"start": {"line": sl, "character": sc},
+                          "end": {"line": el, "character": ec}},
+                "selectionRange": {"start": {"line": nl, "character": nc},
+                                   "end": {"line": nel, "character": nec}}
             })
-            .collect();
+        };
+        // A record type's constructor, predicate and accessors **nest under
+        // it**. They have to be findable -- go-to-definition needs them --
+        // but six flat entries for one declaration is not the file's shape,
+        // which is what an outline is for. They arrive in order, so the
+        // type opens a parent and the next non-type entry closes it.
+        let mut symbols: Vec<J> = Vec::new();
+        let mut children: Vec<J> = Vec::new();
+        let mut open_record: Option<J> = None;
+        for d in doc.definitions() {
+            let is_member =
+                d.form == "define-record-type" && d.detail.as_deref() != Some("type");
+            if is_member && open_record.is_some() {
+                children.push(one(&d));
+                continue;
+            }
+            if let Some(mut parent) = open_record.take() {
+                parent["children"] = J::Array(std::mem::take(&mut children));
+                symbols.push(parent);
+            }
+            if d.form == "define-record-type" && d.detail.as_deref() == Some("type") {
+                open_record = Some(one(&d));
+            } else {
+                symbols.push(one(&d));
+            }
+        }
+        if let Some(mut parent) = open_record.take() {
+            parent["children"] = J::Array(children);
+            symbols.push(parent);
+        }
         J::Array(symbols)
     }
 
-    /// Only within the file. A global from the prelude has no location to
-    /// jump to -- it is a value, not a line -- and answering with something
-    /// wrong would be worse than answering with nothing. Hover is what
-    /// tells you about those.
+    /// This file first, then the rest of the workspace.
+    ///
+    /// The local definition wins when there is one, because a name defined
+    /// where you are reading is the one you meant; otherwise every site in
+    /// the workspace is offered, since a name defined in two libraries is
+    /// normal and the editor can present the choice.
+    ///
+    /// A prelude name still has no answer: it is a value, not a line. Hover
+    /// is what tells you about those, and a wrong jump would be worse than
+    /// none. The same is true of anything defined at the REPL -- see
+    /// `index.rs` for why that needs the session rather than the text.
     fn definition(&mut self, params: &J) -> J {
         let Some((doc, offset)) = self.at(params) else { return J::Null };
         let Some((name, _, _)) = doc.symbol_at(offset) else { return J::Null };
-        let Some(uri) = params.pointer("/textDocument/uri").and_then(J::as_str) else {
+        let Some(uri) = params
+            .pointer("/textDocument/uri")
+            .and_then(J::as_str)
+            .map(str::to_string)
+        else {
             return J::Null;
         };
         for d in doc.definitions() {
@@ -398,7 +497,46 @@ impl Server {
                 });
             }
         }
-        J::Null
+        let sites: Vec<J> = self
+            .index
+            .sites(&name)
+            .into_iter()
+            // The open buffer was searched above and found nothing, so an
+            // entry for it here would be stale.
+            .filter(|s| s.uri != uri)
+            .map(|s| {
+                json!({
+                    "uri": s.uri,
+                    "range": {"start": {"line": s.line, "character": s.character},
+                              "end": {"line": s.line, "character": s.end_character}}
+                })
+            })
+            .collect();
+        if sites.is_empty() { J::Null } else { J::Array(sites) }
+    }
+
+    /// `workspace/symbol`: the index, filtered. Nearly free once the index
+    /// exists, and it is how a reader finds a name they half-remember.
+    fn workspace_symbol(&mut self, params: &J) -> J {
+        let query = params.pointer("/query").and_then(J::as_str).unwrap_or("");
+        let found: Vec<J> = self
+            .index
+            .matching(query, 512)
+            .into_iter()
+            .map(|(name, s)| {
+                json!({
+                    "name": name,
+                    "kind": kind_of(&s.form),
+                    "containerName": s.detail,
+                    "location": {
+                        "uri": s.uri,
+                        "range": {"start": {"line": s.line, "character": s.character},
+                                  "end": {"line": s.line, "character": s.end_character}}
+                    }
+                })
+            })
+            .collect();
+        J::Array(found)
     }
 }
 

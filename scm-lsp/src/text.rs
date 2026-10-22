@@ -127,12 +127,22 @@ impl Doc {
         end
     }
 
-    /// The token containing `offset`, or the one ending exactly at it --
-    /// which is the usual case, the cursor sitting just after a name.
+    /// The token at `offset`.
+    ///
+    /// A token that **contains** the offset wins over one that merely
+    /// *ends* at it, and the order matters more than it looks. Both cases
+    /// are real — the cursor sits inside a name, or just after it — but
+    /// they collide at a boundary: in `(helper`, with the cursor on the
+    /// `h`, the opening paren ends at exactly that offset. Taking the
+    /// first token whose range included the offset inclusively returned
+    /// the paren, so hover and go-to-definition quietly did nothing for
+    /// every symbol written straight after a delimiter, which is most of
+    /// them in a Lisp.
     fn token_at(&self, offset: usize) -> Option<&Token> {
         self.tokens
             .iter()
-            .find(|t| t.start <= offset && offset <= t.end)
+            .find(|t| t.start <= offset && offset < t.end)
+            .or_else(|| self.tokens.iter().find(|t| t.end == offset))
     }
 
     /// The name at the cursor, for hover and go-to-definition.
@@ -207,6 +217,115 @@ impl Doc {
         Some((head, self.tokens[opener].start, arg))
     }
 
+    /// The token indices of a form's direct children: the things at one
+    /// level in, skipping whatever is nested deeper.
+    fn children(&self, open: usize) -> Vec<usize> {
+        let depth = self.tokens[open].depth;
+        let mut out = Vec::new();
+        for (i, t) in self.tokens.iter().enumerate().skip(open + 1) {
+            if t.kind == Kind::Close && t.depth == depth {
+                break;
+            }
+            if t.depth == depth + 1 && !matches!(t.kind, Kind::Comment | Kind::Close) {
+                out.push(i);
+            }
+        }
+        out
+    }
+
+    /// The names a `define-record-type` binds *besides* the type: its
+    /// constructor, its predicate, and an accessor and modifier per field.
+    ///
+    /// They are ordinary top-level bindings and they are right there in the
+    /// text, but they are not where a `define`'s name is, so the general
+    /// case above misses every one of them -- which made `point-x`
+    /// unreachable by go-to-definition in the file that defines it.
+    ///
+    ///     (define-record-type point
+    ///       (make-point x y)        ; constructor
+    ///       point?                  ; predicate
+    ///       (x point-x)             ; accessor
+    ///       (y point-y set-y!))     ; accessor and modifier
+    fn record_type_names(&self, open: usize, end: usize) -> Vec<Definition> {
+        let kids = self.children(open);
+        let mut out = Vec::new();
+        // [0] is `define-record-type`, [1] the type name.
+        let mut seen_predicate = false;
+        for &k in kids.iter().skip(2) {
+            let t = self.tokens[k];
+            match t.kind {
+                // A bare symbol here is the predicate.
+                Kind::Atom if !seen_predicate => {
+                    seen_predicate = true;
+                    out.push(Definition {
+                        name: self.slice(t.start, t.end),
+                        form: "define-record-type".into(),
+                        detail: Some("predicate".into()),
+                        name_at: t.start,
+                        start: t.start,
+                        end,
+                    });
+                }
+                Kind::Open => {
+                    let inner: Vec<usize> = self
+                        .children(k)
+                        .into_iter()
+                        .filter(|&i| self.tokens[i].kind == Kind::Atom)
+                        .collect();
+                    // Before the predicate this is the constructor; after
+                    // it, a field spec whose first atom is the field.
+                    let (skip, what) = if seen_predicate {
+                        (1, ["accessor", "modifier"])
+                    } else {
+                        (0, ["constructor", "constructor"])
+                    };
+                    for (n, &i) in inner.iter().skip(skip).enumerate() {
+                        let a = self.tokens[i];
+                        out.push(Definition {
+                            name: self.slice(a.start, a.end),
+                            form: "define-record-type".into(),
+                            detail: Some(what[n.min(1)].into()),
+                            name_at: a.start,
+                            start: a.start,
+                            end,
+                        });
+                        // A constructor's remaining atoms are its fields,
+                        // not names it binds.
+                        if !seen_predicate {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Every name a `define-values` binds, not just the first.
+    fn define_values_names(&self, open: usize, end: usize) -> Vec<Definition> {
+        let kids = self.children(open);
+        let Some(&formals) = kids.get(1) else { return Vec::new() };
+        if self.tokens[formals].kind != Kind::Open {
+            return Vec::new();
+        }
+        self.children(formals)
+            .into_iter()
+            .filter(|&i| self.tokens[i].kind == Kind::Atom)
+            .map(|i| {
+                let t = self.tokens[i];
+                Definition {
+                    name: self.slice(t.start, t.end),
+                    form: "define-values".into(),
+                    detail: None,
+                    name_at: t.start,
+                    start: t.start,
+                    end,
+                }
+            })
+            .collect()
+    }
+
     /// Every top-level definition, for the outline and for jumping to one.
     ///
     /// Top level means depth 0, so an internal `define` is deliberately not
@@ -279,14 +398,28 @@ impl Doc {
                             .unwrap_or(n.end);
                         self.slice(n.start, close)
                     });
-                out.push(Definition {
-                    name,
-                    form,
-                    detail: arity,
-                    name_at,
-                    start: t.start,
-                    end,
-                });
+                match form.as_str() {
+                    "define-record-type" => {
+                        out.push(Definition {
+                            name,
+                            form: form.clone(),
+                            detail: Some("type".into()),
+                            name_at,
+                            start: t.start,
+                            end,
+                        });
+                        out.extend(self.record_type_names(i, end));
+                    }
+                    "define-values" => {
+                        let extra = self.define_values_names(i, end);
+                        if extra.is_empty() {
+                            out.push(Definition { name, form, detail: arity, name_at, start: t.start, end });
+                        } else {
+                            out.extend(extra);
+                        }
+                    }
+                    _ => out.push(Definition { name, form, detail: arity, name_at, start: t.start, end }),
+                }
             }
             i += 1;
         }
@@ -502,6 +635,24 @@ mod tests {
     }
 
     #[test]
+    fn a_symbol_right_after_a_delimiter_is_found() {
+        // The cursor on the `h` of `(helper`: the paren *ends* at that
+        // offset while the atom *contains* it, and containing must win.
+        // Getting this wrong made hover and go-to-definition do nothing
+        // for most symbols in a Lisp, since most follow a bracket.
+        let text = "(define (go) (helper 21))";
+        let d = Doc::new(text);
+        let h = text.find("helper").unwrap();
+        assert_eq!(d.symbol_at(h).map(|x| x.0), Some("helper".to_string()));
+        // And the cursor just after the name still resolves to it.
+        assert_eq!(d.symbol_at(h + 6).map(|x| x.0), Some("helper".to_string()));
+        // Inside, too.
+        assert_eq!(d.symbol_at(h + 3).map(|x| x.0), Some("helper".to_string()));
+        // On the bracket itself: not a symbol.
+        assert_eq!(d.symbol_at(h - 1).map(|x| x.0), None);
+    }
+
+    #[test]
     fn a_prefix_is_what_has_been_typed_not_the_whole_atom() {
         let d = Doc::new("(vector-re");
         assert_eq!(d.prefix_at(d.len()), "vector-re");
@@ -559,7 +710,14 @@ mod tests {
                 ("x".to_string(), "define".to_string()),
                 ("area".to_string(), "define".to_string()),
                 ("swap!".to_string(), "define-syntax".to_string()),
+                // A record type brings its constructor, predicate and
+                // accessors with it -- see `a_record_type_binds_more_than
+                // _its_name`. They are top-level bindings, so leaving them
+                // out made them unreachable by go-to-definition.
                 ("point".to_string(), "define-record-type".to_string()),
+                ("make-point".to_string(), "define-record-type".to_string()),
+                ("point?".to_string(), "define-record-type".to_string()),
+                ("point-x".to_string(), "define-record-type".to_string()),
                 ("(scm noise)".to_string(), "define-library".to_string()),
                 ("outer".to_string(), "define".to_string()),
             ]
@@ -595,5 +753,78 @@ mod tests {
         assert!(d.in_text(text.find("abc").unwrap()));
         assert!(d.in_text(text.find("note").unwrap()));
         assert!(!d.in_text(text.find("(g)").unwrap() + 1));
+    }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+
+    #[test]
+    fn a_record_type_binds_more_than_its_name() {
+        // The constructor, the predicate and every accessor and modifier
+        // are ordinary top-level bindings, and they are in the text -- but
+        // they are not where a `define`'s name is, so the general case
+        // missed all of them. `point-x` was unreachable by
+        // go-to-definition in the very file that defines it.
+        let d = Doc::new(
+            "(define-record-type point\n\
+            \x20 (make-point x y)\n\
+            \x20 point?\n\
+            \x20 (x point-x)\n\
+            \x20 (y point-y set-point-y!))\n",
+        );
+        let got: Vec<(String, Option<String>)> = d
+            .definitions()
+            .into_iter()
+            .map(|x| (x.name, x.detail))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("point".to_string(), Some("type".to_string())),
+                ("make-point".to_string(), Some("constructor".to_string())),
+                ("point?".to_string(), Some("predicate".to_string())),
+                ("point-x".to_string(), Some("accessor".to_string())),
+                ("point-y".to_string(), Some("accessor".to_string())),
+                ("set-point-y!".to_string(), Some("modifier".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_constructors_field_list_is_not_a_set_of_names() {
+        // `(make-point x y)` binds `make-point`; `x` and `y` name fields
+        // and are already bound by nothing at all.
+        let d = Doc::new("(define-record-type p (make-p a b c) p?)\n");
+        let names: Vec<String> = d.definitions().into_iter().map(|x| x.name).collect();
+        assert_eq!(names, vec!["p", "make-p", "p?"]);
+    }
+
+    #[test]
+    fn define_values_binds_every_name() {
+        let d = Doc::new("(define-values (q r) (floor/ 7 2))\n");
+        let names: Vec<String> = d.definitions().into_iter().map(|x| x.name).collect();
+        assert_eq!(names, vec!["q", "r"]);
+        // The single-name spelling still works.
+        let d = Doc::new("(define-values one (values 1))\n");
+        let names: Vec<String> = d.definitions().into_iter().map(|x| x.name).collect();
+        assert_eq!(names, vec!["one"]);
+    }
+
+    #[test]
+    fn a_record_type_being_written_does_not_panic() {
+        // Mid-edit text reaches every one of these paths.
+        for src in [
+            "(define-record-type",
+            "(define-record-type point",
+            "(define-record-type point (",
+            "(define-record-type point (make-point x",
+            "(define-record-type point (make-point x y) point? (x",
+            "(define-values",
+            "(define-values (",
+        ] {
+            let _ = Doc::new(src).definitions();
+        }
     }
 }
