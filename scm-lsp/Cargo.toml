@@ -1,0 +1,21 @@
+[package]
+name = "scm-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A Language Server for scm: completion and introspection from a live session"
+
+[[bin]]
+name = "scm-lsp"
+path = "src/main.rs"
+
+[dependencies]
+# The package is `schemers`; the library it builds is `scm`.
+schemers = { path = "../scm" }
+# JSON-RPC, and the one dependency this crate has. It is here and not in
+# `scm-cli` deliberately: the `scm` binary has a 10 ms boot budget with a
+# test enforcing it (plan §7, S10), and an editor server that lives for
+# hours should not make the thing a `--batch` sweep runs 191 times pay for
+# a JSON parser. The embeddable `scm` crate keeps its no-dependencies rule
+# either way -- this is tooling, like rustyline in scm-cli.
+serde_json = "1"

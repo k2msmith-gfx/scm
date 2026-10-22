@@ -1,8 +1,8 @@
 [workspace]
-members = ["scm", "scm-cli", "scm-conform", "scm-llvm"]
+members = ["scm", "scm-cli", "scm-conform", "scm-llvm", "scm-lsp"]
 # scm-llvm needs LLVM 21 and is opted into with `-p scm-llvm`; a root
 # `cargo build` or `cargo test` must work on a machine with no toolchain.
-default-members = ["scm", "scm-cli", "scm-conform"]
+default-members = ["scm", "scm-cli", "scm-conform", "scm-lsp"]
 resolver = "2"
 
 [workspace.package]
