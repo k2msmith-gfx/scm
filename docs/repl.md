@@ -205,6 +205,79 @@ test -- the client reads plain lines, so `echo '(+ 1 2)' | scm` still works.
 `load`, `macroexpand` and `macroexpand-1` are procedures, not commands, so
 every client has them.
 
+## The Rust client, and `--connect` (S22)
+
+`scm --connect 127.0.0.1:7000` is the terminal prompt with its session on
+the other end of a socket. Everything S8b gave the prompt — line editing,
+history, multi-line entry, tab completion, the comma commands — works
+against a server somewhere else, and **the state is the server's**: two
+prompts are two processes and one environment.
+
+The point is not remote work. It is that an editor and a prompt can be
+clients of **one** session, which is what a SLIME-style workflow actually
+needs: eval a form from the buffer, then type at a prompt that can see what
+it defined. Zed is the named consumer (`zed-scm`, Z2) because its extension
+API cannot host a REPL pane, so the prompt has to be a terminal process —
+but nothing about it is Zed-specific.
+
+### The protocol is symmetric now
+
+S8 formatted requests on the client and parsed them on the server, and did
+the reverse for responses. Only two of those four existed in Rust:
+
+| | request | response |
+|---|---|---|
+| format | **`Request::to_wire`** (S22) | `Response::to_wire` (S8) |
+| read | `Request::parse` (S8) | **`Response::parse`** (S22) |
+
+Until the two in bold, a Rust client had to format the text itself — which
+is the shape §8 warns about. Two clients formatting the same request
+separately are two clients that can come to disagree, and the protocol test
+can only see one of them. The tests are therefore **round trips**: every
+`Op` and every `Outcome` through `to_wire` and back, including the payload
+that breaks a naive formatter (a quote, a backslash, a newline and
+unbalanced parens inside a string), plus a pass over what the session
+really answered, so a field one half learns and the other does not fails
+even if nobody updated the list.
+
+**`:name` is now on a `describe` response.** Without it a described value
+could not be read back into the value it came from, because the name was
+the one field the wire did not carry. Adding a key is the protocol's own
+way of evolving — "an unknown key is ignored, so a newer client talking to
+an older server still works" — and the Emacs batch test, which drives the
+real server, passes unchanged.
+
+### `C-c` from a client is a second connection
+
+A remote prompt's VM is in another process, so the interrupt flag the
+signal handler used to set is the wrong one. It sends `:op interrupt` down
+the **control connection** instead — the same pair `scm-mode.el` opens, for
+the same reason: the interpreter is single-threaded, so an interrupt on the
+main connection would queue behind the form it is meant to stop.
+
+A signal handler cannot touch a `TcpStream`, so it writes the request with
+`write(2)`, which is async-signal-safe, to a descriptor stored once at
+connect time. The text is a constant because a handler must not allocate.
+Measured end to end in `scm-cli/tests/connect.rs`: a runaway on the main
+connection, a real `SIGINT` to a real client process, the answer coming
+back on the main connection with the frame it was in, and `(* 6 7)` → 42
+on the same session afterwards.
+
+### What a remote prompt does not get
+
+- **The break REPL.** A break handler runs *inside* the failing evaluation
+  with the frames live, and a wire carries values, not a stack. A remote
+  client gets today's unwind-and-report, exactly as the socket client does.
+- **A script's stdin.** The server owns its own.
+- `C-d` leaves the prompt and **leaves the server running**, which is the
+  one difference from `scm` that a user has to be told, so the banner says
+  it.
+
+One other asymmetry is deliberate: the line editor decides *incomplete* with
+the in-process `parse_status` rather than asking `:op parse` per keystroke.
+Same reader, same binary in practice; a round trip per character would not
+buy anything a differing version could not also break.
+
 ## What is not here yet
 
 - ~~**A break REPL**~~ — done, above.
@@ -217,6 +290,7 @@ every client has them.
   mode over this protocol, with a REPL buffer whose `RET` asks `:op parse`,
   completion from `:op complete`, eldoc from `:op describe`, and interrupt on
   a second connection. Its batch test drives the real server.
+- ~~**A Rust client of the protocol.**~~ `scm --connect` (S22), above.
 - **Several interpreters over one socket.** One session per server today.
 - **Completion inside a form** — candidates come from the global environment,
   so a local binding is not offered.

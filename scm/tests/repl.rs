@@ -672,3 +672,167 @@ fn load_macroexpand_values_and_pretty_results() {
     assert!(long.lines().all(|l| l.len() <= 80));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- S22: the protocol in both directions ----------------------------------
+//
+// S8 tested the wire one way, because only one way existed: a response was
+// formatted by the server and read by Emacs. A Rust client needs the other
+// half, and the risk it introduces is the one §8 names -- two clients
+// formatting the same request separately are two clients that can disagree.
+// So the tests are round trips: whatever `to_wire` says, `parse` must read
+// back as the value it started from, for every variant.
+
+#[test]
+fn a_request_round_trips_through_the_wire() {
+    let requests = [
+        Request { id: 1, op: Op::Ping },
+        Request { id: 2, op: Op::Interrupt },
+        Request { id: 3, op: Op::Eval { code: "(+ 1 2)".into(), source: None } },
+        Request {
+            id: 4,
+            op: Op::Eval { code: "(+ 1 2)".into(), source: Some("scene.scm".into()) },
+        },
+        Request { id: 5, op: Op::Complete { prefix: "vector-".into() } },
+        Request { id: 6, op: Op::Describe { name: "car".into() } },
+        Request { id: 7, op: Op::Parse { code: "(+ 1".into() } },
+        // The payload that would break a naive formatter: a quote, a
+        // backslash, a newline and unbalanced parens inside a string.
+        Request {
+            id: 8,
+            op: Op::Eval { code: "(display \"a)(b \\\"c\\\"\n\")".into(), source: None },
+        },
+    ];
+    for req in requests {
+        let wire = req.to_wire();
+        assert!(
+            matches!(scm::parse_status(&wire), scm::ParseStatus::Complete),
+            "not a single datum: {wire}"
+        );
+        assert_eq!(Request::parse(&wire).unwrap(), req, "{wire}");
+    }
+}
+
+#[test]
+fn a_response_round_trips_through_the_wire() {
+    // Every outcome the server can produce, including the ones whose shape
+    // is decided by which keys are present rather than by a tag.
+    let described = scm::Description {
+        name: "area".into(),
+        signature: Some("(area r)".into()),
+        doc: Some("Circle area.".into()),
+        kind: "procedure".into(),
+        value: "#<procedure area>".into(),
+    };
+    let responses = [
+        Response { id: 1, outcome: Outcome::Pong { version: "0.0.1".into() } },
+        Response {
+            id: 2,
+            outcome: Outcome::Value { value: "42".into(), output: "out\n".into() },
+        },
+        Response {
+            id: 3,
+            outcome: Outcome::Failed {
+                message: "car: not a pair: 5".into(),
+                output: "printed first".into(),
+                host_stopped: false,
+                backtrace: vec!["(car 5)  at s.scm:1:1".into()],
+            },
+        },
+        // An interrupt, which a client must not offer to retry.
+        Response {
+            id: 4,
+            outcome: Outcome::Failed {
+                message: "interrupted".into(),
+                output: String::new(),
+                host_stopped: true,
+                backtrace: vec![],
+            },
+        },
+        Response { id: 5, outcome: Outcome::Candidates(vec!["vector-ref".into()]) },
+        // Empty is not the same as absent: no candidates still reads back
+        // as `Candidates`, not as a value.
+        Response { id: 6, outcome: Outcome::Candidates(vec![]) },
+        Response { id: 7, outcome: Outcome::Described(Some(described)) },
+        Response { id: 8, outcome: Outcome::Described(None) },
+        Response { id: 9, outcome: Outcome::Framed(Framing::Complete) },
+        Response { id: 10, outcome: Outcome::Framed(Framing::Incomplete) },
+        Response { id: 11, outcome: Outcome::Framed(Framing::Invalid) },
+        Response { id: 12, outcome: Outcome::Malformed("unknown op `frobnicate`".into()) },
+    ];
+    for res in responses {
+        let wire = res.to_wire();
+        assert!(
+            matches!(scm::parse_status(&wire), scm::ParseStatus::Complete),
+            "not a single datum: {wire}"
+        );
+        assert_eq!(Response::parse(&wire).unwrap(), res, "{wire}");
+    }
+}
+
+#[test]
+fn a_described_value_without_a_signature_or_doc_round_trips() {
+    // Both are optional, and the wire omits them rather than sending "".
+    // Reading `""` back as `Some("")` would be a quiet divergence.
+    let res = Response {
+        id: 1,
+        outcome: Outcome::Described(Some(scm::Description {
+            name: "x".into(),
+            signature: None,
+            doc: None,
+            kind: "variable".into(),
+            value: "7".into(),
+        })),
+    };
+    let wire = res.to_wire();
+    assert!(!wire.contains(":signature") && !wire.contains(":doc"), "{wire}");
+    assert_eq!(Response::parse(&wire).unwrap(), res);
+}
+
+#[test]
+fn a_real_response_reads_back_into_the_same_outcome() {
+    // The round trips above build responses by hand. This one takes what the
+    // session actually answered -- so a new field that `to_wire` learns and
+    // `parse` does not would fail here even if nobody updated the list.
+    let mut s = Session::new().unwrap();
+    eval(&mut s, "(define (area r) \"Circle area.\" (* 3 r r))");
+    for op in [
+        Op::Ping,
+        Op::Eval { code: "(begin (display \"o\") (area 2))".into(), source: None },
+        Op::Eval { code: "(car 5)".into(), source: Some("t.scm".into()) },
+        Op::Describe { name: "area".into() },
+        Op::Describe { name: "nope".into() },
+        Op::Complete { prefix: "vector-r".into() },
+        Op::Parse { code: "(+ 1".into() },
+    ] {
+        let answer = s.handle(Request { id: 1, op: op.clone() });
+        let back = Response::parse(&answer.to_wire())
+            .unwrap_or_else(|e| panic!("{op:?} -> {e}"));
+        assert_eq!(back, answer, "{op:?}");
+    }
+}
+
+#[test]
+fn an_unknown_key_in_a_response_is_ignored_so_an_older_server_still_works() {
+    // The mirror of `an_unknown_key_is_ignored_so_a_newer_client_still_works`.
+    // A client that refused what it did not recognise would make every
+    // protocol addition a flag day.
+    let r = Response::parse(r#"(:id 1 :status ok :value "42" :output "" :elapsed-ms 3)"#).unwrap();
+    assert_eq!(r.outcome, Outcome::Value { value: "42".into(), output: String::new() });
+}
+
+#[test]
+fn a_malformed_response_is_an_error_not_a_panic() {
+    // A client talks to whatever is on the port, which may not be scm at all.
+    for text in [
+        "",
+        "not a datum",
+        "(:id 1)",                                   // no :status
+        "(:id 1 :status sideways)",                  // not a status
+        "(:id 1 :status ok :framing maybe)",         // not a framing
+        "(:id 1 :status error)",                     // an error with no message
+        "(:id 1 :status ok :bound #t :value \"7\")", // bound with no kind
+        "(:op eval :id 1 :code \"(+ 1 2)\")",        // a request, not a response
+    ] {
+        assert!(Response::parse(text).is_err(), "accepted {text:?}");
+    }
+}

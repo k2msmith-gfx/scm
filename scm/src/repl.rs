@@ -243,6 +243,44 @@ impl Request {
         };
         Ok(Request { id, op })
     }
+
+    /// The request as one datum, which is also its own frame -- the inverse
+    /// of [`Request::parse`].
+    ///
+    /// S22. Until it existed only the server's direction did, and a Rust
+    /// client -- `scm --connect`, the modeller's editor pane -- had to
+    /// format the text itself. That is the shape §8 warned about: two
+    /// clients formatting the same request separately are two clients that
+    /// can come to disagree, and the protocol test can only see one of them.
+    pub fn to_wire(&self) -> String {
+        let mut out = String::new();
+        match &self.op {
+            Op::Eval { code, source } => {
+                out.push_str(&format!("(:op eval :id {} :code ", self.id));
+                push_string(&mut out, code);
+                if let Some(source) = source {
+                    out.push_str(" :name ");
+                    push_string(&mut out, source);
+                }
+            }
+            Op::Complete { prefix } => {
+                out.push_str(&format!("(:op complete :id {} :prefix ", self.id));
+                push_string(&mut out, prefix);
+            }
+            Op::Describe { name } => {
+                out.push_str(&format!("(:op describe :id {} :name ", self.id));
+                push_string(&mut out, name);
+            }
+            Op::Parse { code } => {
+                out.push_str(&format!("(:op parse :id {} :code ", self.id));
+                push_string(&mut out, code);
+            }
+            Op::Interrupt => out.push_str(&format!("(:op interrupt :id {}", self.id)),
+            Op::Ping => out.push_str(&format!("(:op ping :id {}", self.id)),
+        }
+        out.push(')');
+        out
+    }
 }
 
 impl Response {
@@ -292,7 +330,9 @@ impl Response {
             }
             Outcome::Described(None) => out.push_str(" :status ok :bound #f"),
             Outcome::Described(Some(d)) => {
-                out.push_str(" :status ok :bound #t :kind ");
+                out.push_str(" :status ok :bound #t :name ");
+                push_string(&mut out, &d.name);
+                out.push_str(" :kind ");
                 push_string(&mut out, &d.kind);
                 out.push_str(" :value ");
                 push_string(&mut out, &d.value);
@@ -324,6 +364,128 @@ impl Response {
         }
         out.push(')');
         out
+    }
+
+    /// Read a response back, the inverse of [`Response::to_wire`].
+    ///
+    /// S22, and the same rules as [`Request::parse`]: scm's own reader on a
+    /// scratch engine, because a server is no more trusted than a client,
+    /// and **an unknown key is ignored** so an older server talking to a
+    /// newer client still works.
+    ///
+    /// Which outcome it is, is decided by which keys are present rather
+    /// than by a tag, because that is what the wire actually carries. The
+    /// order of the tests is load-bearing: a `Described` response also has
+    /// a `:value`, so `:bound` has to be looked for first or every
+    /// `describe` would read back as a plain value.
+    pub fn parse(text: &str) -> Result<Response, String> {
+        let mut e = crate::Engine::new();
+        let v = crate::read_one(text, &mut e)
+            .map_err(|err| format!("{err}"))?
+            .ok_or("an empty response")?;
+        let items = proper_list(&e, v).ok_or("a response must be a proper list")?;
+        let mut id = 0u64;
+        let (mut status, mut value, mut output, mut message) = (None, None, None, None);
+        let (mut name, mut kind, mut signature, mut doc) = (None, None, None, None);
+        let (mut version, mut framing) = (None, None);
+        let (mut candidates, mut backtrace): (Option<Vec<String>>, Option<Vec<String>>) =
+            (None, None);
+        let (mut bound, mut host_stopped) = (None, None);
+        let mut i = 0;
+        while i < items.len() {
+            let crate::Value::Keyword(k) = items[i] else {
+                return Err("a response is :key value pairs".into());
+            };
+            let key = e.interner.kw_name(k).to_string();
+            let Some(&val) = items.get(i + 1) else {
+                return Err(format!(":{key} has no value"));
+            };
+            match key.as_str() {
+                "id" => {
+                    let crate::Value::Fixnum(n) = val else {
+                        return Err(":id must be an integer".into());
+                    };
+                    id = n.max(0) as u64;
+                }
+                "status" => status = text_of(&e, val),
+                "value" => value = text_of(&e, val),
+                "output" => output = text_of(&e, val),
+                "message" => message = text_of(&e, val),
+                "name" => name = text_of(&e, val),
+                "kind" => kind = text_of(&e, val),
+                "signature" => signature = text_of(&e, val),
+                "doc" => doc = text_of(&e, val),
+                "version" => version = text_of(&e, val),
+                "framing" => framing = text_of(&e, val),
+                "candidates" => candidates = Some(strings(&e, val)?),
+                "backtrace" => backtrace = Some(strings(&e, val)?),
+                "bound" => bound = as_bool(val),
+                "host-stopped" => host_stopped = as_bool(val),
+                _ => {}
+            }
+            i += 2;
+        }
+        let outcome = match status.as_deref() {
+            Some("malformed") => Outcome::Malformed(message.unwrap_or_default()),
+            Some("error") => Outcome::Failed {
+                message: message.ok_or("an error needs :message")?,
+                output: output.unwrap_or_default(),
+                host_stopped: host_stopped.unwrap_or(false),
+                backtrace: backtrace.unwrap_or_default(),
+            },
+            Some("ok") => {
+                if let Some(version) = version {
+                    Outcome::Pong { version }
+                } else if let Some(f) = framing {
+                    Outcome::Framed(match f.as_str() {
+                        "complete" => Framing::Complete,
+                        "incomplete" => Framing::Incomplete,
+                        "invalid" => Framing::Invalid,
+                        other => return Err(format!("unknown framing `{other}`")),
+                    })
+                } else if let Some(names) = candidates {
+                    Outcome::Candidates(names)
+                } else if let Some(bound) = bound {
+                    if bound {
+                        Outcome::Described(Some(Description {
+                            name: name.unwrap_or_default(),
+                            signature,
+                            doc,
+                            kind: kind.ok_or("a bound name needs :kind")?,
+                            value: value.unwrap_or_default(),
+                        }))
+                    } else {
+                        Outcome::Described(None)
+                    }
+                } else {
+                    Outcome::Value {
+                        value: value.ok_or("an ok response needs :value")?,
+                        output: output.unwrap_or_default(),
+                    }
+                }
+            }
+            Some(other) => return Err(format!("unknown status `{other}`")),
+            None => return Err("a response needs :status".into()),
+        };
+        Ok(Response { id, outcome })
+    }
+}
+
+/// A proper list of strings, for `:candidates` and `:backtrace`. An empty
+/// list is `Some(vec![])` and a missing key is `None`, which is the
+/// difference between "no candidates" and "not that kind of response".
+fn strings(e: &crate::Engine, v: crate::Value) -> Result<Vec<String>, String> {
+    let items = proper_list(e, v).ok_or("expected a proper list of strings")?;
+    items
+        .into_iter()
+        .map(|x| text_of(e, x).ok_or_else(|| "expected a string".to_string()))
+        .collect()
+}
+
+fn as_bool(v: crate::Value) -> Option<bool> {
+    match v {
+        crate::Value::Bool(b) => Some(b),
+        _ => None,
     }
 }
 

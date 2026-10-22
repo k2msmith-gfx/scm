@@ -22,7 +22,8 @@ use std::rc::Rc;
 use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc;
 
 use rustyline::completion::{Completer, Pair};
@@ -43,15 +44,34 @@ static INTERRUPT: OnceLock<std::sync::Arc<AtomicBool>> = OnceLock::new();
 unsafe extern "C" {
     fn signal(sig: i32, handler: usize) -> usize;
     fn isatty(fd: i32) -> i32;
+    fn write(fd: i32, buf: *const u8, n: usize) -> isize;
 }
 
 const SIGINT: i32 = 2;
+
+/// The control connection's descriptor while this process is a remote
+/// client, or `-1`. A signal handler cannot touch a `TcpStream` -- but
+/// `write(2)` is async-signal-safe and the request is a fixed string, so
+/// the handler sends it itself rather than waking something that would
+/// have to wait for the connection the evaluation is holding.
+static CONTROL_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Pre-formatted, because a signal handler must not allocate.
+const INTERRUPT_WIRE: &str = "(:op interrupt :id 0)\n";
 
 /// Async-signal-safe: a relaxed store to an `AtomicBool` and nothing else.
 /// The VM notices at its next safepoint (requirement 8).
 extern "C" fn on_sigint(_: i32) {
     if let Some(flag) = INTERRUPT.get() {
         flag.store(true, Ordering::Relaxed);
+    }
+    // A remote client's VM is in another process, so the flag it just set is
+    // the wrong one. Send the request instead, out of band -- the server's
+    // reading thread sets *its* flag without waiting for the session, which
+    // is the whole design (docs/repl.md, ":interrupt is out of band").
+    let fd = CONTROL_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        unsafe { write(fd, INTERRUPT_WIRE.as_ptr(), INTERRUPT_WIRE.len()) };
     }
 }
 
@@ -190,6 +210,7 @@ fn main() -> ExitCode {
     }
     let mut fuel: Option<u64> = None;
     let mut serve: Option<String> = None;
+    let mut connect: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -214,6 +235,16 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            "--connect" => {
+                i += 1;
+                match args.get(i) {
+                    Some(a) => connect = Some(a.clone()),
+                    None => {
+                        eprintln!("scm: --connect wants an address, e.g. 127.0.0.1:7000");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             "-h" | "--help" => {
                 usage();
                 return ExitCode::SUCCESS;
@@ -225,6 +256,25 @@ fn main() -> ExitCode {
             _ => rest.push(args[i].clone()),
         }
         i += 1;
+    }
+
+    // A remote prompt has no interpreter of its own, so it does not build
+    // one: the server owns the state, and compiling a prelude here would be
+    // startup paid for nothing. It still installs the SIGINT handler, which
+    // is what turns `C-c` into a request on the control connection.
+    if let Some(addr) = connect {
+        if serve.is_some() {
+            eprintln!("scm: --serve and --connect are opposite ends; pick one");
+            return ExitCode::from(2);
+        }
+        unsafe { signal(SIGINT, on_sigint as *const () as usize) };
+        return match Remote::connect(&addr) {
+            Ok(r) => repl(Door::Remote(r)),
+            Err(e) => {
+                eprintln!("scm: cannot connect to {addr}: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     let mut session = match Session::new() {
@@ -263,12 +313,12 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        None => repl(session),
+        None => repl(Door::Local(Rc::new(RefCell::new(session)))),
     }
 }
 
 fn usage() {
-    println!("usage: scm [--fuel N] [--serve ADDR] [FILE | -e EXPR]");
+    println!("usage: scm [--fuel N] [--serve ADDR | --connect ADDR] [FILE | -e EXPR]");
     println!("       scm build FILE [-o OUT]");
     println!();
     println!("  no arguments   start the terminal REPL");
@@ -277,6 +327,9 @@ fn usage() {
     println!("  build FILE     a standalone executable: this runtime with FILE");
     println!("                 embedded; needs no toolchain, runs where scm runs");
     println!("  --serve ADDR   serve the REPL protocol over TCP (see docs/repl.md)");
+    println!("  --connect ADDR a prompt on a server started elsewhere: its state, its");
+    println!("                 globals, shared with every other client of it. C-d leaves");
+    println!("                 the prompt and leaves the server running");
     println!("  --fuel N       stop after N safepoints; a runaway is an error,");
     println!("                 not a hang (plan requirement 8)");
     println!();
@@ -331,13 +384,33 @@ fn run_once(session: &mut Session, src: &str, source: &str) -> ExitCode {
 /// same parse the socket client asks for), tab completion over the global
 /// names, and the break REPL on an uncaught error. Without one -- a pipe,
 /// a test -- plain lines, so `echo '(+ 1 2)' | scm` still works.
-fn repl(session: Session) -> ExitCode {
-    let version = env!("CARGO_PKG_VERSION");
-    let session = Rc::new(RefCell::new(session));
+fn repl(mut door: Door) -> ExitCode {
+    // Through the door rather than from `env!`, so a remote prompt reports
+    // the *server's* version. Two binaries of different ages can talk --
+    // the protocol is built for it -- and the banner should not claim
+    // otherwise.
+    let version = match door.ask(Request { id: 0, op: Op::Ping }) {
+        Ok(Response { outcome: Outcome::Pong { version }, .. }) => version,
+        Ok(r) => {
+            eprintln!("scm: not an scm server: it answered ping with {:?}", r.outcome);
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("scm: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let names: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    refresh_names(&session, &names);
+    refresh_names(&mut door, &names);
     let tty = unsafe { isatty(0) } != 0;
-    println!("scm {version} — C-c interrupts, C-d leaves, ,help for commands");
+    match door.where_() {
+        None => println!("scm {version} — C-c interrupts, C-d leaves, ,help for commands"),
+        // Leaving a remote prompt is not stopping the server, which is the
+        // difference a user has to be told once.
+        Some(addr) => println!(
+            "scm {version} on {addr} — C-c interrupts, C-d leaves the prompt (the server keeps running)"
+        ),
+    }
     println!(
         "{} globals. (apropos \"vector\") lists names, (doc 'map) and (signature 'map) explain one.",
         names.borrow().len()
@@ -351,11 +424,14 @@ fn repl(session: Session) -> ExitCode {
                 // The break REPL reads from the same editor; the handler
                 // gets the machine directly because the session is busy
                 // with the evaluation that broke.
-                let for_break = Rc::clone(&ed);
-                let names_b = Rc::clone(&names);
-                session.borrow_mut().interp_mut().vm_mut().set_break_handler(Some(Box::new(
-                    move |vm, e| break_loop(vm, e, &for_break, &names_b),
-                )));
+                if let Some(session) = door.local() {
+                    let session = Rc::clone(session);
+                    let for_break = Rc::clone(&ed);
+                    let names_b = Rc::clone(&names);
+                    session.borrow_mut().interp_mut().vm_mut().set_break_handler(Some(Box::new(
+                        move |vm, e| break_loop(vm, e, &for_break, &names_b),
+                    )));
+                }
                 editor = Some(ed);
             }
             Err(e) => eprintln!("scm: no line editing ({e}); plain input"),
@@ -409,7 +485,13 @@ fn repl(session: Session) -> ExitCode {
                 pending.push_str(&line);
                 pending.push('\n');
                 id += 1;
-                let framed = session.borrow_mut().handle(Request { id, op: Op::Parse { code: pending.clone() } });
+                let framed = match door.ask(Request { id, op: Op::Parse { code: pending.clone() } }) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("scm: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
                 if matches!(framed.outcome, Outcome::Framed(Framing::Incomplete)) {
                     continue;
                 }
@@ -460,10 +542,15 @@ fn repl(session: Session) -> ExitCode {
         id += 1;
         entry += 1;
         let t0 = std::time::Instant::now();
-        let outcome = session
-            .borrow_mut()
-            .handle(Request { id, op: Op::Eval { code, source: Some(format!("<repl:{entry}>")) } })
-            .outcome;
+        let outcome = match door
+            .ask(Request { id, op: Op::Eval { code, source: Some(format!("<repl:{entry}>")) } })
+        {
+            Ok(r) => r.outcome,
+            Err(e) => {
+                eprintln!("scm: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
         let took = t0.elapsed();
         match outcome {
             Outcome::Value { value, output } => {
@@ -486,7 +573,7 @@ fn repl(session: Session) -> ExitCode {
         if timed {
             println!("{:.3} ms", took.as_secs_f64() * 1e3);
         }
-        refresh_names(&session, &names);
+        refresh_names(&mut door, &names);
     }
     if let Some(ed) = &editor {
         ed.borrow_mut().save();
@@ -515,11 +602,16 @@ fn emit(output: &str, terminal: bool) {
     let _ = io::stdout().flush();
 }
 
-fn refresh_names(session: &Rc<RefCell<Session>>, names: &Rc<RefCell<Vec<String>>>) {
-    let mut s = session.borrow_mut();
-    let mut all = s.interp_mut().complete("");
-    all.sort();
-    *names.borrow_mut() = all;
+/// The names tab completion offers, asked for over the door rather than
+/// read out of the interpreter -- otherwise a remote prompt would complete
+/// over the wrong process's globals, which is worse than not completing.
+fn refresh_names(door: &mut Door, names: &Rc<RefCell<Vec<String>>>) {
+    if let Ok(Response { outcome: Outcome::Candidates(mut all), .. }) =
+        door.ask(Request { id: 0, op: Op::Complete { prefix: String::new() } })
+    {
+        all.sort();
+        *names.borrow_mut() = all;
+    }
 }
 
 fn print_help() {
@@ -712,6 +804,121 @@ impl Validator for Hooks {
 }
 
 impl rustyline::Helper for Hooks {}
+
+// ---- where the prompt's requests go -------------------------------------
+
+/// A prompt is a client, and `--connect` makes that literal: the loop in
+/// [`repl`] builds a [`Request`] and reads a [`Response`] without knowing
+/// whether the session is in this process or on the far end of a socket.
+/// §8's "one client among several", with the count raised by one.
+enum Door {
+    /// A session in this process. `scm` with no arguments.
+    Local(Rc<RefCell<Session>>),
+    /// A `scm --serve` elsewhere. `scm --connect ADDR`.
+    Remote(Remote),
+}
+
+impl Door {
+    fn ask(&mut self, req: Request) -> Result<Response, String> {
+        match self {
+            Door::Local(s) => Ok(s.borrow_mut().handle(req)),
+            Door::Remote(r) => r.ask(req),
+        }
+    }
+
+    /// The session, when there is one in this process.
+    ///
+    /// The break REPL is the one thing that cannot be done at a distance: a
+    /// break handler runs *inside* the failing evaluation with the frames
+    /// still live, and a wire carries values, not a stack. So a remote
+    /// client gets today's unwind-and-report, exactly as docs/repl.md says
+    /// the socket client does.
+    fn local(&self) -> Option<&Rc<RefCell<Session>>> {
+        match self {
+            Door::Local(s) => Some(s),
+            Door::Remote(_) => None,
+        }
+    }
+
+    fn where_(&self) -> Option<&str> {
+        match self {
+            Door::Local(_) => None,
+            Door::Remote(r) => Some(&r.addr),
+        }
+    }
+}
+
+/// A connection to a `scm --serve`.
+///
+/// Two sockets, for the reason the protocol doc gives: the interpreter is
+/// single-threaded, so an evaluation holds it until it finishes, and an
+/// interrupt sent down the same connection would queue behind the form it
+/// is meant to stop. The Emacs client opens the same pair and for the same
+/// reason.
+struct Remote {
+    stream: TcpStream,
+    /// Bytes that have arrived and are not yet a whole response.
+    pending: String,
+    addr: String,
+}
+
+impl Remote {
+    fn connect(addr: &str) -> io::Result<Remote> {
+        let stream = TcpStream::connect(addr)?;
+        // A prompt is latency, not throughput: a one-line request must not
+        // wait for a second one to fill a segment.
+        stream.set_nodelay(true)?;
+        let control = TcpStream::connect(addr)?;
+        control.set_nodelay(true)?;
+        // The descriptor outlives the value deliberately. A signal handler
+        // may write to it at any moment, so it must not be closed while the
+        // prompt is alive -- and the prompt is alive until the process
+        // exits, which is also what closes it.
+        CONTROL_FD.store(control.as_raw_fd(), Ordering::Relaxed);
+        std::mem::forget(control);
+        Ok(Remote { stream, pending: String::new(), addr: addr.to_string() })
+    }
+
+    /// One request, one response. Nothing here is pipelined: the prompt has
+    /// one form in flight at a time, which is what lets the whole buffer be
+    /// taken once it reads as a complete datum.
+    ///
+    /// The interrupt's own response arrives on the control connection and is
+    /// never read. That is intentional -- the handler cannot wait for it --
+    /// and it costs a few dozen buffered bytes per `C-c`.
+    fn ask(&mut self, req: Request) -> Result<Response, String> {
+        let text = format!("{}\n", req.to_wire());
+        self.stream
+            .write_all(text.as_bytes())
+            .and_then(|()| self.stream.flush())
+            .map_err(|e| format!("{}: {e}", self.addr))?;
+        let mut chunk = [0u8; 4096];
+        loop {
+            // Framing is the reader, here as on the server: read until what
+            // we hold is one complete datum. No length prefix, and a
+            // response containing parens or newlines needs no special case.
+            if !self.pending.trim().is_empty() {
+                match scm::parse_status(&self.pending) {
+                    scm::ParseStatus::Complete => {
+                        let text = std::mem::take(&mut self.pending);
+                        return Response::parse(&text)
+                            .map_err(|e| format!("unreadable response: {e}"));
+                    }
+                    scm::ParseStatus::Invalid(_) => {
+                        let text = std::mem::take(&mut self.pending);
+                        return Err(format!("not a response: {}", text.trim()));
+                    }
+                    scm::ParseStatus::Incomplete => {}
+                }
+            }
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err(format!("{} closed the connection", self.addr)),
+                Ok(n) => self.pending.push_str(&String::from_utf8_lossy(&chunk[..n])),
+                Err(e) => return Err(format!("{}: {e}", self.addr)),
+            }
+        }
+    }
+}
 
 // ---- the socket client --------------------------------------------------
 
