@@ -1,0 +1,17 @@
+[package]
+name = "scm-dap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A Debug Adapter for scm: the break REPL, with a UI"
+
+[[bin]]
+name = "scm-dap"
+path = "src/main.rs"
+
+[dependencies]
+schemers = { path = "../scm" }
+# The same one dependency, and in a tooling crate for the same reason as
+# scm-lsp's: the embeddable crate's no-dependencies rule is about what a
+# host takes, and a host takes neither of these.
+serde_json = "1"

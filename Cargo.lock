@@ -330,6 +330,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "scm-dap"
+version = "0.0.1"
+dependencies = [
+ "schemers",
+ "serde_json",
+]
+
+[[package]]
 name = "scm-llvm"
 version = "0.0.1"
 dependencies = [
