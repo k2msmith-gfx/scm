@@ -318,6 +318,24 @@ buy anything a differing version could not also break.
   the answer **including on failure**, because what a form printed before it
   broke is usually the most useful part. Streaming adds to that; it must not
   replace it, or every existing client regresses.
+
+  **The strongest case for it is the debugger, and it was found by building
+  one.** `scm-dap` captures with `eval_capturing_named`, which returns its
+  string when the evaluation ends — but the break handler fires *inside*
+  that evaluation. So at a break, the Debug Console holds **nothing** of
+  what the program printed. Measured 2026-10-22 on a program that displays
+  twice and then calls `(car '())`:
+
+      => output events delivered by the time we are STOPPED: 0
+      => output arriving only AFTER continue: "IMPORTANT CLUE\nstep 2 done\n…"
+
+  The clue arrives after the user has already chosen between `,return` and
+  abort. That is this document's own principle — *what a form printed before
+  it broke is usually the most useful part* — honoured in the letter and
+  missed in the point, and no rearrangement inside `scm-dap` fixes it: the
+  text is in a string port the adapter cannot reach. The smallest thing that
+  would is an additive read of what the current capture holds so far; the
+  sink is the general version.
 - **Several interpreters over one socket.** One session per server today.
 - **Completion inside a form** — candidates come from the global environment,
   so a local binding is not offered.

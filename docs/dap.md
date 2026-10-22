@@ -95,11 +95,32 @@ drain it is blocked inside the very evaluation the handler is describing.
 ## Output
 
 The program's output cannot go to stdout, because stdout is the protocol,
-so it is captured (`eval_capturing_named`) and sent as `output` events. It
-therefore arrives **when the program finishes** rather than as it is
-produced — the same limitation the Z4 spike measured, from the same cause:
-`:output` travels with the answer. What ran before a failure is kept, which
-is usually the most useful part of one.
+so it is captured (`eval_capturing_named`) and sent as `output` events.
+
+**And that is this adapter's worst flaw, so it is written here rather than
+discovered.** The capture returns its string when the evaluation *ends*, and
+the break handler fires **inside** that evaluation — so at a break the Debug
+Console holds nothing of what the program printed. Measured on a program
+that displays twice and then calls `(car '())`:
+
+    => output events delivered by the time we are STOPPED: 0
+    => output arriving only AFTER continue: "IMPORTANT CLUE\nstep 2 done\n…"
+
+The clue arrives after the user has already chosen between `,return` and
+abort — which is exactly the decision the clue was for. `docs/repl.md` says
+*what a form printed before it broke is usually the most useful part*; this
+honours the letter and misses the point.
+
+**No rearrangement here fixes it.** The text sits in a `StringOut` port that
+the adapter cannot reach: `eval_capturing_named` creates and roots it
+privately. The fix is a small additive read on the embed API — what the
+current capture holds *so far* — or the output sink, which is the general
+version of the same thing. See `docs/plan.md` §13.3; it is the strongest
+item on that list precisely because it is a hole in something shipped.
+
+Until then: the error's own message and backtrace *are* delivered at the
+break, as the `stopped` event's description and the stack, so a failure is
+still diagnosable — it is the program's own narration that is late.
 
 ## Locations
 

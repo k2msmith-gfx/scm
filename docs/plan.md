@@ -1658,10 +1658,16 @@ Still open:
    and nothing in the port is blocked on it. It also would not touch ray's
    long operations: a render broadcasts framebuffer strips to a display
    thread, not text. What it buys is a script that prints its own progress,
-   and the agent pane's view of a slow form. Decide **after** the modeler port
-   lands, because the socket half is a two-repo change to the door ray depends
-   on; and if it is done, do the embed-API sink first, which is additive and
-   is the half an in-process host actually uses.
+   and the agent pane's view of a slow form — **and the debugger**, which is
+   the case that was not visible until S24 existed: at a break the Debug
+   Console holds *nothing* of what the program printed, because the capture
+   returns when the evaluation ends and the handler runs inside it. Measured:
+   0 output events by the time the client is stopped. That is the strongest
+   argument on the list, because it is a hole in something shipped rather
+   than a feature nobody has. Decide **after** the modeler port lands,
+   because the socket half is a two-repo change to the door ray depends on;
+   and if it is done, do the embed-API sink first, which is additive, is the
+   half an in-process host actually uses, and is what `scm-dap` needs.
 4. **`homoiconic.janet`** walks a quoted tuple with `postwalk` and `eval`s the
    result. It was the one ray example with no clear Steel translation. Does scm
    expose the AST as ordinary indexable data, or as opaque syntax objects?
