@@ -695,6 +695,8 @@ fn a_request_round_trips_through_the_wire() {
         Request { id: 5, op: Op::Complete { prefix: "vector-".into() } },
         Request { id: 6, op: Op::Describe { name: "car".into() } },
         Request { id: 7, op: Op::Parse { code: "(+ 1".into() } },
+        Request { id: 9, op: Op::Stream { on: true } },
+        Request { id: 10, op: Op::Stream { on: false } },
         // The payload that would break a naive formatter: a quote, a
         // backslash, a newline and unbalanced parens inside a string.
         Request {
@@ -758,6 +760,10 @@ fn a_response_round_trips_through_the_wire() {
         Response { id: 10, outcome: Outcome::Framed(Framing::Incomplete) },
         Response { id: 11, outcome: Outcome::Framed(Framing::Invalid) },
         Response { id: 12, outcome: Outcome::Malformed("unknown op `frobnicate`".into()) },
+        // A chunk of output, mid-evaluation. Its own status, so it cannot
+        // be read as an answer with no value.
+        Response { id: 13, outcome: Outcome::Streamed("half way".into()) },
+        Response { id: 14, outcome: Outcome::Streamed(String::new()) },
     ];
     for res in responses {
         let wire = res.to_wire();
@@ -835,4 +841,156 @@ fn a_malformed_response_is_an_error_not_a_panic() {
     ] {
         assert!(Response::parse(text).is_err(), "accepted {text:?}");
     }
+}
+
+// --- S25: output as it happens --------------------------------------------
+
+#[test]
+fn a_sink_sees_output_before_the_evaluation_returns() {
+    // The claim, and the only way to prove it from inside a synchronous
+    // call: the script calls back into the host *between* two writes, and
+    // the host asserts the first one has already arrived. Collecting the
+    // chunks and checking them afterwards would pass just as well with no
+    // streaming at all.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut s = Session::new().unwrap();
+
+    let for_sink = Rc::clone(&seen);
+    s.interp_mut()
+        .set_output_sink(Some(Box::new(move |text: &str| {
+            for_sink.borrow_mut().push(text.to_string());
+        })));
+
+    let for_probe = Rc::clone(&seen);
+    s.interp_mut()
+        .define_fn("mid-flight", move |_args| {
+            // What the sink has at the moment the script is halfway
+            // through. This is the assertion that matters.
+            Ok(scm::Val::Str(for_probe.borrow().concat()))
+        })
+        .unwrap();
+
+    let outcome = eval(
+        &mut s,
+        r#"(begin (display "FIRST") (let ((half (mid-flight))) (display "SECOND") half))"#,
+    );
+    let Outcome::Value { value, output } = outcome else {
+        panic!("{outcome:?}");
+    };
+    // The host saw FIRST while the program was still running.
+    assert_eq!(value, "\"FIRST\"", "the sink had not been told yet");
+    // And `:output` still travels with the answer: streaming adds a
+    // channel, it does not move one.
+    assert_eq!(output, "FIRSTSECOND");
+    assert_eq!(seen.borrow().concat(), "FIRSTSECOND");
+}
+
+#[test]
+fn a_scripts_own_string_port_does_not_reach_the_sink() {
+    // `with-output-to-string` is a program's private workings. If it
+    // streamed, every internal use of it would appear in the editor's
+    // transcript -- and a host cannot tell which writes were meant for it.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let seen: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let mut s = Session::new().unwrap();
+    let for_sink = Rc::clone(&seen);
+    s.interp_mut()
+        .set_output_sink(Some(Box::new(move |t: &str| for_sink.borrow_mut().push_str(t))));
+
+    let outcome = eval(
+        &mut s,
+        r#"(begin
+             (display "visible")
+             (let ((p (open-output-string)))
+               (write-string "private" p)
+               (get-output-string p)))"#,
+    );
+    let Outcome::Value { value, .. } = outcome else { panic!("{outcome:?}") };
+    assert_eq!(value, "\"private\"");
+    assert_eq!(seen.borrow().as_str(), "visible", "a private port leaked");
+}
+
+#[test]
+fn a_sink_does_not_outlive_the_evaluation_it_was_watching() {
+    // The port is named per evaluation, so the next one's output does not
+    // arrive on the previous one's channel -- which for a socket client
+    // would mean output attributed to the wrong request.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut s = Session::new().unwrap();
+    let for_sink = Rc::clone(&seen);
+    s.interp_mut()
+        .set_output_sink(Some(Box::new(move |t: &str| {
+            for_sink.borrow_mut().push(t.to_string())
+        })));
+    eval(&mut s, r#"(display "one")"#);
+    assert_eq!(seen.borrow().concat(), "one");
+
+    // Removing it stops the reports without disturbing the capture.
+    s.interp_mut().set_output_sink(None);
+    let outcome = eval(&mut s, r#"(begin (display "two") 2)"#);
+    let Outcome::Value { output, .. } = outcome else { panic!("{outcome:?}") };
+    assert_eq!(output, "two");
+    assert_eq!(seen.borrow().concat(), "one", "the sink fired after removal");
+}
+
+#[test]
+fn output_before_a_failure_is_reported_as_it_happens() {
+    // The motivating case. `scm-dap` stops *inside* a failing evaluation,
+    // and until now the captured string did not exist yet, so the Debug
+    // Console was empty at exactly the moment a user was choosing what to
+    // do about the failure.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let seen: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let mut s = Session::new().unwrap();
+    let for_sink = Rc::clone(&seen);
+    s.interp_mut()
+        .set_output_sink(Some(Box::new(move |t: &str| for_sink.borrow_mut().push_str(t))));
+
+    let outcome = eval(&mut s, r#"(begin (display "IMPORTANT CLUE") (car '()))"#);
+    assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
+    assert_eq!(seen.borrow().as_str(), "IMPORTANT CLUE");
+    // And it is still in `:output` too, for a client that reads only that.
+    let Outcome::Failed { output, .. } = outcome else { unreachable!() };
+    assert_eq!(output, "IMPORTANT CLUE");
+}
+
+#[test]
+fn asking_to_stream_is_opt_in_and_unknown_to_an_older_server() {
+    // The compatibility story in both directions. A client that never
+    // sends `:op stream` sees exactly today's bytes -- which is what keeps
+    // `scm-mode.el` working, since it dispatches by `:id` and removes the
+    // callback when it fires, so an unsolicited message carrying an
+    // in-flight id would eat the real answer.
+    let mut s = Session::new().unwrap();
+    assert_eq!(
+        Request::parse("(:op stream :id 1 :on #t)").unwrap(),
+        Request { id: 1, op: Op::Stream { on: true } }
+    );
+    // Absent `:on` is off, not an error: a newer client talking to this
+    // server is the case the protocol is built for, and so is the reverse.
+    assert_eq!(
+        Request::parse("(:op stream :id 1)").unwrap(),
+        Request { id: 1, op: Op::Stream { on: false } }
+    );
+    // The session acknowledges and keeps no state of its own.
+    let r = s.handle(Request { id: 1, op: Op::Stream { on: true } });
+    assert!(matches!(r.outcome, Outcome::Pong { .. }), "{:?}", r.outcome);
+
+    // And a chunk reads back as a chunk, not as a value.
+    let wire = Response { id: 3, outcome: Outcome::Streamed("mid".into()) }.to_wire();
+    assert_eq!(wire, r#"(:id 3 :status output :output "mid")"#);
+    assert_eq!(
+        Response::parse(&wire).unwrap().outcome,
+        Outcome::Streamed("mid".into())
+    );
 }

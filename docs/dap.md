@@ -97,30 +97,29 @@ drain it is blocked inside the very evaluation the handler is describing.
 The program's output cannot go to stdout, because stdout is the protocol,
 so it is captured (`eval_capturing_named`) and sent as `output` events.
 
-**And that is this adapter's worst flaw, so it is written here rather than
-discovered.** The capture returns its string when the evaluation *ends*, and
-the break handler fires **inside** that evaluation — so at a break the Debug
-Console holds nothing of what the program printed. Measured on a program
-that displays twice and then calls `(car '())`:
+**This used to be the adapter's worst flaw, and fixing it was the strongest
+argument for S25.** The capture returns its string when the evaluation
+*ends*, and the break handler fires **inside** that evaluation — so at a
+break the Debug Console held nothing of what the program had printed.
+Measured then, on a program that displays twice and then calls `(car '())`:
 
     => output events delivered by the time we are STOPPED: 0
     => output arriving only AFTER continue: "IMPORTANT CLUE\nstep 2 done\n…"
 
-The clue arrives after the user has already chosen between `,return` and
-abort — which is exactly the decision the clue was for. `docs/repl.md` says
-*what a form printed before it broke is usually the most useful part*; this
-honours the letter and misses the point.
+The clue arrived after the user had already chosen between `,return` and
+abort — which is exactly the decision the clue was for.
 
-**No rearrangement here fixes it.** The text sits in a `StringOut` port that
-the adapter cannot reach: `eval_capturing_named` creates and roots it
-privately. The fix is a small additive read on the embed API — what the
-current capture holds *so far* — or the output sink, which is the general
-version of the same thing. See `docs/plan.md` §13.3; it is the strongest
-item on that list precisely because it is a hole in something shipped.
+**Fixed by S25**, which is a sink rather than anything rearranged here: the
+adapter installs `Interp::set_output_sink` for the run and forwards each
+piece as an `output` event the moment it is written, so the console has the
+program's narration *at* the break.
+`the_console_has_the_programs_output_at_the_break` is the test, and it
+asserts on the state at the `stopped` event rather than after continuing —
+which is the distinction the old behaviour passed every other test by
+blurring.
 
-Until then: the error's own message and backtrace *are* delivered at the
-break, as the `stopped` event's description and the stack, so a failure is
-still diagnosable — it is the program's own narration that is late.
+The capture is still taken as well, because `:output` arriving with the
+answer is the protocol's guarantee and a future client may want it whole.
 
 ## Locations
 

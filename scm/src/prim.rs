@@ -2329,31 +2329,39 @@ fn get_output_string(e: &mut Engine, a: &[Value]) -> PResult {
 /// Write text to a port. The one place output actually leaves the system.
 fn emit(e: &mut Engine, port: Value, text: &str) -> Result<(), VmError> {
     let r = port_ref("write", e, port)?;
-    match e.obj_mut(r) {
-        Obj::Port { open: false, .. } => Err(err("write: the port is closed")),
+    // Whether this write went into a buffer rather than straight out of the
+    // process. Only a buffered port can also be *reported*, and the report
+    // happens after the match so the sink is called outside the borrow --
+    // by which time the port's contents already include this text.
+    let buffered = match e.obj_mut(r) {
+        Obj::Port { open: false, .. } => return Err(err("write: the port is closed")),
         Obj::Port {
             kind: PortKind::StringOut(s) | PortKind::FileOut { buf: s, .. },
             ..
         } => {
             s.push_str(text);
-            Ok(())
+            true
         }
         Obj::Port {
             kind: PortKind::Stdout,
             ..
         } => {
             print!("{text}");
-            Ok(())
+            false
         }
         Obj::Port {
             kind: PortKind::Stderr,
             ..
         } => {
             eprint!("{text}");
-            Ok(())
+            false
         }
-        _ => Err(err("write: not an output port")),
+        _ => return Err(err("write: not an output port")),
+    };
+    if buffered {
+        e.report(r, text);
     }
+    Ok(())
 }
 
 fn read_char(e: &mut Engine, a: &[Value], peek: bool) -> PResult {

@@ -552,16 +552,22 @@ fn repl(mut door: Door) -> ExitCode {
             }
         };
         let took = t0.elapsed();
+        // Already printed as it happened, if the server is streaming.
+        let echo_output = !door.streams();
         match outcome {
             Outcome::Value { value, output } => {
-                emit(&output, editor.is_some());
+                if echo_output {
+                    emit(&output, editor.is_some());
+                }
                 if value != "#<unspecified>" {
                     println!("{value}");
                 }
             }
             Outcome::Failed { message, output, backtrace, .. } => {
                 // Before the message, which goes to unbuffered stderr.
-                emit(&output, editor.is_some());
+                if echo_output {
+                    emit(&output, editor.is_some());
+                }
                 eprintln!("{message}");
                 for f in &backtrace {
                     eprintln!("  in {f}");
@@ -840,6 +846,18 @@ impl Door {
         }
     }
 
+    /// Whether output has already been printed as it happened, so the
+    /// `:output` that arrives with the answer must **not** be printed
+    /// again. It still arrives -- that guarantee is the protocol's -- and a
+    /// client that both streams and prints the final copy shows everything
+    /// twice, which is what the first version of this did.
+    fn streams(&self) -> bool {
+        match self {
+            Door::Local(_) => false,
+            Door::Remote(r) => r.streaming,
+        }
+    }
+
     fn where_(&self) -> Option<&str> {
         match self {
             Door::Local(_) => None,
@@ -860,6 +878,8 @@ struct Remote {
     /// Bytes that have arrived and are not yet a whole response.
     pending: String,
     addr: String,
+    /// Whether the server agreed to report output as it happens.
+    streaming: bool,
 }
 
 impl Remote {
@@ -876,7 +896,21 @@ impl Remote {
         // exits, which is also what closes it.
         CONTROL_FD.store(control.as_raw_fd(), Ordering::Relaxed);
         std::mem::forget(control);
-        Ok(Remote { stream, pending: String::new(), addr: addr.to_string() })
+        let mut remote = Remote {
+            stream,
+            pending: String::new(),
+            addr: addr.to_string(),
+            streaming: false,
+        };
+        // Ask for output as it happens. Harmless against a server that has
+        // never heard of it: an unknown op is answered `malformed` and the
+        // prompt carries on with output arriving at the end, which is what
+        // every client did before S25.
+        remote.streaming = matches!(
+            remote.ask(Request { id: 0, op: Op::Stream { on: true } }),
+            Ok(Response { outcome: Outcome::Pong { .. }, .. })
+        );
+        Ok(remote)
     }
 
     /// One request, one response. Nothing here is pipelined: the prompt has
@@ -893,6 +927,7 @@ impl Remote {
             .and_then(|()| self.stream.flush())
             .map_err(|e| format!("{}: {e}", self.addr))?;
         let mut chunk = [0u8; 4096];
+        let terminal = unsafe { isatty(1) } != 0;
         loop {
             // Framing is the reader, here as on the server: read until what
             // we hold is one complete datum. No length prefix, and a
@@ -901,8 +936,17 @@ impl Remote {
                 match scm::parse_status(&self.pending) {
                     scm::ParseStatus::Complete => {
                         let text = std::mem::take(&mut self.pending);
-                        return Response::parse(&text)
-                            .map_err(|e| format!("unreadable response: {e}"));
+                        let answer = Response::parse(&text)
+                            .map_err(|e| format!("unreadable response: {e}"))?;
+                        // S25: a chunk is not the answer. Print it where it
+                        // happened and keep reading -- which is the whole
+                        // point, a long form narrating itself instead of
+                        // saying nothing and then everything.
+                        if let Outcome::Streamed(out) = &answer.outcome {
+                            emit(out, terminal);
+                            continue;
+                        }
+                        return Ok(answer);
                     }
                     scm::ParseStatus::Invalid(_) => {
                         let text = std::mem::take(&mut self.pending);
@@ -946,7 +990,12 @@ fn serve_forever(mut session: Session, addr: &str) -> ExitCode {
     println!("scm serving on {local}");
     let _ = io::stdout().flush();
 
-    let (tx, rx) = mpsc::channel::<(Request, mpsc::Sender<Response>)>();
+    // The third element is where output goes *while* the request runs, and
+    // it is `Some` only for a connection that asked. The session is on one
+    // thread serving every connection, so the channel has to carry it: a
+    // sink installed per connection would stream one client's output to
+    // another.
+    let (tx, rx) = mpsc::channel::<Job>();
     let flag = session.interrupt_handle();
 
     std::thread::spawn(move || {
@@ -959,19 +1008,53 @@ fn serve_forever(mut session: Session, addr: &str) -> ExitCode {
     });
 
     // The session's own loop. Single-threaded on purpose (plan §3.3).
-    while let Ok((req, reply)) = rx.recv() {
-        let _ = reply.send(session.handle(req));
+    while let Ok(Job { req, reply, stream }) = rx.recv() {
+        match stream {
+            // S25: report output as it is produced, framed as its own
+            // datum, down the connection that asked for it. The sink is
+            // installed for this request only, so a chunk cannot be
+            // attributed to the wrong `:id`.
+            Some(mut socket) => {
+                let id = req.id;
+                session.interp_mut().set_output_sink(Some(Box::new(move |text: &str| {
+                    let chunk = Response { id, outcome: Outcome::Streamed(text.to_string()) };
+                    // A dead socket is not an error worth failing the
+                    // evaluation for: the answer will fail to send too, and
+                    // that is where it is noticed.
+                    let _ = socket.write_all(format!("{}\n", chunk.to_wire()).as_bytes());
+                    let _ = socket.flush();
+                })));
+                let answer = session.handle(req);
+                session.interp_mut().set_output_sink(None);
+                let _ = reply.send(answer);
+            }
+            None => {
+                let _ = reply.send(session.handle(req));
+            }
+        }
     }
     ExitCode::SUCCESS
 }
 
+/// One request, plus where to send the answer, plus where to stream output
+/// if this connection asked for it.
+struct Job {
+    req: Request,
+    reply: mpsc::Sender<Response>,
+    stream: Option<TcpStream>,
+}
+
 fn connection(
     mut stream: TcpStream,
-    tx: mpsc::Sender<(Request, mpsc::Sender<Response>)>,
+    tx: mpsc::Sender<Job>,
     flag: std::sync::Arc<AtomicBool>,
 ) {
     let mut buf = String::new();
     let mut chunk = [0u8; 4096];
+    // Per connection, not per session: two clients of one session may
+    // disagree about wanting this, and a client that never asks sees
+    // exactly the bytes it saw before S25.
+    let mut streaming = false;
     loop {
         // Framing IS the reader: read until what we have is a complete datum
         // (plan §8 obligation 5, reused rather than reinvented).
@@ -993,7 +1076,18 @@ fn connection(
                 outcome: Outcome::Malformed(why),
             },
             Ok(req) => {
-                if matches!(req.op, Op::Interrupt) {
+                if let Op::Stream { on } = req.op {
+                    // Handled here rather than by the session, which keeps
+                    // no streaming state -- the connection owns the socket
+                    // the output would go down.
+                    streaming = on;
+                    Response {
+                        id: req.id,
+                        outcome: Outcome::Pong {
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                        },
+                    }
+                } else if matches!(req.op, Op::Interrupt) {
                     // Out of band, which is the point: the session may be
                     // busy with the very form this is stopping.
                     flag.store(true, Ordering::Relaxed);
@@ -1005,7 +1099,14 @@ fn connection(
                     }
                 } else {
                     let (rtx, rrx) = mpsc::channel();
-                    if tx.send((req, rtx)).is_err() {
+                    // Only an `eval` produces output worth streaming, and
+                    // only a connection that asked gets it.
+                    let to_stream = if streaming && matches!(req.op, Op::Eval { .. }) {
+                        stream.try_clone().ok()
+                    } else {
+                        None
+                    };
+                    if tx.send(Job { req, reply: rtx, stream: to_stream }).is_err() {
                         return;
                     }
                     match rrx.recv() {

@@ -561,6 +561,25 @@ impl std::fmt::Display for Loc {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Handle(usize);
 
+/// A host's view of output **as it is produced**, rather than when the
+/// evaluation that produced it returns.
+///
+/// Boxed and wrapped rather than stored bare because `Engine` derives
+/// `Debug` and a closure does not. The wrapper is also the honest name for
+/// what this is: a side channel the host wires up, like ray's own
+/// `set_diag_sink`.
+pub struct OutputSink(pub OutputCallback);
+
+/// What a host hands [`Engine::set_output_sink`]: called with each piece of
+/// text as the program writes it.
+pub type OutputCallback = Box<dyn FnMut(&str)>;
+
+impl std::fmt::Debug for OutputSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("#<output-sink>")
+    }
+}
+
 /// Everything a running Scheme owns below the control stack.
 #[derive(Debug)]
 pub struct Engine {
@@ -600,6 +619,15 @@ pub struct Engine {
     /// otherwise report the location of whatever *used* to live there, which
     /// is worse than reporting nothing.
     locs: HashMap<ObjRef, Loc>,
+    /// Where output goes as it happens, when a host asked for it, and the
+    /// one port it applies to.
+    ///
+    /// The port matters: a script's own `(open-output-string)` must not
+    /// reach the host's sink, or `with-output-to-string` inside a program
+    /// would leak its workings into the editor's transcript. Only the port
+    /// the host installed streams.
+    sink: Option<OutputSink>,
+    stream_port: Option<ObjRef>,
     /// Renamed macro identifiers, pointing back at what they meant where the
     /// macro was defined. Consulted only when a name is not lexically bound,
     /// which is what gives a template both hygiene and referential
@@ -628,6 +656,47 @@ impl Default for Engine {
 }
 
 impl Engine {
+    /// Install (or remove) the sink output is reported to as it happens.
+    ///
+    /// It fires only for the port named by [`Engine::stream_to`], and it
+    /// fires **in addition** to the port accumulating: `:output` still
+    /// travels with the answer, including on failure, because what a form
+    /// printed before it broke is usually the most useful part. Streaming
+    /// adds a channel; it does not move one.
+    pub fn set_output_sink(&mut self, sink: Option<OutputCallback>) {
+        self.sink = sink.map(OutputSink);
+    }
+
+    /// Which port the sink applies to. The capture a host installed, and
+    /// nothing else.
+    pub fn stream_to(&mut self, port: Option<ObjRef>) {
+        self.stream_port = port;
+    }
+
+    pub fn has_output_sink(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    /// Report text to the sink, if this is the port it watches.
+    ///
+    /// The sink is taken out for the call and put back after: it is
+    /// `FnMut`, so it needs `&mut self` while `self` is already borrowed by
+    /// the write that produced the text. A sink that re-enters the engine
+    /// therefore sees no sink installed, which is the right answer -- it
+    /// would otherwise be infinite.
+    pub(crate) fn report(&mut self, port: ObjRef, text: &str) {
+        if self.stream_port != Some(port) || text.is_empty() {
+            return;
+        }
+        if let Some(mut sink) = self.sink.take() {
+            (sink.0)(text);
+            // Only restore it if the sink did not install another one.
+            if self.sink.is_none() {
+                self.sink = Some(sink);
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Engine {
             slots: Vec::new(),
@@ -642,6 +711,8 @@ impl Engine {
             collections: 0,
             handles: Vec::new(),
             locs: HashMap::new(),
+            sink: None,
+            stream_port: None,
             aliases: HashMap::new(),
             interner: Interner::default(),
             prim_names: Vec::new(),

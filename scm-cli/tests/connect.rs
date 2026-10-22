@@ -235,3 +235,155 @@ fn serving_and_connecting_at_once_is_refused() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// --- S25: output as it happens, over the socket ---------------------------
+
+/// A raw protocol client, because these tests are about *when* bytes
+/// arrive and the prompt would hide that behind its own printing.
+struct Wire {
+    stream: std::net::TcpStream,
+    pending: String,
+}
+
+impl Wire {
+    fn open(addr: &str) -> Wire {
+        let stream = std::net::TcpStream::connect(addr).expect("connect");
+        stream.set_nodelay(true).unwrap();
+        Wire { stream, pending: String::new() }
+    }
+
+    fn send(&mut self, text: &str) {
+        use std::io::Write as _;
+        self.stream.write_all(format!("{text}\n").as_bytes()).unwrap();
+        self.stream.flush().unwrap();
+    }
+
+    /// The next datum, and how long after `since` it arrived.
+    fn next(&mut self, since: Instant) -> (String, Duration) {
+        use std::io::Read as _;
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(at) = self.pending.find('\n') {
+                let line = self.pending[..at].trim().to_string();
+                self.pending.drain(..=at);
+                if !line.is_empty() {
+                    return (line, since.elapsed());
+                }
+                continue;
+            }
+            let n = self.stream.read(&mut chunk).expect("read");
+            assert!(n > 0, "the server closed");
+            self.pending.push_str(&String::from_utf8_lossy(&chunk[..n]));
+        }
+    }
+}
+
+/// A form that prints, then runs for about `secs`, then prints again.
+fn slow_printer(secs: f64) -> String {
+    let code = format!(
+        "(begin (display \"FIRST\") \
+         (let ((stop (+ (current-second) {secs}))) \
+           (let loop () (if (< (current-second) stop) (loop) #t))) \
+         (display \"SECOND\") 42)"
+    );
+    format!(
+        "(:op eval :id 2 :code \"{}\")",
+        code.replace('\\', "\\\\").replace('"', "\\\"")
+    )
+}
+
+#[test]
+fn output_arrives_while_the_form_is_still_running() {
+    // The measurement this stage exists for. Before S25 a form that
+    // printed and then ran for two seconds sent *nothing* for two seconds
+    // and then everything at once; `docs/repl.md` records the number.
+    let (mut server, addr) = serve();
+    let mut w = Wire::open(&addr);
+    w.send("(:op stream :id 1 :on #t)");
+    let t0 = Instant::now();
+    let (ack, _) = w.next(t0);
+    assert!(ack.contains(":status ok"), "{ack}");
+
+    let t0 = Instant::now();
+    w.send(&slow_printer(2.0));
+    let (first, at_first) = w.next(t0);
+    assert!(first.contains(r#":status output :output "FIRST""#), "{first}");
+
+    // The whole claim, in one assertion: the first chunk is here long
+    // before the answer can be. A wall-clock *difference* rather than an
+    // absolute, so a loaded machine makes this slower, not flaky.
+    let mut last = first;
+    let mut at_last = at_first;
+    while !last.contains(":status ok :value") {
+        let (line, at) = w.next(t0);
+        last = line;
+        at_last = at;
+    }
+    assert!(
+        at_last.saturating_sub(at_first) > Duration::from_millis(1000),
+        "the chunk was not early: first at {at_first:?}, answer at {at_last:?}"
+    );
+    // And `:output` still travels with the answer, on which every client
+    // written before S25 depends.
+    assert!(last.contains(r#":output "FIRSTSECOND""#), "{last}");
+
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[test]
+fn a_connection_that_does_not_ask_sees_exactly_what_it_saw_before() {
+    // The compatibility guarantee, and the reason streaming is opt-in:
+    // `scm-mode.el` dispatches by `:id` and removes the callback when it
+    // fires, so an unsolicited message carrying an in-flight id would eat
+    // the real answer. A client that never asks must see one datum.
+    let (mut server, addr) = serve();
+    let mut w = Wire::open(&addr);
+    let t0 = Instant::now();
+    w.send(&slow_printer(0.2));
+    let (only, _) = w.next(t0);
+    assert!(only.contains(":status ok :value"), "not the answer first: {only}");
+    assert!(only.contains(r#":output "FIRSTSECOND""#), "{only}");
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[test]
+fn two_clients_of_one_session_can_disagree_about_streaming() {
+    // Streaming is per connection, not per session. If it were session
+    // state, one client asking would start sending chunks down another
+    // client's socket -- which that client would read as malformed.
+    let (mut server, addr) = serve();
+    let mut asked = Wire::open(&addr);
+    let mut quiet = Wire::open(&addr);
+    asked.send("(:op stream :id 1 :on #t)");
+    let t0 = Instant::now();
+    let _ = asked.next(t0);
+
+    quiet.send(&slow_printer(0.2));
+    let (only, _) = quiet.next(t0);
+    assert!(only.contains(":status ok :value"), "the quiet client got a chunk: {only}");
+
+    asked.send(&slow_printer(0.2));
+    let (first, _) = asked.next(t0);
+    assert!(first.contains(":status output"), "the asking client got no chunk: {first}");
+
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[test]
+fn a_chunk_is_attributed_to_the_request_that_produced_it() {
+    // The `:id` on a chunk is the eval's, so a client with several requests
+    // in flight can tell whose output it is reading.
+    let (mut server, addr) = serve();
+    let mut w = Wire::open(&addr);
+    w.send("(:op stream :id 1 :on #t)");
+    let t0 = Instant::now();
+    let _ = w.next(t0);
+    w.send(r#"(:op eval :id 77 :code "(display \"hi\")")"#);
+    let (chunk, _) = w.next(t0);
+    assert!(chunk.starts_with("(:id 77 :status output"), "{chunk}");
+    let _ = server.kill();
+    let _ = server.wait();
+}

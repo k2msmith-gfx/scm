@@ -162,6 +162,79 @@ evaluations and watches the table settle.
 Deep recursion is truncated at 32 frames with a trailing `"…"`, so a
 5,000-deep failure does not bury its own message.
 
+## Output as it happens (S25)
+
+`:output` travels with the answer, which means a form that prints and then
+runs for two seconds says **nothing** for two seconds. Measured before:
+
+    first bytes after 2.00s; complete after 2.00s
+    (:id 1 :status ok :value "42" :output "FIRSTSECOND")
+
+and after:
+
+    +0.00s  (:id 2 :status output :output "FIRST")
+    +2.00s  (:id 2 :status output :output "SECOND")
+    +2.00s  (:id 2 :status ok :value "42" :output "FIRSTSECOND")
+
+Note the third line. **`:output` still arrives with the answer, including
+on failure** — streaming adds a channel rather than moving one, because
+every client written before this depends on that and because what a form
+printed before it broke is usually the most useful part.
+
+### It is opt-in, and that is not timidity
+
+    (:op stream :id 1 :on #t)   →  (:id 1 :status ok :version "0.0.1")
+
+A client that does not ask sees exactly the bytes it saw before. The reason
+is concrete: `scm-mode.el` dispatches a response by `:id` and **removes the
+callback when it fires**, so an unsolicited message carrying an in-flight
+`:id` would consume the callback and the real answer would arrive to
+nobody. Opting in is what makes the addition safe for a client nobody
+recompiled — and the Emacs batch gate passes unchanged, which is the proof
+rather than the claim.
+
+A chunk has its **own status**, `output`, so it cannot be read as an answer
+whose value happens to be nothing; and it carries the `:id` of the eval
+that produced it, so a client with several requests in flight knows whose
+output it is reading.
+
+**Per connection, not per session.** Two clients of one session may
+disagree about wanting it, and a sink installed per session would stream
+one client's output down another's socket.
+
+### The mechanism, and where it lives
+
+The door did not change. `Session::handle` is still one request in, one
+response out — what changed is that a host can ask to be *told* as output
+is produced:
+
+```rust
+interp.set_output_sink(Some(Box::new(|text| …)));
+```
+
+It is a side channel the host wires up, exactly like ray's own
+`set_diag_sink`, and `scm --serve` is its first user: for a request from a
+connection that asked, it installs a sink that writes framed chunks down
+that connection, calls `handle`, and removes it.
+
+Two details that are load-bearing:
+
+- **Only the port the host installed streams.** A script's own
+  `(open-output-string)` does not reach the sink, or every internal
+  `with-output-to-string` would appear in the editor's transcript and a
+  host could not tell which writes were meant for it.
+- **A sink is not re-entrant.** One that evaluates sees no sink installed,
+  which is the only answer that terminates.
+
+### What it fixed that was not a new feature
+
+`scm-dap` stops *inside* a failing evaluation, and the capture returned its
+string only when that evaluation ended — so the Debug Console held nothing
+of what the program had printed at exactly the moment a user was choosing
+between `,return` and abort. That is now delivered at the break, and it was
+the strongest argument for the stage: a hole in something shipped rather
+than a feature nobody had.
+
 ## The break REPL (S8b)
 
 An error nothing in the program will catch stops **with the frames live**,
@@ -291,51 +364,7 @@ buy anything a differing version could not also break.
   completion from `:op complete`, eldoc from `:op describe`, and interrupt on
   a second connection. Its batch test drives the real server.
 - ~~**A Rust client of the protocol.**~~ `scm --connect` (S22), above.
-- **Streaming output.** `:output` travels with the answer, so a form that
-  prints and then runs for two seconds sends **nothing** until it finishes.
-  Measured 2026-10-22 against a live server:
-
-      first bytes after 2.00s; complete after 2.00s
-      (:id 1 :status ok :value "42" :output "FIRSTSECOND")
-
-  This is the limit the Z4 spike (`zed-scm`) ran into, and it is also why a
-  long script shows no progress in the Zed task pane, in `scm-mode.el` or in
-  the modeler's eval channel. It splits into two pieces that are worth not
-  confusing:
-
-  **An output sink in the embed API** — a port kind that calls a host
-  callback per write instead of accumulating a `String` — is additive, needs
-  no protocol change, and is what an *in-process* host wants. ray already has
-  this exact shape in `set_diag_sink`. This is the half the port would use.
-
-  **An unsolicited `:output` message mid-evaluation** is the half that serves
-  socket clients, and the half that cuts against "`Session::handle` is the
-  only door": it needs a second, asynchronous path out of a session. It is
-  also a **two-repo** change, because `ray-scm` carries its own copy of the
-  serve loop. Sequence it after the modeler port lands, not during.
-
-  Whatever is built must keep the present guarantee: `:output` arrives with
-  the answer **including on failure**, because what a form printed before it
-  broke is usually the most useful part. Streaming adds to that; it must not
-  replace it, or every existing client regresses.
-
-  **The strongest case for it is the debugger, and it was found by building
-  one.** `scm-dap` captures with `eval_capturing_named`, which returns its
-  string when the evaluation ends — but the break handler fires *inside*
-  that evaluation. So at a break, the Debug Console holds **nothing** of
-  what the program printed. Measured 2026-10-22 on a program that displays
-  twice and then calls `(car '())`:
-
-      => output events delivered by the time we are STOPPED: 0
-      => output arriving only AFTER continue: "IMPORTANT CLUE\nstep 2 done\n…"
-
-  The clue arrives after the user has already chosen between `,return` and
-  abort. That is this document's own principle — *what a form printed before
-  it broke is usually the most useful part* — honoured in the letter and
-  missed in the point, and no rearrangement inside `scm-dap` fixes it: the
-  text is in a string port the adapter cannot reach. The smallest thing that
-  would is an additive read of what the current capture holds so far; the
-  sink is the general version.
+- ~~**Streaming output.**~~ Done, S25 — above.
 - **Several interpreters over one socket.** One session per server today.
 - **Completion inside a form** — candidates come from the global environment,
   so a local binding is not offered.

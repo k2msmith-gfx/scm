@@ -268,13 +268,32 @@ impl Adapter {
                 break_session(vm, err, &queue, &seq)
             })));
 
+        // S25: report output as it is produced. Before this the capture
+        // returned its string only when the evaluation *ended*, and the
+        // break handler fires inside that evaluation -- so the Debug
+        // Console was empty at exactly the moment a user was choosing
+        // between `,return` and abort, with the clue they needed arriving
+        // after the choice.
+        let seq = Arc::clone(&self.seq);
+        session.interp_mut().set_output_sink(Some(Box::new(move |text: &str| {
+            let mut body = json!({
+                "type": "event", "event": "output",
+                "body": {"category": "stdout", "output": text}
+            });
+            send(&seq, &mut body);
+        })));
         let (result, printed) = {
             let interp = session.interp_mut();
-            // Capturing, because the program's output must not reach
-            // stdout: stdout is the protocol.
+            // Still capturing as well: the sink is an addition, and a
+            // client that reads only the end still gets everything.
             interp.eval_capturing_named(&src, Some(&program))
         };
-        self.output("stdout", &printed);
+        session.interp_mut().set_output_sink(None);
+        // Not re-sent: the sink already delivered every byte of it as it
+        // happened. `printed` is kept because the capture is still the
+        // authority on what the program said, and a future client may want
+        // it in one piece.
+        let _ = &printed;
         match result {
             Ok(v) => {
                 let text = session

@@ -22,6 +22,14 @@ struct Dap {
     stdin: ChildStdin,
     out: BufReader<ChildStdout>,
     seq: i64,
+    /// Every `output` event seen so far, whenever it was seen.
+    ///
+    /// Accumulated in `read` rather than collected on demand, because since
+    /// S25 output arrives **while** the program runs -- so a chunk can land
+    /// before the `stopped` event, and a reader that only started
+    /// collecting afterwards threw it away. That is how a real client has
+    /// to behave too.
+    said: String,
 }
 
 impl Dap {
@@ -34,7 +42,7 @@ impl Dap {
             .expect("spawn scm-dap");
         let stdin = child.stdin.take().unwrap();
         let out = BufReader::new(child.stdout.take().unwrap());
-        let mut dap = Dap { child, stdin, out, seq: 0 };
+        let mut dap = Dap { child, stdin, out, seq: 0, said: String::new() };
         let caps = dap.request("initialize", serde_json::json!({"adapterID": "scm"}));
         assert_eq!(caps["success"], true, "{caps}");
         // Stepping and breakpoints are absent from the capabilities on
@@ -86,7 +94,11 @@ impl Dap {
         }
         let mut buf = vec![0u8; len];
         self.out.read_exact(&mut buf).unwrap();
-        serde_json::from_slice(&buf).unwrap()
+        let msg: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        if msg["type"] == "event" && msg["event"] == "output" {
+            self.said.push_str(msg["body"]["output"].as_str().unwrap_or_default());
+        }
+        msg
     }
 
     /// Wait for a named event.
@@ -99,16 +111,12 @@ impl Dap {
         }
     }
 
-    /// Everything the program printed, collected until it terminates.
+    /// Everything the program printed, read on until it terminates.
     fn drain_output(&mut self) -> String {
-        let mut said = String::new();
         loop {
             let msg = self.read();
-            if msg["type"] == "event" && msg["event"] == "output" {
-                said.push_str(msg["body"]["output"].as_str().unwrap_or_default());
-            }
             if msg["type"] == "event" && msg["event"] == "terminated" {
-                return said;
+                return self.said.clone();
             }
         }
     }
@@ -343,4 +351,29 @@ fn a_launch_without_a_program_is_refused_with_a_reason() {
 
     let got = dap.request("launch", serde_json::json!({"program": "/nope/missing.scm"}));
     assert_eq!(got["success"], false, "{got}");
+}
+
+#[test]
+fn the_console_has_the_programs_output_at_the_break() {
+    // S25, and the reason this adapter wanted it. The capture used to
+    // return its string only when the evaluation *ended*, and the break
+    // handler fires inside that evaluation -- so the Debug Console was
+    // empty at exactly the moment a user was choosing between `,return`
+    // and abort, and the clue arrived after the choice. Measured then: 0
+    // output events by the time the client was stopped.
+    let path = program(
+        "clue.scm",
+        "(display \"IMPORTANT CLUE\\n\")\n(display \"step 2 done\\n\")\n(car '())\n",
+    );
+    let mut dap = Dap::start();
+    dap.request("launch", serde_json::json!({"program": path}));
+    let stopped = dap.event("stopped");
+    assert_eq!(stopped["reason"], "exception", "{stopped}");
+
+    // Both writes are already here, before anything was continued.
+    assert!(
+        dap.said.contains("IMPORTANT CLUE") && dap.said.contains("step 2 done"),
+        "the console is still empty at the break: {:?}",
+        dap.said
+    );
 }

@@ -45,6 +45,20 @@ pub enum Op {
     Interrupt,
     /// Liveness, and the version handshake.
     Ping,
+    /// Ask for output **as it happens** on this connection, instead of only
+    /// with the answer (S25).
+    ///
+    /// Opt-in, and per connection, for one reason: a client that does not
+    /// ask sees today's bytes exactly. `scm-mode.el` dispatches a response
+    /// by `:id` and *removes* the callback when it fires, so an unsolicited
+    /// message carrying an in-flight `:id` would consume the callback and
+    /// the real answer would arrive to nobody. Opting in is what makes this
+    /// addition safe for a client nobody recompiled.
+    ///
+    /// The session keeps no streaming state -- the **connection** does, so
+    /// two clients of one session can differ -- which is why `handle`
+    /// answers this with a pong and `scm --serve` acts on it.
+    Stream { on: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +98,10 @@ pub enum Outcome {
     /// `None` when the name is unbound.
     Described(Option<Description>),
     Framed(Framing),
+    /// A chunk of output, sent **while** the evaluation that produced it is
+    /// still running (S25). Only ever sent to a connection that asked, and
+    /// never instead of `:output`, which still arrives with the answer.
+    Streamed(String),
     Pong { version: String },
     /// The request itself could not be understood.
     Malformed(String),
@@ -125,6 +143,13 @@ impl Session {
     /// The one door. Every client goes through here.
     pub fn handle(&mut self, req: Request) -> Response {
         let outcome = match req.op {
+            // The session keeps no streaming state: a sink is wired up by
+            // whoever owns the output channel, which for `--serve` is the
+            // connection. Acknowledged rather than refused, so an embedded
+            // host that forwards every request sees nothing surprising.
+            Op::Stream { .. } => Outcome::Pong {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
             Op::Ping => Outcome::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
@@ -196,6 +221,7 @@ impl Request {
         let mut code: Option<String> = None;
         let mut prefix: Option<String> = None;
         let mut name: Option<String> = None;
+        let mut on = false;
         let mut i = 0;
         while i < items.len() {
             let crate::Value::Keyword(k) = items[i] else {
@@ -215,6 +241,7 @@ impl Request {
                 "op" => op = Some(text_of(&e, val).ok_or(":op must be a symbol or string")?),
                 "code" => code = Some(text_of(&e, val).ok_or(":code must be a string")?),
                 "prefix" => prefix = Some(text_of(&e, val).unwrap_or_default()),
+                "on" => on = matches!(val, crate::Value::Bool(true)),
                 "name" => name = Some(text_of(&e, val).ok_or(":name must be a symbol or string")?),
                 // Unknown keys are ignored rather than refused, so a newer
                 // client talking to an older server still works.
@@ -238,6 +265,7 @@ impl Request {
             },
             Some("interrupt") => Op::Interrupt,
             Some("ping") => Op::Ping,
+            Some("stream") => Op::Stream { on },
             Some(other) => return Err(format!("unknown op `{other}`")),
             None => return Err("a request needs :op".into()),
         };
@@ -277,6 +305,11 @@ impl Request {
             }
             Op::Interrupt => out.push_str(&format!("(:op interrupt :id {}", self.id)),
             Op::Ping => out.push_str(&format!("(:op ping :id {}", self.id)),
+            Op::Stream { on } => out.push_str(&format!(
+                "(:op stream :id {} :on {}",
+                self.id,
+                if *on { "#t" } else { "#f" }
+            )),
         }
         out.push(')');
         out
@@ -353,6 +386,13 @@ impl Response {
                     Framing::Invalid => "invalid",
                 });
             }
+            Outcome::Streamed(text) => {
+                // A distinct status, so a client cannot mistake a chunk for
+                // the answer: `:status ok` with an `:output` and no `:value`
+                // would be ambiguous with a value of nothing.
+                out.push_str(" :status output :output ");
+                push_string(&mut out, text);
+            }
             Outcome::Pong { version } => {
                 out.push_str(" :status ok :version ");
                 push_string(&mut out, version);
@@ -427,6 +467,7 @@ impl Response {
         }
         let outcome = match status.as_deref() {
             Some("malformed") => Outcome::Malformed(message.unwrap_or_default()),
+            Some("output") => Outcome::Streamed(output.unwrap_or_default()),
             Some("error") => Outcome::Failed {
                 message: message.ok_or("an error needs :message")?,
                 output: output.unwrap_or_default(),

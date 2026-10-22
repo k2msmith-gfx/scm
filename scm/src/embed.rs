@@ -721,10 +721,18 @@ impl Interp {
         let saved = self.vm.param_value(slot);
         let keep_saved = self.vm.engine.root(saved);
         self.vm.set_param_value(slot, port);
+        // Name the port a sink applies to, if the host installed one, so a
+        // script's own `(open-output-string)` is not mistaken for the
+        // host's capture. Cleared afterwards: a sink that outlived the
+        // evaluation would report the *next* one's output too.
+        if let Value::Obj(r) = port {
+            self.vm.engine.stream_to(Some(r));
+        }
         let out = match source {
             Some(name) => self.eval_named(src, name),
             None => self.eval(src),
         };
+        self.vm.engine.stream_to(None);
         self.vm.set_param_value(slot, saved);
         self.vm.engine.unroot(keep_saved);
         let text = match port {
@@ -739,6 +747,27 @@ impl Interp {
         };
         self.vm.engine.unroot(keep);
         (out, text)
+    }
+
+    /// Report output **as it is produced** rather than when the evaluation
+    /// that produced it returns.
+    ///
+    /// S25. Without it, `eval_capturing` hands back one string at the end,
+    /// so a form that prints and then runs for two seconds says nothing for
+    /// two seconds -- and a host stopped inside that evaluation, which is
+    /// exactly what a break handler is, could see none of what the program
+    /// had printed at the moment it most needed it.
+    ///
+    /// The sink fires only for the port `eval_capturing` installs, so a
+    /// script's own `with-output-to-string` does not leak into it, and it
+    /// fires **in addition** to the port accumulating: `:output` still
+    /// arrives with the answer, including on failure.
+    ///
+    /// `None` removes it. A sink is not called re-entrantly: one that
+    /// evaluates sees no sink installed, which is the only non-infinite
+    /// answer.
+    pub fn set_output_sink(&mut self, sink: Option<crate::heap::OutputCallback>) {
+        self.vm.engine.set_output_sink(sink);
     }
 
     /// The parameter slot behind `current-output-port`.
