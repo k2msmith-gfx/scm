@@ -1346,3 +1346,43 @@ and 248, and `test_toolbox` passes on the Scheme prelude. `ui_config` and
 `recorder` are past persistence and now fail on injected-input chrome (a
 recorded toolbox click arming its tool), which is the next thread rather
 than this one.
+
+### L, second pass — the overlay family, and two more lost distinctions
+
+**81 of 117** (75 measured, then chair / object_names / camera_match, then
+these three). The overlay "0 px" pile — `control_net`, `hybrid_wire_covered`,
+`toon_hybrid` — was two causes and neither was a drawing pass:
+
+**`(show-control-net false)` TOGGLED.** Four `show-*` verbs take `[&opt on]`
+and ask `(nil? on)` to tell "not given, so flip" from "off"; nil IS false
+here, so an explicit `false` read as absence and every frame after it was one
+toggle out of step. The cage test measured 889 px of cage in the frame where
+it had asked for none, which reads as an overlay ignoring its argument.
+
+§2o's ruling holds — spell the Janet source differently rather than grow a
+nil — and for a POSITIONAL argument the spelling is a **rest list: absence as
+a LENGTH**, which is the same number in both languages. `arg-or` in 00-decls
+is the positional sibling of `opt-get`; no call site changes and the
+docstrings' `&opt on` still describes what a caller writes.
+
+**A hex literal built at RUN TIME is in no reader.** The other two set a
+sentinel ink with an f-string — `(set-color :toon-ink 0x{INK:06x})` — and the
+migrator's hex pass rewrites SOURCE, so a literal that does not exist until
+the test runs went out as `0x…`, which Scheme cannot read. The colour never
+changed, the test counted a colour nothing was drawn in, and the pass it was
+measuring had been working all along.
+
+**The method that found both: shoot the same frames in both dialects and
+HASH them.** Under Scheme the off and on frames were byte-identical while
+Janet's differed 58 px to 889 — which says "no cage" and is wrong. The cage
+was in the other frame. A pixel count tells you a number; the hash tells you
+whether anything happened at all, and that is the question when a count is
+zero.
+
+Also fixed in this pass, each a one-liner with a long reach: `save-scene`'s
+guard matched Janet's comment leader so a Scheme-prelude modeler refused its
+OWN snapshot (`test_chair`); ray's `%nth` could not index a sequence a host
+layer owns, which `%count` HID by being late-bound to the modeler's
+array-aware `length` (`camera-match`); `camera-match` demanded `list?` where
+`:image` two lines above asks `%count`; and `krell_match.py` is hand-
+maintained, so the migrator never saw the Janet it sends.
