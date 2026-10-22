@@ -1566,8 +1566,78 @@ Where it stands, measured:
 | Translator + migrator (Python) | 3,520 |
 | Harness eval sites | 1,658 across 117 files |
 
-**M5d — the gaps, the leg and the client (0.3). FIRST, because one of them
-decides how everything above is measured.**
+### M5's priorities changed once the destination was said out loud
+
+Kevin, 2026-10-22: the end state is **one extension language (scm) and a
+complete API other languages layer on, like Python** — and *"I don't want to
+completely get rid of janet yet because we know there are some things it does
+better than scm."*
+
+That reorders §5, and it exposes a contradiction in the first draft of it.
+**"Keep Janet" and "Janet is the prelude's source of truth" cannot both be a
+strategy.** Twenty of the twenty-three Scheme files are GENERATED from Janet,
+so Janet is not being kept as an option — it is being kept as the MASTER,
+with scm as the generated copy, and every prelude edit still goes through it.
+So M5a is not a tidy-up placed in the middle; it is the precondition for
+Janet being optional at all. It moves to the front of the staged work.
+
+**And it adds a ruling that was not in the first draft: what IS Janet for?**
+The advantage is real and measured, not a hunch — stiletto's texels are ~7 s
+in Janet against 677 s here, and 8,661 vertices sorted by a closure key are
+0.1 s against 4.9 s standalone (29.5 s inside the test, §2q). That is
+interpreted throughput on closure-heavy numeric work, 30–70×, and P5's jit
+(`--features jit`, compiled texels) is the intended answer and is in no leg.
+So: does the jit close it, does Janet stay as a leaf-compute escape hatch, or
+is slow authoring accepted with the bakes jitted? **The answer decides
+whether Janet keeps a PRELUDE — expensive, two sources forever — or just a
+VM, which is cheap.** Today it has a prelude by default, which is the
+expensive option arrived at rather than chosen.
+
+**The modeler's API is a LATER STAGE** (Kevin, same day: "ray only for now").
+Nothing in M5 needs to anticipate it. Worth recording why it is a stage at
+all: ray's verb layer is declare-once-bind-many — `src/api/*_api.rs` declares
+and Janet, Scheme and `pyray` are three bindings, 178/178 verbs from Python
+since A4 — while the modeler's 355 prims are declared once and bound TWICE,
+into two in-process Lisps, with no registry a third language could
+enumerate. An op in the modeler is reachable from two Lisps forever; an op in
+ray is reachable from every binding ray grows.
+
+**Which is why M5 gains a prerequisite, and it is nearly free:**
+
+☑ **M5p — write the ray/modeler boundary down.** DONE 2026-10-22:
+[`docs/ray-modeler-boundary-notes.md`](../../ray/docs/ray-modeler-boundary-notes.md)
+in ray, indexed in `docs/README.md` and pointed at from CLAUDE.md. The rule
+was recoverable from `src/geometry/ops/` versus
+`modeler/src/tools/meshop.rs` and one comment in `mesh_api.rs`, and from
+nowhere else — so an agent reaching for the obvious answer reaches for the
+wrong crate, because the modeler is where the tool lives. Geometry and what
+a save holds are ray's; the gesture is the modeler's; a ray verb takes a
+NAME and a modeler verb takes the SELECTION.
+
+Writing it measured three ops ray implements and ray cannot call — `Bridge`,
+`BridgeFaces` and `BevelVertex` have no ray verb, so `pyray` cannot reach
+them. That is the honest answer to "what modeling functions are fully
+supported in just ray": nearly all, with three holes, and the holes are
+verbs rather than geometry. (`SubdivideSmooth` looks like a fourth and is
+not — `mesh-subdivide :smooth` reaches it.) Closing them is `mesh_api.rs`
+work of the kind that file's own comment describes: assemble an `OpCtx`,
+call the trait.
+
+**Revised order: M5p (done) → client probe → M5a → the Janet ruling → M5c,
+with M5b last and opportunistic.**
+
+**M5d — the gaps, the leg and the client (0.3). The CLIENT PROBE IS THE FIRST
+THING TO BUILD**, ahead of the leg decision it used to sit behind, because
+the leg question needs a measurement that cannot be taken without it — and
+since the modeler's default became `scm` (ray @b0dc7911) a plain `cargo build
+--release -p modeler` produces a Janet-less binary, so `modeler_client`
+reading `MODELER_PRELUDE` from the environment is now a live bug rather than
+a future nicety: it answers "janet", sends Janet forms to an image with no
+Janet reader, picks `.janet` scene paths that image refuses on purpose, and
+uses the 30 s timeout instead of 180 s. The eval channel's `:scheme`/`:janet`
+mode switch is the precedent for where the query belongs — protocol level,
+needing no binding in either language. `%scheme-prelude?` cannot be the
+probe: it exists only inside the Scheme image.**
 
 - **Is the scm-only modeler a permanent leg or a pre-merge check?** This
   defines "green" for all of M5 and so cannot come after it. `pyray` is the
