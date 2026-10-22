@@ -1390,10 +1390,33 @@ maintained, so the migrator never saw the Janet it sends.
 ## 2q. L is finished — 114 of 117, measured 2026-10-22
 
 **`pass=114  timeout=3`**, and the three are exactly the three §2m excludes:
-`agent_mcp` (waits on the MCP server's own round trip), `history_tool` (§2m
-E — hands a closure to a prim that calls it later from the kernel), and
-`scene_load_camera` (stiletto's 1.1 M interpreted texels, the
-`--features jit` case that is in no leg on purpose). The Janet gate held
+`agent_mcp` (waits on the MCP server's own round trip), `history_tool` and
+`scene_load_camera` (both stiletto's 1.1 M interpreted texels, the
+`--features jit` case that is in no leg on purpose).
+
+**CORRECTED 2026-10-22, later the same day.** This section first gave
+`history_tool`'s cause as §2m E's closure ruling. That was wrong, and
+measuring it took four minutes: its capture path PASSES — arming, the chip
+strip, scrubbing, the wheel detent, the first six checks — and it fails on
+the line after, loading stiletto. Two defects were stacked and the first hid
+the second. (1) The bake: 677 s measured, against ~7 s of Janet, so the 180 s
+read answers `[no reply]` and nothing downstream gets a number. (2) Behind
+it, **a scene defines `fit` and `history-read` evaluates the scene** —
+`(def [forms stages why] …)` goes through `%macro-fit`, whose body `(fit coll
+n)` resolves LATE, and `stiletto.scm:1428` is a one-argument camera helper.
+So the prelude applied the aeroplane's `fit` to a collection and a 3,
+eighteen stages after the fault. Janet does not have the bug because it
+resolves a top-level call at COMPILE time.
+
+Fixed in ray @2b896bae (`fit` → `%fit`). The rule `%macro-fit`'s own comment
+states — a `%`-name is shadowed by nothing — had been applied to the macro's
+ENTRY POINT and not to the helper, because the comment was written about a
+parameter shadowing a template's free identifier and missed the other writer:
+**the scene being READ defines into these globals too.** 295 of the 306
+compat names are bare; one other collision exists and is dormant (`pair`,
+two arguments, against `joined-patches.scm:78`'s three).
+
+So the §2m E ruling gates NOTHING — which is what unblocked M4. The Janet gate held
 110/110 on every batch and the five cargo legs read 664 / 681 / 186 / 248 /
 901. **That is the end of M3** — `modeler/tools/scheme-pass-set.txt` lists
 all 114.
@@ -1451,3 +1474,174 @@ amends, and prove it by regenerating from `git checkout` to a byte-identical
 tree. The same test's `new` ALSO skips an edit silently when its replacement
 text happens to appear elsewhere in the file — that cost three `.janet`
 buffer names that looked fixed and were not.
+
+## 4a. M4 done, 2026-10-22 — `--features scm` is a modeler with no Janet in it
+
+ray @eb7d13e4. `scm` gained `scripting`, so it carries the binding instead of
+pulling an unreachable interpreter into a pure build. **`janet` still IMPLIES
+`scm`** and that is not M2 residue: a moved section's Janet shim forwards to
+the Scheme image, so a `janet` build with no second VM has nothing to forward
+to. Three configurations now — pure (neither), `scm` (Scheme only), `janet`
+(both).
+
+It boots and it works: 23 prelude files, `add-sphere` answers `:s`,
+`scene-stats` reports, and `(history-tool :src "…/doric-column.scm")` stages
+7 and scrubs to 56 objects, with no Janet in the process. Legs
+664/681/186/884/901/248 plus a NEW one at 209 (`cargo test -p modeler
+--features scm`); Scheme harness 114, Janet 110/110.
+
+**The stage was sized 0.2 as feature wiring, and that is not what it was.**
+Three findings, each of which had been invisible for a structural reason:
+
+- **`ray::scripting` is not the VM.** 52 of the 69 names the modeler took
+  from it are scene-store accessors A1.5 had already lifted to
+  `crate::scene_store`; `scripting.rs` re-exports them and ends with the
+  invitation — "callers may move at leisure". 109 sites relocated
+  (@4235c380). `src/layering.rs` cannot catch this class: it forbids
+  `scripting::ffi` and `-> Janet`, and a store accessor reached through the
+  VM module's namespace is neither. Four sites were not relocations at all —
+  they asked `is_booted()`, whose body tests the Janet env pointer, to mean
+  "is there a store to mirror into"; `scene_store::image_booted()` answers
+  that where it belongs.
+- **Eight `cfg(feature = "janet")` sites were on the wrong feature** — the
+  recorder and caption prims, ordinary `prim!` declarations naming no VM and
+  already in `install_scheme`'s list. Asking for `scm` alone deleted the
+  prims and kept the list. Invisible for exactly as long as `janet` implied
+  `scm`. **Verify a regated prim is PRESENT IN THE RUNNING BINARY**, not
+  merely that the build compiles.
+- **`boot()`'s own early return was the evidence the split was already
+  real.** Under `MODELER_PRELUDE=scheme` it returned before the prelude
+  files, before `register_api`, before ray's Janet prelude — so every Janet
+  line after it was already dead on that path, and the VM, the vocabulary
+  baseline and 355 registrations before it were built for a VM nothing would
+  ask.
+
+**Two gaps, named rather than hidden.** The async scene-load worker is
+Janet-only, so under `scm` alone `%load-scene-async` does not exist and a
+scene opens on the main thread — `test_async_load` and `test_scene_async_load`
+pass under the Scheme prelude today only because that build still has Janet
+to run the worker in. And there is no `init.scm`.
+
+### `(%scm-ready?)` is a FEATURE PROBE, not a capability question
+
+Worth its own heading because it cost a gate run and it generalises.
+
+With the door prims gated out, `00-decls`' fallbacks answer in their place,
+and the sentence they answered with — "this modeler was built without the scm
+feature" — names a build. It is false under `MODELER_PRELUDE=scheme`, where
+the image those prims reach is the one asking (§2p lost nine checks to
+reading that refusal as a broken SLIME send), and false again under M4's
+build, where the feature it blames is the only one ON.
+
+The first fix was to override all seven names in `99-scheme-only.scm` to act
+locally. Each override tested correctly in isolation — `(%scm-eval "(+ 1 2)")`
+→ `("ok" "3" "")`, `%scm-call` applying the bound name, honest refusals for
+unbound ones. The full pass set then failed `test_scheme_buffers`, because
+that file asks `(%scm-ready?)` **whether to skip**: answering `#t` made it
+stop skipping and then fail every check about a door that genuinely leads
+nowhere from inside. The refusals were the right ANSWERS all along; only the
+explanation was wrong, and it is fixed where it is written — "no second image
+in this modeler to reach", true in all three builds.
+
+**And a test that SKIPS counts as a pass in `--pass-set`.** So a change that
+makes one stop skipping surfaces as a new failure, not as new coverage. No
+probe in isolation can show you that; only the gate can.
+
+## 5. M5 — scoped 2026-10-22, with one ruling left open
+
+**M4 was the last stage this plan had, and the port is not finished**, for a
+reason the stage list never had to say out loud: `MOVED` is three files. The
+other twenty regenerate from Janet, byte-identical (confirmed twice during
+M4). So editing the modeler's prelude still means editing **Janet** and
+retranslating, and 19,291 lines of Janet are still maintained. M0–M4 bought a
+SECOND runtime, not a replacement.
+
+Where it stands, measured:
+
+| | lines |
+|---|---|
+| Janet prelude (`prelude/*.janet` + `unify.janet`) — the source today | 19,291 |
+| Generated Scheme mirror, 24 files | 25,769 |
+| Hand-ported Scheme (`MOVED` + `99-scheme-only`) | 2,596 |
+| Translator + migrator (Python) | 3,520 |
+| Harness eval sites | 1,658 across 117 files |
+
+**M5d — the gaps, the leg and the client (0.3). FIRST, because one of them
+decides how everything above is measured.**
+
+- **Is the scm-only modeler a permanent leg or a pre-merge check?** This
+  defines "green" for all of M5 and so cannot come after it. `pyray` is the
+  cautionary case: a workspace member that is not a `default-member` went
+  three days and 42 commits uncompiled with all five legs green.
+- **`modeler_client` should ask the modeler its dialect** rather than read
+  `MODELER_PRELUDE`. A Janet-less binary forces Scheme and the client cannot
+  know; every M4 probe had to set the variable by hand.
+- **The async scene-load worker, Scheme side.** The threading is already
+  settled — `ray::api::scheme` says an `Interp` edits the scene of the thread
+  it lives on — so the open question is the registry hand-back, not the
+  thread.
+- **`init.scm`.**
+
+**M5a — the Scheme becomes the source (0.5).** Delete
+`modeler/scripts/prelude/*.janet` and `unify.janet`; `scripts/scm/*.scm`
+becomes hand-maintained; retire `janet_to_scheme.py`'s prelude mode and keep
+its scene mode for the twins. The per-file shape is demonstrated twice
+already: `02-scene.janet` and `07-camera.janet` are down to 105 and 109 lines
+of shim from whole sections. Twenty more files, the same move.
+
+☐ **THE RULING, and it cannot be deferred past M5a: does a Janet modeler
+prelude survive at all?** If it does not, `MODELER_PRELUDE=janet` stops being
+a thing, the 110/110 Janet UI gate goes away, and `harness_touched.py`'s
+both-dialects loop collapses to one. If it does, both preludes and the
+translator are maintained forever, which is not a port. The recommendation is
+the first; the reason it is a ruling and not a step is that it retires the
+oracle every stage from M0 to M4 was measured against. **Kevin's.**
+
+It also needs a replacement drift guard: `scm_twins.py` compares Janet's
+round trip against Scheme's, and with no Janet prelude there is no left-hand
+side.
+
+**M5b — the compat layer dissolves (1.5). RECOMMENDED NOT AS A CAMPAIGN.**
+The mirror is Scheme written in Janet's vocabulary: ~1,870 sites —
+`janet-string` 514, `janet-table` 305, `janet=` 273, `janet-length` 226,
+`janet-array` 161, `each-of` 160, `janet-nil?` 119, `janet-index` 113.
+Dissolving it is bigger than M0–M4 put together. It buys readability and it
+eliminates the bare-global collision class outright (§2q's `fit`, and the
+dormant `pair`) — but it risks re-breaking 114 green files for no behavioural
+gain, and `00-janet-compat.scm` works. So: **dissolve a file's vocabulary
+when already editing that file, never as a sweep.** If it is ever taken as a
+stage it must follow M5a, or it is hand-editing generated files.
+
+**M5c — the harness speaks Scheme natively (0.5).** 1,658 sites;
+`harness_migrate.py` and `harness_hand_edits.py` retire. The migrator already
+proves every rewrite, so this is largely committing its output and deleting
+the translation step. **Worth doing only if M5a retires the Janet prelude** —
+while both dialects run, the migrator is what keeps one test file honest in
+two languages.
+
+Order: **M5d → M5a → M5c, with M5b opportunistic.** ~1.3 of staged work
+against M0–M4's 3.0, ending with one prelude in one language.
+
+### The streaming-output dependency, and why no M5 stage is gated on it
+
+Another agent is adding output streaming to scm concurrently (2026-10-22).
+[port-plan.md](port-plan.md) §7 already settles the direction, checked that
+day on both sides: scm captures a form's output into a string port and hands
+it back with the answer (measured — 2.00 s of silence, then everything), and
+so does the side it replaces. **Parity, not a regression**, and it does not
+reach ray's long operations: a render broadcasts framebuffer strips to a
+display thread, never text, so the 20 s terrain build was never telling a
+script anything.
+
+The caveat is about direction rather than blocking. The modeler is precisely
+the **in-process host that wants the embed-API sink** rather than the
+unsolicited socket message — that is [plan.md](plan.md) §13.3's own split —
+and there is currently exactly ONE place hardening the output-with-the-answer
+shape: `eval_to_triple` returning `[status text output]`, with `eval_channel`
+prepending it. **M5 should not multiply consumers of that shape**, because
+each becomes a migration site when the sink lands; and if the sink arrives
+mid-M5, the modeler is its first natural caller.
+
+The one place streaming would be VISIBLE rather than additive is the agent
+pane, where a long `(ai …)` turn goes quiet. That is a user-facing win and it
+sits outside this scope.
