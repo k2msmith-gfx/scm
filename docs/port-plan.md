@@ -1223,6 +1223,17 @@ Said plainly, so a later stage cannot quietly absorb it:
 - **It does not make the UI chrome one language.** Two VMs live in one process
   from P1 until B5 lands. That is the cost of ruling 3, and it is the right
   cost: the alternative is one branch carrying 21,000 lines of translation.
+- **It does not make output stream, and it does not need to.** Checked
+  2026-10-22, both sides: scm captures a form's output into a string port and
+  hands it back with the answer (measured — 2.00 s of silence, then
+  everything), and so does the side it replaces. `scene_store.rs` says it
+  outright: *the TCP REPL, the modeler's eval channel and the agent's `eval`
+  tool all hand back the value plus whatever `:out` captured*. So this is
+  **parity, not a regression**, and no stage here is gated on it. It also does
+  not reach ray's long operations — a render broadcasts framebuffer strips to
+  a display thread, not text, so the 20 s terrain build was never telling a
+  script anything. The open question, and the sequencing argument for leaving
+  it until after the modeler port, is [plan.md](plan.md) §13.3.
 
 ## 8. Risks, worst first
 

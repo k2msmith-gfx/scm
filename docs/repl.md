@@ -291,6 +291,33 @@ buy anything a differing version could not also break.
   completion from `:op complete`, eldoc from `:op describe`, and interrupt on
   a second connection. Its batch test drives the real server.
 - ~~**A Rust client of the protocol.**~~ `scm --connect` (S22), above.
+- **Streaming output.** `:output` travels with the answer, so a form that
+  prints and then runs for two seconds sends **nothing** until it finishes.
+  Measured 2026-10-22 against a live server:
+
+      first bytes after 2.00s; complete after 2.00s
+      (:id 1 :status ok :value "42" :output "FIRSTSECOND")
+
+  This is the limit the Z4 spike (`zed-scm`) ran into, and it is also why a
+  long script shows no progress in the Zed task pane, in `scm-mode.el` or in
+  the modeler's eval channel. It splits into two pieces that are worth not
+  confusing:
+
+  **An output sink in the embed API** — a port kind that calls a host
+  callback per write instead of accumulating a `String` — is additive, needs
+  no protocol change, and is what an *in-process* host wants. ray already has
+  this exact shape in `set_diag_sink`. This is the half the port would use.
+
+  **An unsolicited `:output` message mid-evaluation** is the half that serves
+  socket clients, and the half that cuts against "`Session::handle` is the
+  only door": it needs a second, asynchronous path out of a session. It is
+  also a **two-repo** change, because `ray-scm` carries its own copy of the
+  serve loop. Sequence it after the modeler port lands, not during.
+
+  Whatever is built must keep the present guarantee: `:output` arrives with
+  the answer **including on failure**, because what a form printed before it
+  broke is usually the most useful part. Streaming adds to that; it must not
+  replace it, or every existing client regresses.
 - **Several interpreters over one socket.** One session per server today.
 - **Completion inside a form** — candidates come from the global environment,
   so a local binding is not offered.

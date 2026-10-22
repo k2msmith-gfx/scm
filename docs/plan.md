@@ -1649,7 +1649,20 @@ Still open:
    lifecycle as straight-line code — is a modeler question, not a language
    one, and it is the thing that decides whether the middle rung ever gets
    built. Not an S0 decision; worth asking before S8.
-3. **`homoiconic.janet`** walks a quoted tuple with `postwalk` and `eval`s the
+3. **Should output stream?** Raised 2026-10-22 by the `zed-scm` Z4 spike and
+   argued in [repl.md](repl.md) under *What is not here yet*. The finding that
+   makes it a question rather than a task: the Janet side it would improve
+   **does not stream either** — ray's own `scene_store.rs` says the TCP REPL,
+   the modeler's eval channel and the agent's `eval` tool all hand back the
+   value plus whatever `:out` captured — so this is parity, not a regression,
+   and nothing in the port is blocked on it. It also would not touch ray's
+   long operations: a render broadcasts framebuffer strips to a display
+   thread, not text. What it buys is a script that prints its own progress,
+   and the agent pane's view of a slow form. Decide **after** the modeler port
+   lands, because the socket half is a two-repo change to the door ray depends
+   on; and if it is done, do the embed-API sink first, which is additive and
+   is the half an in-process host actually uses.
+4. **`homoiconic.janet`** walks a quoted tuple with `postwalk` and `eval`s the
    result. It was the one ray example with no clear Steel translation. Does scm
    expose the AST as ordinary indexable data, or as opaque syntax objects?
    Sets-of-scopes hygiene pushes toward the latter, which is the choice that
