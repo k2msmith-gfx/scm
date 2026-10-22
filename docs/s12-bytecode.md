@@ -112,9 +112,104 @@ was reported "in `(%make-parameter init)`", the prelude's last call.
 - No instruction-level fast paths for arithmetic: `(+ a b)` is a global
   read, two pushes and a primitive call on a slice. Cheap to add once the
   global is known to still hold the original primitive.
-- An `Obj::Env` is a `Vec` per call frame. A pool would delete the one
-  allocation left per call.
+- ~~An `Obj::Env` is a `Vec` per call frame. A pool would delete the one
+  allocation left per call.~~ The vector IS pooled now (`Engine::slots`
+  takes from `env_pool`, the sweep returns it). What is left per call is the
+  `Obj::Env` **object** — see below.
 - `eval` of a run-time form runs on T0.
+
+## Where T1 still loses to Janet, measured 2026-10-21
+
+Asked from the other end: the modeler's Scheme prelude reloads a 6.18 MB
+scene snapshot in 8.4 s where Janet takes 0.9, and a 128x128 texel bake is
+524 ms against Janet's 64. Both are ~9x, and ~9x wants a cause rather than
+a shrug. Four shapes, 300 000 iterations each, ns per iteration, same
+machine, aarch64 macOS:
+
+| shape | Janet | T1 | T1 / Janet |
+|---|---|---|---|
+| loop only | 8.9 | 102.2 | **11.5x** |
+| loop + arithmetic | 19.2 | 119.1 | 6.2x |
+| loop + a closure call | 24.0 | 171.5 | 7.1x |
+| closure + arithmetic | 23.9 | 207.7 | 8.7x |
+| `sin` per iteration | 21.1 | 136.9 | 6.5x |
+
+`(%tier-stats)` reports `t1` with **0 declines** through all of it, so this
+is the compiled tier and not a fallback.
+
+**Read the margins and the cause is one thing.** Arithmetic adds +16.9 ns
+to the loop here against Janet's +10.3 — only 1.6x, so instruction dispatch
+is NOT where the multiple is. A closure call adds **+52.4 ns** against
+Janet's +4.8. And the empty loop is 102 ns against 8.9.
+
+Those last two are the same fact: **in this Scheme every loop is a call.**
+There is no loop form — `do` is a macro over a named `let`, which is a self
+tail-call — so an iteration pays a full call, and the ~100 ns floor is the
+call.
+
+**It is not the collector.** The same benchmark in a bare `ray-scm` image,
+whose live set is a fraction of the modeler's, measures 124 ns and 217 ns —
+*slower*, not faster. So mark cost, sweep cost and the threshold policy are
+all exonerated; what remains is the per-call work itself: a heap slot for
+the `Obj::Env`, an `Rc::clone` of the `Code` for the frame, and the
+`(SymId, Value)` pair per parameter.
+
+### What Janet does, from its own disassembly
+
+Not a guess — `(disasm …)` prints it. `(fn [i] (+ (* i 2) 1))` is three
+instructions:
+
+    (mulim 1 0 2) (addim 2 1 1) (ret 2)        slotcount 3
+
+and `(fn [n] (var s 0) (for i 0 n (set s (+ s (* i 2)))) s)` is ten, with
+one backward jump and no calls at all:
+
+    (ldi 1 0) (ldi 2 0) (lt 3 2 0) (jmpno 3 6) (movn 4 2)
+    (mulim 5 4 2) (add 1 1 5) (addim 2 2 1) (jmp -6) (ret 1)
+
+and a self tail-call replaces its own frame:
+
+    (lds 2) (eqim 3 0 0) (jmpno 3 2) (ret 1)
+    (subim 4 0 1) (add 5 1 0) (push2 4 5) (tcall 2)
+
+Four differences, and three of them are ours to take:
+
+1. **Registers in a fixed frame, not a heap environment.** Every operand is
+   a slot index into `slotcount` slots reserved on the fiber stack —
+   contiguous, unallocated, untraced. We allocate an `Obj::Env` because a
+   variable is `(depth, index)` into a heap chain.
+2. **A loop is a jump.** `jmp -6`, no call, no allocation.
+3. **A self tail-call reuses the frame** — `tcall`.
+4. **Arithmetic has immediate-operand opcodes.** `(mulim 1 0 2)` is
+   "multiply slot 0 by the immediate 2": no constant lookup, no global
+   read, no primitive call on a slice. This is the 1.6x, and it is the
+   smallest of the four.
+
+### The two candidates, in the order the numbers argue for
+
+**A. Reuse the frame on a self tail-call.** The narrow version of Janet's
+`tcall`: a closure calling ITSELF in tail position with the same arity
+overwrites its own slots instead of allocating a fresh env. The proof is
+small and local (same closure, same arity, tail position), and it makes
+every loop in the image allocation-free — which is the texel bake, the
+snapshot loader's regrouping walk, and most of the prelude's hot paths,
+since all of them are named `let`s. It leaves capture semantics exactly as
+they are: a frame that IS captured still has its env, because the env is
+still where the variables live.
+
+**B. Keep an uncaptured frame's locals on the value stack.** The general
+version, and the bigger win: a frame whose variables are never captured by
+a closure and never `set!` from an inner lambda needs no heap object at
+all. It costs more than A because the compiler has to PROVE that, with the
+heap env as the fallback — and the uniformity of "variables live in an
+`Obj::Env`" is what makes T0 and T1 interoperate at all (§"The shape": a
+compiled frame is an `Obj::Env`, exactly what T0 makes, so either tier can
+capture the other's frame). So B is a real design change, where A is a
+peephole.
+
+Neither is S13's unboxing, and neither competes with it: unboxing attacks
+the *per-operation* cost that the margins above measure at 1.6x, while A
+and B attack the ~100 ns floor under every iteration.
 
 ## The published sizes, under T1
 
