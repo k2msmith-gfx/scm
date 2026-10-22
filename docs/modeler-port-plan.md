@@ -1256,3 +1256,93 @@ for each. Expect the "real" pile to shrink to the genuinely behavioural.
 **Then M4**: `janet` stops implying `scm`, the 21 `janet` cfg sites answer
 to the binding that is present, `--features scm` alone builds a modeler
 with no Janet in it, and Janet still builds (§7 of the port plan).
+
+## 2p. L, first pass — six refusals nobody could hear
+
+The per-file residue opened with the toolbox family (§2m G), and all three
+files had the same shape of cause: **a refusal swallowed by a `try` whose
+other reading is "nothing saved, use defaults"**. That reading is right —
+00-session's docstring argues for it, and a missing session file must not
+stop a boot — which is exactly why six separate defects sat under it. Each
+was found by asking the image one question with the log open, and each took
+one line to see once asked.
+
+**The boot audit was the instrument, and it was broken first.** `boot-audit`
+asks what a forward hook var holds through `(get-in (curenv) [sym :ref 0])`,
+and the compat layer's env entry carries `:value` and `:doc` but no `:ref`,
+so that path answered #f for every name in the image. For the six hook vars
+whose 00-decls placeholder is a lambda, #f ≠ the placeholder and the check
+passed vacuously; for the three whose placeholder is nil it matched and they
+were reported unbound on every Scheme boot. Both halves were wrong and they
+cancelled into something that looked like a finding. With `:ref` answered,
+the three went quiet and the SIX spoke — which is how the next one surfaced.
+
+**`script::boot`'s Scheme branch returns before boot's tail.** The Janet
+branch loads the prelude, then `load_user_init`, ray's prelude, unify,
+help.janet, `(ui-config-replay)` and `(boot-audit)`. The Scheme branch
+returns where the prelude ends, and `load_scheme_prelude` reproduces the
+middle of that list but not the last two. So no Scheme-prelude modeler had
+ever replayed its saved UI configuration, and no Scheme-prelude modeler had
+ever audited its own load order — in the image most likely to have a breach.
+The replay and the audit now run at the end of the whole-prelude load, and
+non-fatally, for the reason they are non-fatal there.
+
+**`<` is where a sort fails and a file disappears.** Janet's comparisons are
+polymorphic; Scheme's are arithmetic. Three places in this prelude sort by
+name, and each raised `<: not a number: "b"` inside a `try` that reads an IO
+failure the same way — so `session-write`, which sorts its keys, **silently
+dropped every session store with more than one key in it**. The file kept
+whatever one-key version had been written before, which is why the toolbox
+came back unconfigured and why the symptom read as "the replay does not
+work" rather than as a comparison. `test_recorder` was saying it out loud
+the whole time (`wrote error: <: not a number: "scene"`), classified "real".
+The fix is `janet<` and three siblings over the existing `janet-less?`,
+picked by the same proof rule `r_eq` uses, so every numeric loop stays on
+the host primitive and only a comparison that proves it is text dispatches.
+
+**`parse` did not exist in this image.** Its caller at boot reads an unbound
+variable as "no session state", so the absence was invisible for the whole
+port. scm's own `read` is not a substitute and not by a small margin: `@{:a
+1}` scans as the single symbol `@{:a`, and a `#` comment — which every
+session file opens with three of — is "unsupported `# `". It is a reader
+now, in the compat layer, for the subset the three Janet-data formats hold:
+session.janet, the recorder's `.rec`, and a toolbox button's `:call` (which
+is the TEXT of a form, parsed when the button is pressed). It answers this
+layer's shapes, so a parsed `(curve-tool)` is a list `janet-eval` can run.
+That also answers **H** for the `.rec` file: the format stays Janet data in
+both images, because one reader is cheaper than two formats.
+
+**And an array printed as `@(…)`, which is a spelling in no dialect.**
+`readable` composed `@` with the readable of the LIST holding the items.
+Janet writes `@[…]`, the new `parse` reads `@[…]`, and `Modeler.norm` folds
+`@[` and `[` into `(` while leaving `@(` standing — so a Scheme-printed
+array never matched the Janet reply it was being compared against either.
+One line, three symptoms.
+
+**The nil-versus-false item (§2o) is DONE and did not grow a nil.** Only two
+verbs in the prelude distinguish an absent named parameter from one given as
+`false` — `set-toolbox` (:auto-hide) and `set-reference` (:flip-x :flip-y
+:on) — and both now take a `&keys` BAG and read it with a sentinel, through
+00-decls' `opt-get`. A key the caller never wrote is not in the bag;
+`:auto-hide false` is in it, holding false. That is the rule
+`in_a_bag_false_is_a_value_but_not_an_argument` already settled in scm, used
+from the other side: the bag is where the difference still exists. The
+Scheme half of `opt-get` is the compat layer's (`COMPAT_OWNS`), because the
+translator spells a bag as a flat rest list rather than a table.
+
+**Regenerating also exposed a translator bug with no test to its name:**
+`&named` was handled only by falling through the "plain" branch, so a lambda
+list that OPENS with it translated correctly and one that follows `&opt`
+turned the marker into a parameter — `(define (set-reference pane (path #f)
+(&named #f) (opacity #f) …)`. Every keyword argument shifted by one, which
+is the right answer by positional luck when they are passed in declaration
+order and wrong otherwise: `(trace-curve :name 'x)` put the name in `depth`.
+Two sites, both in 17-reference, neither covered. **A mistranslated lambda
+list cannot fail loudly** — it is still a valid procedure — so the only
+protection is reading the signatures the translator writes.
+
+Measured after this pass: the Janet gate is 110/110, the modeler legs 186
+and 248, and `test_toolbox` passes on the Scheme prelude. `ui_config` and
+`recorder` are past persistence and now fail on injected-input chrome (a
+recorded toolbox click arming its tool), which is the next thread rather
+than this one.
