@@ -1386,3 +1386,68 @@ layer owns, which `%count` HID by being late-bound to the modeler's
 array-aware `length` (`camera-match`); `camera-match` demanded `list?` where
 `:image` two lines above asks `%count`; and `krell_match.py` is hand-
 maintained, so the migrator never saw the Janet it sends.
+
+## 2q. L is finished — 114 of 117, measured 2026-10-22
+
+**`pass=114  timeout=3`**, and the three are exactly the three §2m excludes:
+`agent_mcp` (waits on the MCP server's own round trip), `history_tool` (§2m
+E — hands a closure to a prim that calls it later from the kernel), and
+`scene_load_camera` (stiletto's 1.1 M interpreted texels, the
+`--features jit` case that is in no leg on purpose). The Janet gate held
+110/110 on every batch and the five cargo legs read 664 / 681 / 186 / 248 /
+901. **That is the end of M3** — `modeler/tools/scheme-pass-set.txt` lists
+all 114.
+
+`curve_tool` was on §2m E's blocked list and did not belong there: nothing
+in it reaches a closure-taking prim. The ruling (which image's prelude a
+stored `scm::Proc` runs in) still blocks `history_tool`, and is still
+Kevin's.
+
+### The twelve causes of the last pass, and the shape they share
+
+Ten of the twelve are a DISTINCTION THIS IMAGE CANNOT HOLD, or a name that
+answers in one image and not the other. Neither kind can refuse — which is
+why every one of them arrived as a wrong answer somewhere else, usually two
+layers from the cause:
+
+| what was lost | how it arrived |
+|---|---|
+| `[&]` — Janet's "any arguments, bind none" — translated to `(lambda () #f)` | a fixture stub refused the call it existed to swallow: "got 2 arguments, which is more than it takes", blaming the caller. The same shape was in the AGENT POLICY FENCE: every fenced verb raised an arity error instead of its refusal sentence |
+| a bracket literal is a VECTOR, and `pair?` on a vector is #f | `(group-objects [:a :b :c])` took the whole vector for ONE name and handed it to `string-append` |
+| `record-origin` is Janet's PRIVATE wrapper; ray's Scheme calls the prim direct | a moved glTF import saved 7.3 MB of baked mesh with its textures dropped, instead of a 214-byte `(import-model …)` reference. The raise left `load-model` and reached the CLI, which prints and carries on |
+| Janet resolves a top-level call at COMPILE time; Scheme resolves it late | `clear-models` called the `clear-scene` that is shadowed later in unify, so emptying a file's objects also forgot which file it was |
+| a bare `&` inside a `let`/`each`/`when-let`/`loop` binding does not shadow the closed world | `(each pair snaps … (pair 0) …)` stayed a CALL, `restore-snapshot` applied a tuple, and the raise came out of the gizmo's ESCAPE-CANCEL — which reads as Escape not being wired up, and took eight other checks with it |
+| `:divisions nil` means "clear what was recorded"; `#f` after a keyword in a bag is the author's own false | a closeness typed into the mesh chip rebuilt the surface at 12x8 anyway |
+| the same, in an ARGUMENT DEFAULT: `:scene false` vs an absent `:scene` | every `(play-input path :delay 0)` in the suite arrived as "skip the scene restore" |
+| `(string false)` is "false" in Janet and "" here, because `(string nil)` is "" and the two are one value | the curve tool's corner flags read `" true  "` where the test wanted four words |
+| a tuple compared as NEITHER-LESS against every other tuple | `(sort-by first scored)` over `[[i len] c]` made every key equal; a stable sort then answered the pool's arrival order, and TAB offered `%add-sphere-light/unguarded` for `add-sp` |
+| a negative slice index is `n + i + 1`, not `n + i` — Python's convention was written in | every negative slice in the prelude lost an extra element. `c` closes a curve by repeating the first pick, and `(slice world 0 -2)` recovers the open list, so a three-point loop became a two-point curve. A 2-point curve is a perfectly good curve |
+| `%scm-eval` / `%scm-complete` are the SECOND VM's door, and under this prelude the prelude IS the second VM | the prim answers "this modeler was built without the scm feature" — true, and useless. Nine checks read as broken SLIME sends; the scene they were sent to was fine |
+| no PEG in this image | `keyword-candidates` raised out of `symbol-candidates`, so the editor's TAB had no completion pool at all |
+
+The other two are the harness asking a question that has two right answers:
+a sort whose key has TIES (`(+ x z)` is the diagonal on a grid, so every
+anti-diagonal is a tie, and the two images took different eight faces — a
+cap 3/16 wide against 2/16, which clamps a notch earlier), and the 30-second
+read timeout, which is Janet's number: 8,661 vertices sorted by a closure
+key is 0.1 s there, 4.9 s here alone and **29.5 s** inside the test. Losing
+that race does not look like a timeout — the form answers `[no reply]`, no
+numbers get scraped, and it surfaces as `IndexError` three lines later.
+
+### Two things worth keeping past this port
+
+**A check that cannot fail is worse than a red one.** `((options-state)
+{field})` is an index whose key the test COMPUTES, so the migrator's rule —
+which wants a literal — left it a call. Both sides of "the replayed wheel
+moved the chip to the same value" were then the string `error: not
+applicable: #<<hash-table>>`, and comparing them passed. Two more of the
+same kind were found by reading the detail text beside a PASS.
+
+**An edit whose `old` is an earlier edit's `new` breaks idempotency for
+both.** `harness_hand_edits.py` skips an edit whose replacement text is
+already present; layering a second edit on the first leaves the file holding
+neither text, and the next regeneration asserts. Fold it into the edit it
+amends, and prove it by regenerating from `git checkout` to a byte-identical
+tree. The same test's `new` ALSO skips an edit silently when its replacement
+text happens to appear elsewhere in the file — that cost three `.janet`
+buffer names that looked fixed and were not.
