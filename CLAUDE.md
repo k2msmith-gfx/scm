@@ -31,6 +31,12 @@ not to reopen.
   for the work on ray's side. It lives here, not there, because every stage
   in it is gated on this repository. A bare path in it is this repo; a `ray/`
   prefix is the other. ray keeps a pointer at `docs/scm-port-plan.md`.
+- **`docs/cl-plan.md`** — **PROPOSED, nothing built, and not this
+  language.** A subset of Common Lisp in Rust, scoped to "runs most portable
+  CL". It lives here because its C0 decisions are decisions about *this*
+  repository — what of the heap, the bignums, the spine and the LLVM glue is
+  inherited, and where the fork is. Do not read it as scm's roadmap, and
+  move it once the implementation has a repository of its own.
 
 ## Build / run
 
