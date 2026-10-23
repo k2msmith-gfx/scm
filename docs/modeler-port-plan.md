@@ -1659,7 +1659,10 @@ its scene mode for the twins. The per-file shape is demonstrated twice
 already: `02-scene.janet` and `07-camera.janet` are down to 105 and 109 lines
 of shim from whole sections. Twenty more files, the same move.
 
-☐ **THE RULING, and it cannot be deferred past M5a: does a Janet modeler
+☑ **RULED 2026-10-23 — Kevin: retire it.** M5a is done in ray (see "M5a as
+built" below). The ruling as it was put:
+
+**THE RULING, and it cannot be deferred past M5a: does a Janet modeler
 prelude survive at all?** If it does not, `MODELER_PRELUDE=janet` stops being
 a thing, the 110/110 Janet UI gate goes away, and `harness_touched.py`'s
 both-dialects loop collapses to one. If it does, both preludes and the
@@ -1670,6 +1673,42 @@ oracle every stage from M0 to M4 was measured against. **Kevin's.**
 It also needs a replacement drift guard: `scm_twins.py` compares Janet's
 round trip against Scheme's, and with no Janet prelude there is no left-hand
 side.
+
+**Corrected 2026-10-23: it does not.** `scm_twins.py`'s control is
+`target/release/ray` (`scm_corpus.py:83`) — RAY's Janet prelude, which this
+ruling does not touch. Also corrected: `test_agent_mcp` is not only a
+timeout (38/50, 12 real failures, undiagnosed); `test_scene_load_camera` is
+(9/9 at 420 s).
+
+**M5a as built (2026-10-23).** What the plan did not count, and what the
+0.5 became:
+
+- **The Janet VM stays, as a SCENE image.** With the prelude gone the main
+  Janet VM gets ray's verbs and ray's Janet prelude at boot, and
+  `%janet-eval` is the Scheme side's door to it — a `.janet` scene's sync
+  open, a `.janet` buffer's sends and the REPL's `:janet` dialect go there.
+  Under `MODELER_PRELUDE=scheme` all three had been reaching the SCHEME
+  reader: a `.janet` open answered `#f` with nothing loaded and nothing
+  said, and the REPL's `:scheme` half was a door to a second Scheme VM that
+  does not exist. The eval channel is unchanged — both its dialects reach
+  the prelude image, which is what the harness's forms are written for
+  (M5c's business).
+- **The modeler manual had only a Janet generator** (help.janet). There is
+  a Scheme `generate-manual` now; `api/modeler` is 521 verbs against 529,
+  the gap being names that are not callable in the Scheme image, and its
+  categories are the registry's.
+- **31 cargo tests spoke Janet.** Ported, which surfaced the real defects:
+  `(live)` turned live render off and `toggle-grid` could not hide the grid
+  (an `#f` default cannot tell absent from false); an automatic mesh showed
+  as "false" (`#f` reached Rust as `Bool(false)`, not `Nil`); hook
+  arguments and option values came back inexact (`12.0`, `2.0`) because
+  `num()` bypassed `number_val` and the ladder's clamp ran through ±inf;
+  `tool-census` and a typed point called `peg/match`, which this image does
+  not have; the REPL printed a bare variable as `#<<janet-array>>`.
+- **`init.scm`** replaces `init.janet`, which is reported if found.
+- **`janet_to_scheme.py` scene mode** reads its function set from a frozen
+  snapshot of the retired prelude plus the live Scheme defines; all 17
+  committed twins translate identically.
 
 **M5b — the compat layer dissolves (1.5). RECOMMENDED NOT AS A CAMPAIGN.**
 The mirror is Scheme written in Janet's vocabulary: ~1,870 sites —
