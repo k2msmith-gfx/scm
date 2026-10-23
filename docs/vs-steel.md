@@ -115,3 +115,79 @@ the 6.8× is the one to quote.
 Verified before timing, since a program that dies early times extremely
 well: all ten agree between T1 and T2, and with Steel except `fbm`, where
 Steel writes `#true` and scm writes `#t`.
+
+## Where `lists` actually goes, and one thing done about it
+
+2026-10-23. `lists` is the worst row above, and the reading beside it —
+the collector re-marking 300,000 live objects — turns out to describe the
+smaller half of the program. Split in two and timed separately under T1:
+
+| phase | what it does | Steel | T1 | gap |
+|---|---|---|---|---|
+| A, `my-map` + `sum`, 20 passes | 100k-deep non-tail recursion, 2M pairs | 545 ms | 770 ms | 225 ms |
+| B, `assv` over a 200-entry alist, 200k times | ~20M steps, **allocates nothing** | 1858 ms | 2241 ms | 383 ms |
+
+Phase B is three quarters of the runtime and nearly two thirds of the gap,
+and it never allocates a pair. **The collector cannot be the main cause.**
+The GC reading stands for phase A; it was being read as the whole row.
+
+**It is also not a missing primitive.** `assv`, `assq`, `memv` and `memq`
+are interpreted Scheme in `prelude.scm`, so the obvious guess was that
+Steel has a native one. Racing each implementation's library `assv`
+against a hand-rolled loop *in its own language* kills that: Steel 1812 ms
+library against 1908 ms hand-rolled, scm 2183 against 2173. Neither has a
+native `assv`; both interpret the same loop. What is left is the per-step
+cost of the interpreter.
+
+Sampling T1 on phase B puts call machinery around 45%, opcode dispatch 35%,
+the collector 9% -- on a program allocating no pairs, because every call
+heap-allocates an environment -- and the primitives themselves about 4%.
+
+### The one cheap win
+
+`do_call` asked `plain_prim` on *every* primitive call and recomputed the
+answer each time from two bounds-checked lookups plus a five-element array
+built and linear-scanned on the spot: about 80M times in phase B, for more
+than the `car`/`cdr`/`eqv?` work it was gating. The three tables and the
+five special ids are all fixed at registration, so it is now a `Vec<bool>`
+and one indexed load, with the old logic kept as a `debug_assert` so the
+cache cannot drift. Measured as a paired A/B -- both arms `--release
+--features jit`, five interleaved rounds so drift lands on both:
+
+| | Steel / T1 before | Steel / T1 after | after / before |
+|---|---|---|---|
+| `lists` | 0.65× | 0.68× | **1.044×** |
+| `fbm` | 1.08× | 1.11× | 1.034× |
+| `fib` | 0.83× | 0.85× | 1.027× |
+| `strings` | 0.78× | 0.78× | 1.002× |
+| **geometric mean, excluding startup** | **0.927×** | **0.946×** | **1.020×** |
+
+2% overall, 4.4% on `lists`, nothing on `strings` -- which is the shape to
+expect, since `strings` spends its time inside a few large primitives
+rather than calling many small ones. The tables above this section were
+measured before the change and are that much pessimistic for T1.
+
+**Interleave the arms.** A first attempt compared the new binary against
+numbers taken half an hour earlier and reported 7%; the paired run says
+4.4%. On a box at load average 3 the drift between two sittings is larger
+than the effect being measured.
+
+### Two things tried that did not work
+
+`#[inline]` on `frame_at` with a `depth == 0` fast path: neutral, 2097 ms
+against 2084, and reverted. Worth knowing because the first version of it
+wrote `ok_or` where the original had `ok_or_else` -- the eager form builds
+the error `String` on every *successful* local reference, and that one word
+made `lists` 80% slower, 2084 ms to 3761. A non-error path paying for its
+error message does not look like a bug in a profile; it looks like the
+interpreter being slow.
+
+### What is left is not cheap
+
+The remaining call cost is structural: every interpreted call builds a
+`Vec<(SymId, Value)>` and allocates an `Env` on the heap, which is also
+what puts a 9% collector bill on a program that allocates no pairs. Flat
+frames, or reusing the environment in place on a self-tail-call when
+nothing captures it, is the next real win -- `assv` tail-calls itself 100
+times per lookup -- and it needs compile-time escape analysis and a
+decision about `call/cc` and `set!`. That is a design change, not a tweak.

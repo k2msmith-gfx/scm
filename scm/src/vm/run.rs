@@ -34,7 +34,21 @@ impl Vm {
     /// A primitive that takes the engine and its arguments and nothing
     /// else: the one kind that can be called on a slice of the value stack
     /// with no vector built.
+    #[inline]
     pub(super) fn plain_prim(&self, id: crate::value::PrimId) -> bool {
+        let i = id.0 as usize;
+        // One indexed load. The three tables and the five special ids are
+        // all fixed at registration time, so the answer is precomputed in
+        // `Vm::plain`; see its declaration for who must keep it true.
+        let cached = self.plain.get(i).copied().unwrap_or(true);
+        debug_assert_eq!(cached, self.plain_prim_uncached(id), "the plain-prim cache disagrees with the tables for prim {i}");
+        cached
+    }
+
+    /// The question `plain_prim` answers, asked of the tables directly.
+    /// Only the `debug_assert` above calls it; it exists so the cache has
+    /// something to be checked against on every call under `cargo test`.
+    fn plain_prim_uncached(&self, id: crate::value::PrimId) -> bool {
         let i = id.0 as usize;
         if self.vm_prims.get(i).is_some_and(|p| p.is_some()) {
             return false;

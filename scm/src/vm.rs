@@ -414,6 +414,15 @@ pub struct Vm {
     global_versions: Vec<u64>,
     prims: Vec<PrimFn>,
     vm_prims: Vec<Option<VmPrimFn>>,
+    /// `plain_prim` precomputed, indexed by `PrimId`: true when the slot is
+    /// a primitive the run loop may call straight off the value stack. It
+    /// is a cache of a question the three tables above already answer, kept
+    /// because `do_call` asks it on *every* primitive call -- 80M times in
+    /// the `lists` benchmark, where recomputing it cost more than the
+    /// primitives themselves. Every write to `prims`, `vm_prims`,
+    /// `host_fns` or the five special ids must write here too; an index
+    /// past the end reads as plain, matching the old out-of-range answer.
+    plain: Vec<bool>,
     /// Top-level macros. A macro applies only when nothing shadows its name,
     /// the same rule the special forms follow.
     macros: MacroTable,
@@ -729,6 +738,7 @@ impl Vm {
             compiled_units: 0,
             prims: Vec::new(),
             vm_prims: Vec::new(),
+            plain: Vec::new(),
             macros: MacroTable::new(),
             stack: Vec::new(),
             high_water: 0,
@@ -772,6 +782,22 @@ impl Vm {
             let sym = vm.engine.interner.symbol("dynamic-wind");
             if let Some(Value::Primitive(id)) = vm.global(sym) {
                 vm.dynamic_wind_prim = Some(id);
+            }
+            for id in [
+                vm.apply_prim,
+                vm.call_with_values_prim,
+                vm.eval_prim,
+                vm.callcc_prim,
+                vm.dynamic_wind_prim,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let i = id.0 as usize;
+                if vm.plain.len() <= i {
+                    vm.plain.resize(i + 1, true);
+                }
+                vm.plain[i] = false;
             }
         }
         // The derived forms are Scheme, not Rust. Compiling them at every
@@ -869,6 +895,7 @@ impl Vm {
         debug_assert_eq!(id as usize, self.prims.len());
         self.prims.push(f);
         self.vm_prims.push(None);
+        self.plain.push(true);
         let sym = self.engine.interner.symbol(name);
         self.set_global(sym, Value::Primitive(PrimId(id)));
     }
@@ -924,7 +951,11 @@ impl Vm {
         if self.host_fns.len() <= slot {
             self.host_fns.resize_with(slot + 1, || None);
         }
+        if self.plain.len() <= slot {
+            self.plain.resize(slot + 1, true);
+        }
         self.host_fns[slot] = Some(f);
+        self.plain[slot] = false;
         let sym = self.engine.interner.symbol(name);
         self.set_global(sym, Value::Primitive(PrimId(id)));
     }
@@ -936,6 +967,7 @@ impl Vm {
             Err(VmError::Error("internal: VM primitive called as a plain one".into()))
         });
         self.vm_prims.push(Some(f));
+        self.plain.push(false);
         let sym = self.engine.interner.symbol(name);
         self.set_global(sym, Value::Primitive(PrimId(id)));
     }
