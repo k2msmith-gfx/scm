@@ -412,7 +412,7 @@ fn repl(mut door: Door) -> ExitCode {
         ),
     }
     println!(
-        "{} globals. (apropos \"vector\") lists names, (doc 'map) and (signature 'map) explain one.",
+        "{} globals. (apropos \"vector\") searches names and docstrings, (doc 'map) and (signature 'map) explain one.",
         names.borrow().len()
     );
 

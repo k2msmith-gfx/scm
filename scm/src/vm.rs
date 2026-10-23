@@ -983,6 +983,20 @@ impl Vm {
             .collect()
     }
 
+    /// Every bound global name with its docstring, if it has one — what
+    /// `apropos` searches.
+    pub fn global_names_with_docs(&self) -> Vec<(&str, Option<&str>)> {
+        self.globals
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_some())
+            .map(|(i, _)| {
+                let sym = SymId(i as u32);
+                (self.engine.interner.sym_name(sym), self.doc_of(sym))
+            })
+            .collect()
+    }
+
     /// The docstring recorded for a name, if it has one.
     pub fn doc_of(&self, sym: SymId) -> Option<&str> {
         self.docs.get(&sym).map(String::as_str)

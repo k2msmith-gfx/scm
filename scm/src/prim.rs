@@ -4828,8 +4828,15 @@ fn signature_prim(vm: &mut Vm, a: &[Value]) -> PResult {
     }
 }
 
-/// `(apropos "prefix")` -> the matching global names, as a sorted list of
-/// symbols.
+/// `(apropos "text")` -> the matching global names, as a list of symbols:
+/// first every name containing TEXT, sorted, then every other name whose
+/// docstring contains it, case-insensitively, sorted. With no argument,
+/// every global name.
+///
+/// The docstring half is what makes a concept findable when the name is
+/// not the word a reader knows: `(apropos "vase")` reaches a host's
+/// `revolve`. Names stay first because a name hit is the strong one, which
+/// is the order ray's Janet `apropos` already had.
 fn apropos_prim(vm: &mut Vm, a: &[Value]) -> PResult {
     let prefix = match a {
         [] => String::new(),
@@ -4843,16 +4850,24 @@ fn apropos_prim(vm: &mut Vm, a: &[Value]) -> PResult {
         },
         _ => return Err(err("apropos: expects one argument")),
     };
-    let mut names: Vec<String> = vm
-        .global_names()
-        .into_iter()
-        .filter(|n| n.contains(&prefix))
+    let needle = prefix.to_lowercase();
+    let (mut names, mut in_doc) = (Vec::new(), Vec::new());
+    for (n, doc) in vm.global_names_with_docs() {
         // A renamed template identifier is hygiene's business, not a user's.
-        .filter(|n| !n.contains('.') || n.parse::<f64>().is_ok())
-        .map(str::to_string)
-        .collect();
+        if n.contains('.') && n.parse::<f64>().is_err() {
+            continue;
+        }
+        if n.contains(&prefix) {
+            names.push(n.to_string());
+        } else if doc.is_some_and(|d| d.to_lowercase().contains(&needle)) {
+            in_doc.push(n.to_string());
+        }
+    }
     names.sort();
     names.dedup();
+    in_doc.sort();
+    in_doc.dedup();
+    names.append(&mut in_doc);
     let vals: Vec<Value> = names.iter().map(|n| vm.engine.sym(n)).collect();
     Ok(vm.engine.list(&vals))
 }

@@ -107,8 +107,15 @@ Reachable from Scheme as well as over the wire, because a script wants it too:
 (define (area r) "The area of a circle." (* 3.14159 r r))
 (doc 'area)        ; => "The area of a circle."
 (signature 'area)  ; => "(area r)"
-(apropos "vector-f") ; => (vector-fill! vector-for-each vector-for-each*)
+(apropos "vector-f") ; => (numvector-fill! vector-fill! vector-for-each)
+(apropos "circle")   ; => (area)  -- found by its docstring
 ```
+
+`apropos` lists every name containing the text first, then every other
+name whose docstring contains it, ignoring case. The second half is what
+finds a concept when its name is not the word you know: a host that
+documents `revolve` as "a vase, a dome" is reachable from `"vase"`. With no
+argument it is every global name.
 
 Completion filters out hygiene's renamed identifiers (`tmp.1274`): those are
 names no source text can write, and offering one would be leaking the
