@@ -61,3 +61,57 @@ to 0.21 s once marking was amortised over allocations.
 either would be chosen: host functions, re-entrancy, rooting, errors as
 `Result`, interrupt and fuel. Those are design properties, not timings, and
 scm's are in `docs/plan.md` §7a.
+
+## Reproduction, 2026-10-23
+
+Same machine class (Apple M3 Pro), same Steel 0.8.2, fresh clone at
+`05bd573`, run from `scm-conform/bench/vs-steel/run.py t1 t2`. The point
+was to check the numbers above survive a clean checkout on a different day,
+not to replace them: this run had a **load average near 3**, so absolute
+times sit high across the board and the ratios are the part worth reading.
+
+| program | Steel | T1 | T2 | Steel / T1 | Steel / T2 | T2 / T1 |
+|---|---|---|---|---|---|---|
+| `startup` | 60 ms | 9 ms | 9 ms | 6.8× | 7.1× | — |
+| `fib` 30 | 226 ms | 276 ms | 192 ms | 0.8× | 1.2× | 1.44× |
+| `tak` 24 16 8 | 203 ms | 266 ms | 180 ms | 0.8× | 1.1× | 1.48× |
+| `loop`, 5M with `modulo` | 492 ms | 621 ms | 346 ms | 0.8× | 1.4× | 1.79× |
+| `vec`, fill and sum 1M | 244 ms | 255 ms | 152 ms | 1.0× | 1.6× | 1.68× |
+| `strings` | 92 ms | 118 ms | 127 ms | 0.8× | 0.7× | 0.93× |
+| `closures`, 1M | 199 ms | 245 ms | 213 ms | 0.8× | 0.9× | 1.15× |
+| `lists` | 2255 ms | 3471 ms | 2538 ms | 0.6× | 0.9× | 1.37× |
+| `fbm`, 128² | 164 ms | 148 ms | 179 ms | 1.1× | 0.9× | 0.83× |
+| `callcc` | 240 ms | 95 ms | 86 ms | 2.5× | 2.8× | 1.10× |
+| **geometric mean, excluding startup** | | | | **0.93×** | **1.19×** | **1.28×** |
+
+It holds. T1 at 0.93× against the 0.91× above, T2 at 1.19× against 1.06×,
+and every per-program ratio within about 0.1× of its earlier value. The
+reading in the section above stands unchanged: where T2 helps is arithmetic
+and memory traffic, where it does not is `strings` and `fbm`, which are
+already a direct Rust call through the generic primitive path.
+
+**`callcc` is not a like-for-like row and should be discounted.** scm's
+continuations are escape-only (§1 of `subset.md`), and the program only
+ever escapes, so Steel pays for a generality it never uses — confirmed here
+by storing a continuation, letting its extent return and invoking it: scm
+raises `this continuation has escaped its extent`, Steel re-enters and
+loops. Excluding that row as well as startup, T1 is 0.84× and T2 is 1.08×.
+Those are the honest headline numbers for ordinary code.
+
+**Two ways this benchmark can lie, both hit on this run.**
+
+`SCM_TIER=t2` is read behind `#[cfg(feature = "jit")]`. In a binary built
+without the feature it does not warn, it silently runs T1 — so a T2 column
+can be a duplicate of the T1 column beside it. Check the feature, not the
+variable.
+
+Building with `--features jit` statically links LLVM and takes the binary
+from about 5 MB to 61 MB, which moved startup from 4 ms to 9 ms for **both**
+tiers. A T1 measured on the plain binary is therefore not comparable with a
+T2 measured on the jit one, and startup is where the gap shows: 16.8× on
+the plain binary against 6.8× here. Measure both tiers on the same binary;
+the 6.8× is the one to quote.
+
+Verified before timing, since a program that dies early times extremely
+well: all ten agree between T1 and T2, and with Steel except `fbm`, where
+Steel writes `#true` and scm writes `#t`.
