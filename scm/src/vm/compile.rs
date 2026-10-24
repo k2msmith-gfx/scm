@@ -39,6 +39,8 @@ enum Var {
     /// S14: a variable of a flat scope of THIS unit -- a slot of the frame
     /// on the value stack.
     Flat { slot: u16, checked: bool },
+    /// S14c: the name of a loop of this unit (see `Kind::Loop`).
+    Loop { id: usize },
     /// S14: a variable of a flat scope of an ENCLOSING unit. Its frame is
     /// not this one, so the reference is a capture: the scope is recorded
     /// as such, its unit recompiles with it on the heap, and this pass's
@@ -58,6 +60,20 @@ enum Kind {
     /// `i`th name. `unit` and `id` name the scope across the nested
     /// compilers its body spawns, so one that reaches into it can say so.
     Flat { slots: Vec<u16>, unit: usize, id: usize },
+    /// S14c: a named `let`'s name, compiled as a LOOP -- no closure and no
+    /// runtime frame. Only a call of it in loop-tail position means
+    /// anything; any other use is a capture, and the unit recompiles the
+    /// loop as the closure T0 would make.
+    Loop { unit: usize, id: usize },
+}
+
+/// S14c: a named `let` compiled as a loop -- its variables' slots, the
+/// slots its body's internal defines need, and the pc its body starts at.
+struct LoopInfo {
+    id: usize,
+    slots: Vec<u16>,
+    defs: Vec<u16>,
+    top: u32,
 }
 
 /// S14. Shared by a unit's compiler and every compiler nested in it.
@@ -97,6 +113,11 @@ struct Cx<'a> {
     nslots: u16,
     flat_params: bool,
     slot_names: Vec<(u16, SymId, u32, u32)>,
+    /// S14c: the loops this unit compiles as jumps, innermost last, and
+    /// the ones the expression being compiled is in TAIL position of --
+    /// where a call of the loop's name may jump instead of calling.
+    loops: Vec<LoopInfo>,
+    lt: Vec<usize>,
     /// For each scope, the index from which its slots belong to internal
     /// defines rather than parameters or `let` variables.
     defs_from: Vec<usize>,
@@ -220,6 +241,8 @@ impl<'a> Cx<'a> {
             nslots: 0,
             flat_params: false,
             slot_names: Vec::new(),
+            loops: Vec::new(),
+            lt: Vec::new(),
             defs_from: outer.defs_from.clone(),
             runtime: outer.runtime,
             ops: Vec::new(),
@@ -335,6 +358,11 @@ impl<'a> Cx<'a> {
                         self.cap.captured.borrow_mut().insert((*unit, *id));
                         Var::Elsewhere
                     }
+                    Kind::Loop { unit, id } if *unit == self.unit => Var::Loop { id: *id },
+                    Kind::Loop { unit, id } => {
+                        self.cap.captured.borrow_mut().insert((*unit, *id));
+                        Var::Elsewhere
+                    }
                 });
             }
             if matches!(kind, Kind::Heap) {
@@ -385,7 +413,10 @@ impl<'a> Cx<'a> {
     }
 
     fn is_local(&self, sym: SymId) -> R<bool> {
-        Ok(matches!(self.resolve(sym)?, Var::Local { .. } | Var::Slot { .. } | Var::Flat { .. } | Var::Elsewhere))
+        Ok(matches!(
+            self.resolve(sym)?,
+            Var::Local { .. } | Var::Slot { .. } | Var::Flat { .. } | Var::Loop { .. } | Var::Elsewhere
+        ))
     }
 
     /// Is this head a special form here? Only when nothing shadows it --
@@ -459,10 +490,23 @@ impl<'a> Cx<'a> {
             self.expr(*f, false)?;
             self.ops.push(Op::Pop);
         }
-        self.expr(*last, tail)
+        self.expr_lt(*last, tail)
     }
 
+    /// An expression that is NOT in tail position of any loop: a call of a
+    /// loop's name inside it is a real call (and so a capture). Every
+    /// sub-expression goes through here except the few positions that
+    /// carry loop-tail on (`expr_lt`).
     fn expr(&mut self, expr: Value, tail: bool) -> R<()> {
+        let saved = std::mem::take(&mut self.lt);
+        let out = self.expr_lt(expr, tail);
+        self.lt = saved;
+        out
+    }
+
+    /// An expression in whatever loop-tail position the caller is in: the
+    /// last form of a body, an `if`'s branches, a flat `let`'s body.
+    fn expr_lt(&mut self, expr: Value, tail: bool) -> R<()> {
         match expr {
             Value::Fixnum(_)
             | Value::Flonum(_)
@@ -483,6 +527,12 @@ impl<'a> Cx<'a> {
                     Var::Local { depth, idx, checked: true } => self.ops.push(Op::LocalDef { depth, idx, sym: sym.0 }),
                     Var::Flat { slot, checked: false } => self.ops.push(Op::Arg(slot)),
                     Var::Flat { slot, checked: true } => self.ops.push(Op::ArgDef { slot, sym: sym.0 }),
+                    // A loop's name used as a VALUE: it has to be the
+                    // closure after all.
+                    Var::Loop { id } => {
+                        self.cap.captured.borrow_mut().insert((self.unit, id));
+                        self.ops.push(Op::Unspecified);
+                    }
                     // A void pass: see `Var::Elsewhere`.
                     Var::Elsewhere => self.ops.push(Op::Unspecified),
                     Var::Slot { frame, idx } => self.ops.push(Op::Slot { frame: frame.0, idx }),
@@ -524,7 +574,7 @@ impl<'a> Cx<'a> {
         // An expansion need not be a combination: `(and)` is `#t`, `(and x)`
         // is `x`.
         if !matches!(expr, Value::Obj(r) if matches!(self.vm.engine.obj(r), Obj::Pair(..))) {
-            return self.expr(expr, tail);
+            return self.expr_lt(expr, tail);
         }
         let parts = self.list(expr)?;
         let Some(&head) = parts.first() else {
@@ -605,6 +655,38 @@ impl<'a> Cx<'a> {
                 return self.interp(expr);
             }
         }
+        // S14c: a call of a loop's name. In tail position of that loop (or
+        // of an inner one) with the right count, it is a JUMP: the new
+        // values into the loop's slots, its defines reset, back to the
+        // top. Anywhere else it must be a real call, so the loop is
+        // recompiled as the closure.
+        if let Value::Symbol(h) = head
+            && let Var::Loop { id } = self.resolve(h)?
+        {
+            let args = &parts[1..];
+            let jumpable = self.lt.contains(&id)
+                && self.loops.iter().any(|l| l.id == id && l.slots.len() == args.len());
+            if !jumpable {
+                self.cap.captured.borrow_mut().insert((self.unit, id));
+                self.ops.push(Op::Unspecified);
+                return Ok(());
+            }
+            for a in args {
+                self.expr(*a, false)?;
+            }
+            let l = self.loops.iter().find(|l| l.id == id).expect("a loop in scope");
+            let (slots, defs, top) = (l.slots.clone(), l.defs.clone(), l.top);
+            for &s in slots.iter().rev() {
+                self.ops.push(Op::SetArg(s));
+            }
+            let _ = defs; // reset at `top`, on every pass through it
+            let form = self.forms.len() as u32;
+            self.forms.push(expr);
+            self.ops.push(Op::JumpCall { target: top, form });
+            // Unreachable, but the stack depth after a call is one value.
+            self.ops.push(Op::Unspecified);
+            return Ok(());
+        }
         // An application. The callee is evaluated first, then the
         // arguments left to right, as T0 does.
         let start = self.here();
@@ -629,13 +711,13 @@ impl<'a> Cx<'a> {
         self.expr(test, false)?;
         let jf = self.ops.len();
         self.ops.push(Op::JumpIfFalse(0));
-        self.expr(then_e, tail)?;
+        self.expr_lt(then_e, tail)?;
         let jend = self.ops.len();
         self.ops.push(Op::Jump(0));
         let else_at = self.here();
         self.patch(jf, else_at);
         match else_e {
-            Some(e) => self.expr(e, tail)?,
+            Some(e) => self.expr_lt(e, tail)?,
             None => self.ops.push(Op::Unspecified),
         }
         let end = self.here();
@@ -714,7 +796,11 @@ impl<'a> Cx<'a> {
                 self.scopes.push(frame);
                 self.defs_from.push(vars.len());
                 self.kinds.push(Kind::Heap);
+                // Not loop-tail inside: a jump out would leave this frame
+                // on the chain.
+                let saved_lt = std::mem::take(&mut self.lt);
                 let out = self.body(body, tail);
+                self.lt = saved_lt;
                 self.scopes.pop();
                 self.defs_from.pop();
                 self.kinds.pop();
@@ -725,6 +811,13 @@ impl<'a> Cx<'a> {
                 Ok(())
             }
             Some(n) => {
+                // S14c: two scope ids either way, so a recompile sees the
+                // same numbering: the loop's name, and its variables.
+                let (lid, as_loop) = self.open_scope(true);
+                let (vid, vars_flat) = self.open_scope(true);
+                if as_loop && vars_flat {
+                    return self.loop_form(n, lid, vid, vars, body, tail);
+                }
                 // The loop variable lives in a frame of its own, as in T0,
                 // so the closure can see itself; the inits are already on
                 // the stack, evaluated outside it.
@@ -766,6 +859,61 @@ impl<'a> Cx<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// S14c: a named `let` as a loop. The inits are on the stack; they pop
+    /// into the variables' slots, the body is compiled with this loop added
+    /// to the loop-tail set (on top of any loop this one is itself in tail
+    /// position of), and a self-call there jumps back to `top`. Defines in
+    /// the body get slots too, reset to undefined on every pass, so a read
+    /// before the define is "unbound" on each iteration, as on T0.
+    fn loop_form(&mut self, name: SymId, lid: usize, vid: usize, vars: Vec<SymId>, body: &[Value], tail: bool) -> R<()> {
+        let mut defs = Vec::new();
+        self.scan_defines(body, &mut defs)?;
+        let mut slots = Vec::with_capacity(vars.len());
+        for _ in &vars {
+            slots.push(self.new_slot()?);
+        }
+        let mut def_slots = Vec::with_capacity(defs.len());
+        for _ in &defs {
+            def_slots.push(self.new_slot()?);
+        }
+        for &s in slots.iter().rev() {
+            self.ops.push(Op::SetArg(s));
+        }
+        let top = self.here();
+        for &s in &def_slots {
+            self.konst(Value::Undefined);
+            self.ops.push(Op::SetArg(s));
+        }
+        let mut frame = vars.clone();
+        frame.extend(defs.iter().copied());
+        let mut all = slots.clone();
+        all.extend(def_slots.iter().copied());
+        self.scopes.push(vec![name]);
+        self.defs_from.push(1);
+        self.kinds.push(Kind::Loop { unit: self.unit, id: lid });
+        self.scopes.push(frame.clone());
+        self.defs_from.push(vars.len());
+        self.kinds.push(Kind::Flat { slots: all.clone(), unit: self.unit, id: vid });
+        self.loops.push(LoopInfo { id: lid, slots, defs: def_slots, top });
+        let mut lt = self.lt.clone();
+        lt.push(lid);
+        let saved_lt = std::mem::replace(&mut self.lt, lt);
+        let out = self.body(body, tail);
+        self.lt = saved_lt;
+        self.loops.pop();
+        for _ in 0..2 {
+            self.scopes.pop();
+            self.defs_from.pop();
+            self.kinds.pop();
+        }
+        out?;
+        let end = self.here();
+        for (&s, &n) in all.iter().zip(&frame) {
+            self.slot_names.push((s, n, top, end));
+        }
+        Ok(())
     }
 
     fn lambda(&mut self, name: Option<SymId>, formals: Value, body: &[Value]) -> R<()> {
@@ -919,6 +1067,11 @@ impl<'a> Cx<'a> {
                 Var::Local { depth, idx, checked: true } => self.ops.push(Op::SetLocalDef { depth, idx, sym: sym.0 }),
                 Var::Flat { slot, checked: false } => self.ops.push(Op::SetArg(slot)),
                 Var::Flat { slot, checked: true } => self.ops.push(Op::SetArgDef { slot, sym: sym.0 }),
+                Var::Loop { id } => {
+                    // `set!` of a loop's name: it has to be the closure.
+                    self.cap.captured.borrow_mut().insert((self.unit, id));
+                    self.ops.push(Op::Pop);
+                }
                 Var::Elsewhere => self.ops.push(Op::Pop),
                 Var::Slot { .. } => return decline("set! of a library binding"),
                 Var::Global(s, r) => {
@@ -976,7 +1129,7 @@ impl<'a> Cx<'a> {
     /// enclosing unit's.
     fn interp(&mut self, form: Value) -> R<()> {
         for k in &self.kinds {
-            if let Kind::Flat { unit, id, .. } = k {
+            if let Kind::Flat { unit, id, .. } | Kind::Loop { unit, id } = k {
                 self.cap.captured.borrow_mut().insert((*unit, *id));
             }
         }

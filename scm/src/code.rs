@@ -52,6 +52,11 @@ pub enum Op {
     Unspecified,
     Pop,
     Jump(u32),
+    /// S14c: a loop's back-edge -- a call of a named `let`'s name compiled
+    /// as a jump. Names `forms[form]` as the call in progress, as the call
+    /// it replaces would have, so a runaway stopped mid-loop still says
+    /// `(loop)` in its backtrace; then jumps.
+    JumpCall { target: u32, form: u32 },
     /// Pop; branch if false.
     JumpIfFalse(u32),
     /// The callee and `argc` arguments are on the stack, callee lowest.

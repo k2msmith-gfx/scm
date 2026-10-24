@@ -113,3 +113,67 @@ fn the_other_doors_into_a_flat_procedure() {
     // The escape left the value stack where it found it.
     assert_eq!(eval(&mut vm, "(+ (sq 3) (sq 4))"), "25");
 }
+
+// ── S14c: a named let whose name is only called in loop-tail position is a
+// loop: its variables are slots and a self-call is a jump.
+
+#[test]
+fn a_loop_allocates_nothing() {
+    let mut vm = Vm::new();
+    eval(&mut vm, "(define (sum-to n) (let loop ((i 0) (acc 0)) (if (> i n) acc (loop (+ i 1) (+ acc i)))))");
+    eval(&mut vm, "(define (count-do n) (do ((i 0 (+ i 1)) (acc 0 (+ acc 2))) ((= i n) acc)))");
+    let f = global(&mut vm, "sum-to");
+    let g = global(&mut vm, "count-do");
+    vm.call_procedure(f, vec![Value::Fixnum(1)]).unwrap();
+    vm.call_procedure(g, vec![Value::Fixnum(1)]).unwrap();
+    let before = vm.engine.allocations();
+    assert_eq!(vm.call_procedure(f, vec![Value::Fixnum(100_000)]).unwrap(), Value::Fixnum(5_000_050_000));
+    assert_eq!(vm.call_procedure(g, vec![Value::Fixnum(100_000)]).unwrap(), Value::Fixnum(200_000));
+    let made = vm.engine.allocations() - before;
+    assert_eq!(made, 0, "200,000 loop iterations allocated {made} heap objects");
+}
+
+/// A closure made in the body captures that ITERATION's binding -- the
+/// loop must stay a closure for this to hold, and it does.
+#[test]
+fn closures_made_in_a_loop_see_their_own_iteration() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        eval(&mut vm, "(let loop ((i 0) (fs '())) (if (= i 3) (map (lambda (f) (f)) fs) (loop (+ i 1) (cons (lambda () i) fs))))"),
+        "(2 1 0)"
+    );
+}
+
+/// The name used as a value, called outside tail position, or with the
+/// wrong count: each makes it the closure, with the closure's behaviour.
+#[test]
+fn a_loop_name_used_any_other_way_is_the_closure() {
+    let mut vm = Vm::new();
+    assert_eq!(eval(&mut vm, "(let fact ((n 5)) (if (= n 0) 1 (* n (fact (- n 1)))))"), "120");
+    assert_eq!(eval(&mut vm, "(let me ((n 1)) (if (procedure? me) n 0))"), "1");
+    assert_eq!(eval(&mut vm, "(let l ((n 3)) (if (= n 0) 'done (apply l (list (- n 1)))))"), "done");
+    let e = vm.eval_str("(let l ((n 3)) (if (= n 0) 0 (l)))").expect_err("wrong count");
+    assert!(format!("{e}").contains("expects 1 required argument"), "{e}");
+}
+
+/// An inner loop in tail position of an outer one may jump to either.
+#[test]
+fn an_inner_loop_jumps_to_the_outer() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        eval(&mut vm, "(let outer ((i 0) (acc 0)) (if (= i 3) acc (let inner ((j 0) (acc acc)) (if (= j 4) (outer (+ i 1) acc) (inner (+ j 1) (+ acc 1))))))"),
+        "12"
+    );
+    // A loop in NON-tail position of another is still a loop of its own.
+    assert_eq!(
+        eval(&mut vm, "(let outer ((i 0) (acc 0)) (if (= i 3) acc (outer (+ i 1) (+ acc (let inner ((j 0)) (if (= j 2) j (inner (+ j 1))))))))"),
+        "6"
+    );
+}
+
+/// A define in a loop body is unbound until it runs, on every iteration.
+#[test]
+fn a_loop_body_define_is_fresh_each_time() {
+    let mut vm = Vm::new();
+    assert_eq!(eval(&mut vm, "(let loop ((i 0) (acc 0)) (define d (* i 10)) (if (= i 3) acc (loop (+ i 1) (+ acc d))))"), "30");
+}

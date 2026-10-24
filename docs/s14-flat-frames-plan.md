@@ -230,3 +230,31 @@ benchmarks, boot, scm-llvm.
 
 Found on the way, fixed separately (bf4427c): the safepoint's step count was
 per entry, so a host's many short calls never collected.
+
+### S14c — named `let` as a loop (2026-10-24)
+
+A named `let` whose name is only called, with the right count, in tail
+position of the loop (or of an enclosing loop, so an inner loop can jump
+to an outer one) compiles to slots and a back-edge: `JumpCall` names the
+call form as the call in progress -- so a runaway stopped mid-loop still
+reads `(loop)` innermost in its backtrace, which
+`stopping_a_runaway_says_where_it_was` caught the first version dropping --
+then jumps. Any other use of the name (a value, a non-tail call, the wrong
+count, a `set!`), a closure or block capturing a loop variable, or a heap
+`let` between the loop and the call marks the loop, and the unit
+recompiles it as today's closure: the same driver, two scope ids opened in
+both shapes so a recompile numbers them alike. Body defines get slots,
+reset each pass.
+
+| (ray-scm, T1) | after S14a+b | after S14c |
+|---|---|---|
+| empty `do` iteration | 71 ns | 33 ns |
+| 2-arg call | 103 ns | 81 ns |
+| call + `let*` of 4 | 187 ns | 145 ns |
+| `fbm` | 5.4 µs | 5.3 µs (its loop runs 4 times; its cost is `vnoise`) |
+
+`a_loop_allocates_nothing`: 200,000 iterations, 0 objects. Fuzzer arms 54
+(nested loops, inner-to-outer jumps, a loop in non-tail position of
+another) and 55 (non-tail recursion, the name escaping). Gate: tests,
+clippy 0, conformance 1112/71, fuzz 0 mismatches over 4 seeds x 3000,
+benchmarks, boot, scm-llvm.

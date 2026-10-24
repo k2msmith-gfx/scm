@@ -320,6 +320,10 @@ impl Vm {
                     }
                 }
                 Op::Jump(t) => pc = t as usize,
+                Op::JumpCall { target, form } => {
+                    self.current_call = code.forms[form as usize];
+                    pc = target as usize;
+                }
                 Op::JumpIfFalse(t) => {
                     let v = self.vstack.pop().expect("a test value");
                     if !v.is_truthy() {
