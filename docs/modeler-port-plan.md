@@ -1771,6 +1771,23 @@ the census's guesses in two places**:
   **Identifiers are spelled US, prose UK** (Kevin; ray's `api/idioms.md`
   idiom 9), so `scene-bounds` was renamed `:centre` → `:center` the same day
   (ray @0d2625bd) rather than `object-bounds` matching it.
+
+  ☑ **BUILT 2026-10-23 — and the modeler's verb is NOT the one-liner above.**
+  Forwarding would have lost two things the modeler's query has and ray's
+  store does not: an op still being dragged (a modal bevel holds its
+  preview in the driver until commit, and `query_object` overlays it), and
+  a mesh's exact triangles (ray's box carries the BVH's 0.01% pad). So the
+  modeler's `object-bounds` still measures the VIEWPORT through
+  `%object-bounds`, in ray's shape and keys — an alist, which is M5e's fix —
+  and calls ray's verb only for an object the viewport has no triangles
+  for. It moved from `11-tools-modal.scm` to `unify.scm`, because ray's
+  verbs are installed AFTER the modeler's files and a ray verb of the same
+  name shadows anything defined before it (the `ray-add-sphere` pattern).
+  It takes `:unit` too, so a scene measures the same in both hosts, and its
+  `:center` divides by 2 rather than multiplying by 0.5, so an exact box
+  answers exact numbers as ray's does. ray: `report_api.rs`, a Scheme test,
+  two corpus cases; Python drives it (193/193). The ten UI tests that call
+  it pass.
 - **Deferred — `measure-drawing`, `measure-lines`, `drawing-landmark`.**
   They measure a calibrated reference image, so whether they belong in ray
   turns on whether a saved scene carries its drawings — a boundary question
