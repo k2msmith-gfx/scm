@@ -1766,10 +1766,11 @@ the census's guesses in two places**:
   is one lookup, and ray's answers for analytic objects too, where the
   modeler's raises "has no faces". The modeler keeps a one-line verb that
   resolves the current object and calls it — a ray verb takes a NAME, a
-  modeler verb takes the SELECTION. ☐ Two choices to make while building it:
-  the key spelling (`scene-bounds` says `:centre`, the modeler's
-  `object-bounds` says `:center`), and whether it takes `:unit` like
-  `scene-bounds` does.
+  modeler verb takes the SELECTION. Decided 2026-10-23: the keys are
+  `:min :max :size :center`, and it takes `:unit` like `scene-bounds`.
+  **Identifiers are spelled US, prose UK** (Kevin; ray's `api/idioms.md`
+  idiom 9), so `scene-bounds` was renamed `:centre` → `:center` the same day
+  (ray @0d2625bd) rather than `object-bounds` matching it.
 - **Deferred — `measure-drawing`, `measure-lines`, `drawing-landmark`.**
   They measure a calibrated reference image, so whether they belong in ray
   turns on whether a saved scene carries its drawings — a boundary question
