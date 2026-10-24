@@ -539,6 +539,9 @@ pub struct Vm {
     /// Here the cadence holds across entries, and each safepoint is still
     /// taken inside a run loop, where every root is in view.
     pub(crate) ticks: u32,
+    /// S14: the environments `live_frames` built for frames with flat
+    /// slots, rooted until the next break asks again.
+    view_envs: Vec<ObjRef>,
     /// Guards against a macro that expands into itself. Requirement 8: a
     /// runaway must be an error, not a hang.
     /// **Consecutive** macro expansions, reset whenever a value is returned.
@@ -755,6 +758,7 @@ impl Vm {
             expansion_cache: HashMap::new(),
             host_fns: Vec::new(),
             ticks: 0,
+            view_envs: Vec::new(),
             docs: HashMap::new(),
             current_call: Value::Unspecified,
             last_backtrace: Vec::new(),
@@ -1433,17 +1437,18 @@ impl Vm {
     /// the environment to evaluate in. The first is the innermost call,
     /// whose frame a tail call may already have dropped; it borrows the
     /// environment of the nearest frame below it.
-    pub fn live_frames(&self) -> Vec<FrameView> {
+    pub fn live_frames(&mut self) -> Vec<FrameView> {
         let mut out = Vec::new();
+        let envs = self.frame_envs();
         let frames = &self.stack[self.break_base..];
-        let innermost_env = frames.iter().rev().find_map(|f| f.env());
+        let innermost_env = envs.iter().rev().find_map(|e| *e);
         if let Value::Obj(r) = self.current_call
             && matches!(self.engine.obj(r), Obj::Pair(..))
         {
             let d = self.describe_frame(self.current_call);
             out.push(FrameView { what: d.what, loc: d.loc, env: innermost_env });
         }
-        for frame in frames.iter().rev() {
+        for (k, frame) in frames.iter().enumerate().rev() {
             let forms: Vec<Value> = match frame {
                 Frame::Operator { form, .. } | Frame::Operand { form, .. } => vec![*form],
                 Frame::Code { code, pc, .. } => code.pending_calls(*pc),
@@ -1454,13 +1459,56 @@ impl Vm {
                 if out.len() == 1 && out[0].what == d.what {
                     continue;
                 }
-                out.push(FrameView { what: d.what, loc: d.loc, env: frame.env() });
+                out.push(FrameView { what: d.what, loc: d.loc, env: envs[k] });
             }
             if out.len() >= 64 {
                 break;
             }
         }
         out
+    }
+
+    /// S14: each live frame's environment for a break, from `break_base`
+    /// up. A frame with flat slots shows the ones in scope at its pc as an
+    /// environment of their own, chained onto its heap environment, so a
+    /// break reads and evaluates against them as it does against an
+    /// `Obj::Env` -- a COPY: a `set!` from the break does not reach the
+    /// frame. Allocated only here, at a break, and rooted in `view_envs`
+    /// until the next one.
+    fn frame_envs(&mut self) -> Vec<Option<ObjRef>> {
+        self.view_envs.clear();
+        let mut envs = Vec::with_capacity(self.stack.len().saturating_sub(self.break_base));
+        for i in self.break_base..self.stack.len() {
+            let e = match &self.stack[i] {
+                Frame::Code { code, pc, env, base } if !code.slot_names.is_empty() => {
+                    let (code, pc, env, base) = (Rc::clone(code), *pc, *env, *base);
+                    let at = pc.saturating_sub(1) as u32;
+                    // Slot order is the order scopes opened, so an inner
+                    // binding comes after the outer one it shadows.
+                    let mut live: Vec<(u16, SymId)> = code
+                        .slot_names
+                        .iter()
+                        .filter(|&&(_, _, s, e)| s <= at && at < e)
+                        .map(|&(slot, name, _, _)| (slot, name))
+                        .collect();
+                    live.sort_by_key(|&(slot, _)| slot);
+                    let slots: Vec<(SymId, Value)> = live
+                        .into_iter()
+                        .filter_map(|(slot, name)| self.vstack.get(base + slot as usize).map(|&v| (name, v)))
+                        .collect();
+                    if slots.is_empty() {
+                        env
+                    } else {
+                        let r = self.engine.env(env, slots);
+                        self.view_envs.push(r);
+                        Some(r)
+                    }
+                }
+                f => f.env(),
+            };
+            envs.push(e);
+        }
+        envs
     }
 
     /// The bindings visible from `env`, innermost first: `(name, value)`.
@@ -1692,6 +1740,8 @@ impl Vm {
         roots.extend(self.param_bindings.iter().map(|(_, v)| *v));
         mark(&mut groups, "a library", &roots);
         self.library_roots(&mut roots);
+        mark(&mut groups, "a break's frame view", &roots);
+        roots.extend(self.view_envs.iter().map(|&r| Value::Obj(r)));
         // `SCM_ROOT_AUDIT=1` names the group a stale root is in, which is
         // the one thing the panic in `Engine::collect` cannot say — it sees
         // a flat slice. Off by default because it is O(roots) per
@@ -3188,6 +3238,16 @@ impl Vm {
                     // The slots its internal defines will fill: a read
                     // before then is "unbound", as it is on T0.
                     slots.extend(c.defines.iter().map(|&d| (d, Value::Undefined)));
+                    // S14: a flat-parameter procedure takes the callee and its
+                    // arguments as the first slots of its frame on the value
+                    // stack, not as an `Obj::Env`. Only a plain lambda list is
+                    // compiled flat, so there are no defaults to evaluate.
+                    if c.flat_params && todo.is_empty() {
+                        let at = self.vstack.len();
+                        self.vstack.push(callee);
+                        self.vstack.extend(slots.iter().map(|&(_, v)| v));
+                        return Ok(self.enter_code_at(Rc::clone(c), env, at));
+                    }
                 }
                 let new_env = self.engine.env(env, slots);
                 if todo.is_empty() {

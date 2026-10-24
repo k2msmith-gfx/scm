@@ -102,6 +102,12 @@ impl Vm {
         if let Some(f) = code.native.get() {
             return Some(f);
         }
+        // S14: T2 does not know flat frames yet -- their slots are on the
+        // value stack, not in the environment its pinned layouts read -- so
+        // a unit that has any runs on T1 (S14f is teaching it).
+        if code.nslots > 0 || code.flat_params {
+            return None;
+        }
         let mut compiler = self.native_compiler.take()?;
         let hits = code.hits.get() + 1;
         code.hits.set(hits);

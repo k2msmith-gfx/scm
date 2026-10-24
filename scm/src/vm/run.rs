@@ -14,6 +14,18 @@ impl Vm {
     /// Push a frame for `code` and ask the loop to run it.
     pub(super) fn enter_code(&mut self, code: Rc<crate::code::Code>, env: Option<ObjRef>) -> Step {
         let base = self.vstack.len();
+        self.enter_code_at(code, env, base)
+    }
+
+    /// S14: enter `code` with its frame at `base`, reserving its flat slots.
+    /// A flat-parameter procedure's callee and arguments are already at
+    /// `base` -- where the call left them -- and the rest of its slots
+    /// start undefined.
+    pub(super) fn enter_code_at(&mut self, code: Rc<crate::code::Code>, env: Option<ObjRef>, base: usize) -> Step {
+        let want = base + code.nslots as usize;
+        if self.vstack.len() < want {
+            self.vstack.resize(want, Value::Undefined);
+        }
         self.push(Frame::Code { code, pc: 0, env, base });
         Step::Run
     }
@@ -137,6 +149,21 @@ impl Vm {
             && params.len() == argc as usize
             && c.macro_gen == self.macro_gen
         {
+            // S14: a flat-parameter procedure takes its arguments where they
+            // are. The callee becomes slot 0 and the arguments slots 1..;
+            // nothing is allocated. A tail call slides them down over this
+            // frame first.
+            if c.flat_params {
+                let (cenv, c) = (*cenv, Rc::clone(c));
+                let at = if tail {
+                    self.vstack.drain(base..start);
+                    base
+                } else {
+                    self.push(Frame::Code { code: Rc::clone(code), pc, env, base });
+                    start
+                };
+                return Ok(Some(self.enter_code_at(c, cenv, at)));
+            }
             let (params, cenv, c) = (Rc::clone(params), *cenv, Rc::clone(c));
             let mut slots: Vec<(crate::value::SymId, Value)> = self.engine.slots(params.len() + c.defines.len());
             slots.extend(params.iter().copied().zip(self.vstack[start + 1..].iter().copied()));
@@ -220,6 +247,28 @@ impl Vm {
                         fail!(self.err(format!("unbound variable: {}", self.engine.interner.sym_name(crate::value::SymId(sym)))));
                     }
                     self.vstack.push(v);
+                }
+                Op::Arg(i) => {
+                    let v = self.vstack[base + i as usize];
+                    self.vstack.push(v);
+                }
+                Op::SetArg(i) => {
+                    let v = self.vstack.pop().expect("a value to store");
+                    self.vstack[base + i as usize] = v;
+                }
+                Op::ArgDef { slot, sym } => {
+                    let v = self.vstack[base + slot as usize];
+                    if v == Value::Undefined {
+                        fail!(self.err(format!("unbound variable: {}", self.engine.interner.sym_name(crate::value::SymId(sym)))));
+                    }
+                    self.vstack.push(v);
+                }
+                Op::SetArgDef { slot, sym } => {
+                    let v = self.vstack.pop().expect("a value to store");
+                    if self.vstack[base + slot as usize] == Value::Undefined {
+                        fail!(self.err(format!("set!: unbound variable: {}", self.engine.interner.sym_name(crate::value::SymId(sym)))));
+                    }
+                    self.vstack[base + slot as usize] = v;
                 }
                 Op::Slot { frame, idx } => {
                     let Obj::Env { slots, .. } = self.engine.obj(ObjRef(frame)) else { unreachable!() };

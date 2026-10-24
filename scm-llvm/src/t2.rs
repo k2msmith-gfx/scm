@@ -143,6 +143,9 @@ fn depths(code: &Code) -> Option<Vec<Option<i32>>> {
             Op::MakeVector(k) => (true, d - k as i32 + 1),
             Op::Try(_) | Op::Interp(_) => (true, d + 1),
             Op::Parameterize { pairs, .. } => (true, d - 2 * pairs as i32 + 1),
+            // S14's flat frames: not taught to T2 yet, which declines the
+            // unit (and `Vm::native_for` never offers one).
+            Op::Arg(_) | Op::SetArg(_) | Op::ArgDef { .. } | Op::SetArgDef { .. } => return None,
         };
         if after < 0 {
             return None;
@@ -405,6 +408,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let after = i + 1;
         let c32 = |g: &Self, v: u32| -> inkwell::values::BasicMetadataValueEnum<'c> { g.i32.const_int(v as u64, false).into() };
         match self.code.ops[i] {
+            Op::Arg(_) | Op::SetArg(_) | Op::ArgDef { .. } | Op::SetArgDef { .. } => {
+                Err("a flat frame (S14), which T2 does not compile yet".into())
+            }
             Op::Const(k) => {
                 let (w0, w1) = self.const_value(self.code.consts[k as usize]);
                 let cell = self.cell(d)?;

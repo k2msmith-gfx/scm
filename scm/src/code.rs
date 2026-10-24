@@ -28,6 +28,17 @@ pub enum Op {
     LocalDef { depth: u16, idx: u16, sym: u32 },
     /// As `SetLocal` for such a slot: `set!` before the define is an error.
     SetLocalDef { depth: u16, idx: u16, sym: u32 },
+    /// S14: push slot `i` of this frame's FLAT slots -- `vstack[base + i]`.
+    /// A variable no closure, block or T0 hand-off can see lives there
+    /// instead of in an `Obj::Env`, so binding it allocates nothing.
+    Arg(u16),
+    /// Pop into flat slot `i`.
+    SetArg(u16),
+    /// As `Arg`, for an internal `define`'s slot: `Undefined` there means
+    /// the define has not run, and the read raises "unbound variable".
+    ArgDef { slot: u16, sym: u32 },
+    /// As `SetArg` for such a slot: `set!` before the define is an error.
+    SetArgDef { slot: u16, sym: u32 },
     /// Push slot `idx` of the permanent frame `frame` -- a library's -- by
     /// address: how a library macro's reference to a library-private
     /// binding compiles instead of declining.
@@ -122,6 +133,17 @@ pub struct Code {
     pub native: Cell<Option<crate::vm::native::NativeFn>>,
     pub native_declined: Cell<bool>,
     pub max_depth: Cell<u32>,
+    /// S14: how many value-stack slots the frame reserves from its `base`.
+    /// With `flat_params`, slot 0 is the callee and the parameters follow
+    /// it, exactly where a call left them; then internal defines, then
+    /// every flat `let` variable. Without, the flat `let`s start at 0.
+    pub nslots: u16,
+    /// Whether the parameters live in flat slots rather than an `Obj::Env`:
+    /// a plain lambda list none of whose variables anything captures.
+    pub flat_params: bool,
+    /// For a break's view of the frame (`Vm::live_frames`): each flat
+    /// slot's name and the pc range its scope covers.
+    pub slot_names: Vec<(u16, SymId, u32, u32)>,
 }
 
 impl Code {

@@ -587,6 +587,8 @@ pub struct Engine {
     marks: Vec<bool>,
     free_head: Option<u32>,
     used: usize,
+    /// Objects ever allocated (`allocations`).
+    allocations: u64,
     /// Collect when `used` reaches this; recomputed from the live set after
     /// every collection.
     threshold: usize,
@@ -703,6 +705,7 @@ impl Engine {
             marks: Vec::new(),
             free_head: None,
             used: 0,
+            allocations: 0,
             threshold: 4096,
             min_heap: 4096,
             heap_cap: None,
@@ -723,6 +726,7 @@ impl Engine {
 
     pub fn alloc(&mut self, obj: Obj) -> Value {
         self.used += 1;
+        self.allocations += 1;
         match self.free_head {
             Some(i) => {
                 let next = match &self.slots[i as usize] {
@@ -759,6 +763,13 @@ impl Engine {
     /// Live objects.
     pub fn obj_count(&self) -> usize {
         self.used
+    }
+
+    /// Objects ever allocated. Not `obj_count`: a collection between two
+    /// readings of that hides what was allocated in between, which is the
+    /// question "does this allocate" asks (S14's tests).
+    pub fn allocations(&self) -> u64 {
+        self.allocations
     }
 
     /// Slots ever allocated, live or free: the heap's high-water mark.

@@ -528,12 +528,12 @@ impl Gen {
 
     fn int(&mut self, depth: u32) -> String {
         let d = depth - 1;
-        // 50, not 47: arms 46, 47 and 48 were added for bignum growth,
-        // the copy-at-import check and calls through an import, and the
-        // `_` arm is a real case (`raise-continuable`) rather than a
-        // filler -- leaving the bound alone silently drops whatever sits
-        // last.
-        match self.rng.below(50) {
+        // 54, not 50: arms 46, 47 and 48 were added for bignum growth,
+        // the copy-at-import check and calls through an import; 50-53 for
+        // S14's flat frames; and the `_` arm (49) is a real case
+        // (`raise-continuable`) rather than a filler -- leaving the bound
+        // alone silently drops whatever sits last.
+        match self.rng.below(54) {
             0..=3 => {
                 let op = *self.rng.pick(&["+", "-", "*"]);
                 let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d));
@@ -622,6 +622,19 @@ impl Gen {
             43 => { let a = self.expr(Ty::Int, d); format!("(let ((v (make-vector 3 0))) (vector-fill! v {a}) (vector-ref v 2))") }
             44 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(call-with-values (lambda () (values {a} {b})) (lambda (u w) (* 3 (- u w))))") }
             45 => { let a = self.expr(Ty::Int, d); format!("(let ((x {a})) (define (inner) (set! x (+ x 1)) x) (inner) (inner))") }
+            // S14: a closure that ESCAPES the let whose variable it captures,
+            // called after the let has returned -- the variable must have
+            // been put on the heap, not left in a frame slot that is gone.
+            50 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let ((get (let ((x {a})) (lambda (k) (set! x (+ x k)) x)))) (get {b}) (get 1))") }
+            // S14: a %try block (guard) reading and writing the enclosing
+            // procedure's parameter and let variable: a block is a capture.
+            51 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("((lambda (p) (let ((q {b})) (guard (e (#t (+ p q))) (set! q (+ q 1)) (if (> p 0) (raise 'r) (- p q))))) {a})") }
+            // S14: same-named nested lets, the inner shadowing the outer and
+            // the outer visible again after it.
+            52 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let ((s {a})) (+ (let ((s (* 2 s)) (t s)) (- s t)) (let* ((s (+ s {b})) (s (- s 1))) s) s))") }
+            // S14: a flat procedure through every door -- a direct call,
+            // `apply`, `map` and a tail self-call.
+            53 => { let a = self.expr(Ty::Int, d); format!("(let () (define (f u w) (let ((z (+ u w))) (if (> z 50) z (f (+ u 7) w)))) (+ (f (modulo (abs {a}) 40) 1) (apply f (list 3 4)) (apply + (map (lambda (k) (f k k)) (list 1 2)))))") }
             _ => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(with-exception-handler (lambda (e) {a}) (lambda () (+ {b} (raise-continuable 'c))))") }
         }
     }

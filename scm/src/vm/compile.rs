@@ -14,8 +14,8 @@
 //! first call resolves its free variables against the *actual* runtime
 //! chain it captured, so the two engines can nest in either order.
 
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{Formals, Vm};
@@ -36,16 +36,67 @@ enum Var {
     /// `checked`: a slot an internal `define` fills, read through
     /// `LocalDef` so a use before the define is "unbound" as on T0.
     Local { depth: u16, idx: u16, checked: bool },
+    /// S14: a variable of a flat scope of THIS unit -- a slot of the frame
+    /// on the value stack.
+    Flat { slot: u16, checked: bool },
+    /// S14: a variable of a flat scope of an ENCLOSING unit. Its frame is
+    /// not this one, so the reference is a capture: the scope is recorded
+    /// as such, its unit recompiles with it on the heap, and this pass's
+    /// code -- which is void -- is never run.
+    Elsewhere,
     /// A slot of a permanent frame -- a library's -- by address.
     Slot { frame: ObjRef, idx: u16 },
     Global(SymId, SymId),
 }
 
+/// S14. What a compile-time scope is at run time.
+#[derive(Clone)]
+enum Kind {
+    /// An `Obj::Env` in the environment chain, read by (depth, index).
+    Heap,
+    /// Slots of the frame on the value stack: `slots[i]` holds the scope's
+    /// `i`th name. `unit` and `id` name the scope across the nested
+    /// compilers its body spawns, so one that reaches into it can say so.
+    Flat { slots: Vec<u16>, unit: usize, id: usize },
+}
+
+/// S14. Shared by a unit's compiler and every compiler nested in it.
+#[derive(Default)]
+struct Capture {
+    next_unit: Cell<usize>,
+    /// `(unit, scope id)` of every flat scope that something outside its
+    /// frame referred to -- a nested `lambda`, a `%try`/`%parameterize`
+    /// block, a hand-off to T0. Each must be an `Obj::Env`, and its unit
+    /// compiles again with it on the heap.
+    captured: RefCell<HashSet<(usize, usize)>>,
+}
+
+/// S14. What a unit inherits from the compiler it is nested in.
+#[derive(Clone)]
+struct Outer {
+    scopes: Vec<Vec<SymId>>,
+    defs_from: Vec<usize>,
+    kinds: Vec<Kind>,
+    runtime: Option<ObjRef>,
+    cap: Rc<Capture>,
+}
+
 struct Cx<'a> {
     vm: &'a mut Vm,
-    /// Compile-time frames, innermost last; each becomes one runtime
-    /// environment frame.
+    /// Compile-time frames, innermost last. A `Heap` one becomes one
+    /// runtime environment frame; a `Flat` one becomes frame slots.
     scopes: Vec<Vec<SymId>>,
+    kinds: Vec<Kind>,
+    cap: Rc<Capture>,
+    /// This unit's id, and the ids of its scopes the capture pass forced
+    /// onto the heap. Scope ids count up in the order scopes open, which a
+    /// recompile repeats exactly.
+    unit: usize,
+    force_heap: Rc<HashSet<usize>>,
+    next_scope: usize,
+    nslots: u16,
+    flat_params: bool,
+    slot_names: Vec<(u16, SymId, u32, u32)>,
     /// For each scope, the index from which its slots belong to internal
     /// defines rather than parameters or `let` variables.
     defs_from: Vec<usize>,
@@ -68,31 +119,33 @@ impl Vm {
     /// A top-level form. Declines what T0 should see: macro definitions,
     /// malformed syntax, anything with a local macro.
     pub(super) fn compile_toplevel(&mut self, form: Value) -> R<Rc<Code>> {
-        let mut cx = Cx::new(self, Vec::new(), Vec::new(), None, Rc::new(Vec::new()));
-        // A top-level `define-syntax` is the one syntax definition that can
-        // be handed to T0 as a sub-form: nothing in this unit was compiled
-        // against it. Inside a body the uses that follow it would have
-        // been, so there it declines the unit.
-        let expanded = cx.expand(form)?;
-        if let Value::Obj(r) = expanded
-            && let Obj::Pair(Value::Symbol(h), _) = *cx.vm.engine.obj(r)
-            && let Some(sp) = cx.special(h)?
-            && (sp == cx.vm.syms.define_syntax
-                || sp == cx.vm.syms.define_library
-                || sp == cx.vm.syms.import
-                || sp == cx.vm.syms.cond_expand)
-        {
-            // Library forms are T0's as well: nothing in this unit was
-            // compiled against what they bind.
-            cx.interp(expanded)?;
+        let outer = Outer::root(None);
+        unit(self, &outer, |cx| {
+            // A top-level `define-syntax` is the one syntax definition that
+            // can be handed to T0 as a sub-form: nothing in this unit was
+            // compiled against it. Inside a body the uses that follow it
+            // would have been, so there it declines the unit.
+            let expanded = cx.expand(form)?;
+            if let Value::Obj(r) = expanded
+                && let Obj::Pair(Value::Symbol(h), _) = *cx.vm.engine.obj(r)
+                && let Some(sp) = cx.special(h)?
+                && (sp == cx.vm.syms.define_syntax
+                    || sp == cx.vm.syms.define_library
+                    || sp == cx.vm.syms.import
+                    || sp == cx.vm.syms.cond_expand)
+            {
+                // Library forms are T0's as well: nothing in this unit was
+                // compiled against what they bind.
+                cx.interp(expanded)?;
+                cx.ops.push(Op::Return);
+                return Ok(());
+            }
+            // Not in tail position: a top-level unit has no caller to
+            // return to, so nothing is lost.
+            cx.expr(expanded, false)?;
             cx.ops.push(Op::Return);
-            return Ok(cx.finish());
-        }
-        // Not in tail position: a top-level unit has no caller to return
-        // to, so nothing is lost.
-        cx.expr(expanded, false)?;
-        cx.ops.push(Op::Return);
-        Ok(cx.finish())
+            Ok(())
+        })
     }
 
     /// A closure's body, given the environment it captured. Called on the
@@ -113,18 +166,62 @@ impl Vm {
         frame.extend(rest);
         frame.extend(named.iter().map(|p| p.name));
         frame.extend(keys);
-        let cx = Cx::new(self, Vec::new(), Vec::new(), env, Rc::new(Vec::new()));
-        cx.body_unit(frame, body)
+        let plain = opt.is_empty() && named.is_empty() && keys.is_none() && rest.is_none();
+        let outer = Outer::root(env);
+        unit(self, &outer, |cx| cx.body_unit(frame.clone(), body, plain))
+    }
+}
+
+impl Outer {
+    fn root(runtime: Option<ObjRef>) -> Self {
+        Outer { scopes: Vec::new(), defs_from: Vec::new(), kinds: Vec::new(), runtime, cap: Rc::new(Capture::default()) }
+    }
+}
+
+/// S14. Compile one unit -- a procedure body, a top-level form, a block --
+/// until no flat scope of it is captured. `build` emits the code; a pass in
+/// which something reached into one of this unit's flat scopes from outside
+/// its frame is thrown away, and the unit compiles again with those scopes
+/// on the heap. Compilation is deterministic, so the scopes open in the
+/// same order and keep their ids; each pass forces at least one more scope
+/// onto the heap, so the loop ends.
+fn unit(vm: &mut Vm, outer: &Outer, build: impl Fn(&mut Cx) -> R<()>) -> R<Rc<Code>> {
+    let id = outer.cap.next_unit.get();
+    outer.cap.next_unit.set(id + 1);
+    let mut force: HashSet<usize> = HashSet::new();
+    loop {
+        let mut cx = Cx::new(vm, outer, id, Rc::new(force.clone()));
+        build(&mut cx)?;
+        let more: Vec<usize> = outer
+            .cap
+            .captured
+            .borrow()
+            .iter()
+            .filter(|&&(u, s)| u == id && !force.contains(&s))
+            .map(|&(_, s)| s)
+            .collect();
+        if more.is_empty() {
+            return Ok(cx.finish());
+        }
+        force.extend(more);
     }
 }
 
 impl<'a> Cx<'a> {
-    fn new(vm: &'a mut Vm, scopes: Vec<Vec<SymId>>, defs_from: Vec<usize>, runtime: Option<ObjRef>, defines: Rc<Vec<SymId>>) -> Self {
+    fn new(vm: &'a mut Vm, outer: &Outer, unit: usize, force_heap: Rc<HashSet<usize>>) -> Self {
         Cx {
             vm,
-            scopes,
-            defs_from,
-            runtime,
+            scopes: outer.scopes.clone(),
+            kinds: outer.kinds.clone(),
+            cap: Rc::clone(&outer.cap),
+            unit,
+            force_heap,
+            next_scope: 0,
+            nslots: 0,
+            flat_params: false,
+            slot_names: Vec::new(),
+            defs_from: outer.defs_from.clone(),
+            runtime: outer.runtime,
             ops: Vec::new(),
             consts: Vec::new(),
             globals: Vec::new(),
@@ -134,8 +231,33 @@ impl<'a> Cx<'a> {
             forms: Vec::new(),
             blocks: Vec::new(),
             calls: Vec::new(),
-            defines,
+            defines: Rc::new(Vec::new()),
         }
+    }
+
+    /// What a unit nested here inherits.
+    fn outer(&self) -> Outer {
+        Outer {
+            scopes: self.scopes.clone(),
+            defs_from: self.defs_from.clone(),
+            kinds: self.kinds.clone(),
+            runtime: self.runtime,
+            cap: Rc::clone(&self.cap),
+        }
+    }
+
+    /// The next scope of this unit: flat, unless a previous pass found it
+    /// captured. Answers its id and whether it is flat.
+    fn open_scope(&mut self, flat_wanted: bool) -> (usize, bool) {
+        let id = self.next_scope;
+        self.next_scope += 1;
+        (id, flat_wanted && !self.force_heap.contains(&id))
+    }
+
+    fn new_slot(&mut self) -> R<u16> {
+        let s = self.nslots;
+        self.nslots = self.nslots.checked_add(1).ok_or_else(|| Decline("too many variables for one frame".into()))?;
+        Ok(s)
     }
 
     fn finish(self) -> Rc<Code> {
@@ -154,12 +276,19 @@ impl<'a> Cx<'a> {
             native: Cell::new(None),
             native_declined: Cell::new(false),
             max_depth: Cell::new(0),
+            nslots: self.nslots,
+            flat_params: self.flat_params,
+            slot_names: self.slot_names,
         })
     }
 
     /// A procedure body in a fresh frame of `frame` (its parameters), plus
     /// the slots its internal defines need. Ends in `Return`.
-    fn body_unit(mut self, mut frame: Vec<SymId>, body: &[Value]) -> R<Rc<Code>> {
+    ///
+    /// S14: with a PLAIN lambda list the parameter scope may be flat: slot 0
+    /// is the callee and the parameters follow, where the call left them,
+    /// then the defines. Anything else keeps today's `Obj::Env`.
+    fn body_unit(&mut self, mut frame: Vec<SymId>, body: &[Value], plain: bool) -> R<()> {
         if body.is_empty() {
             return decline("an empty body");
         }
@@ -167,23 +296,50 @@ impl<'a> Cx<'a> {
         self.scan_defines(body, &mut defs)?;
         self.defs_from.push(frame.len());
         frame.extend(defs.iter().copied());
+        let (id, flat) = self.open_scope(plain);
+        if flat {
+            self.flat_params = true;
+            self.new_slot()?; // the callee
+            let mut slots = Vec::with_capacity(frame.len());
+            for &name in &frame {
+                let s = self.new_slot()?;
+                slots.push(s);
+                self.slot_names.push((s, name, 0, u32::MAX));
+            }
+            self.kinds.push(Kind::Flat { slots, unit: self.unit, id });
+        } else {
+            self.kinds.push(Kind::Heap);
+        }
         self.defines = Rc::new(defs);
         self.scopes.push(frame);
         self.body(body, true)?;
         self.ops.push(Op::Return);
-        Ok(self.finish())
+        Ok(())
     }
 
     // ---- resolution ------------------------------------------------------
 
-    /// T0's `lookup_exact` over the chain, then its global rules.
+    /// T0's `lookup_exact` over the chain, then its global rules. Only a
+    /// heap scope is a link of the runtime chain, so only a heap scope adds
+    /// to the depth.
     fn resolve(&self, sym: SymId) -> R<Var> {
         let mut depth: usize = 0;
-        for (scope, &from) in self.scopes.iter().zip(&self.defs_from).rev() {
+        for ((scope, &from), kind) in self.scopes.iter().zip(&self.defs_from).zip(&self.kinds).rev() {
             if let Some(idx) = scope.iter().rposition(|&s| s == sym) {
-                return Ok(Var::Local { depth: narrow(depth)?, idx: narrow(idx)?, checked: idx >= from });
+                return Ok(match kind {
+                    Kind::Heap => Var::Local { depth: narrow(depth)?, idx: narrow(idx)?, checked: idx >= from },
+                    Kind::Flat { slots, unit, .. } if *unit == self.unit => {
+                        Var::Flat { slot: slots[idx], checked: idx >= from }
+                    }
+                    Kind::Flat { unit, id, .. } => {
+                        self.cap.captured.borrow_mut().insert((*unit, *id));
+                        Var::Elsewhere
+                    }
+                });
             }
-            depth += 1;
+            if matches!(kind, Kind::Heap) {
+                depth += 1;
+            }
         }
         let mut cur = self.runtime;
         while let Some(r) = cur {
@@ -229,7 +385,7 @@ impl<'a> Cx<'a> {
     }
 
     fn is_local(&self, sym: SymId) -> R<bool> {
-        Ok(matches!(self.resolve(sym)?, Var::Local { .. } | Var::Slot { .. }))
+        Ok(matches!(self.resolve(sym)?, Var::Local { .. } | Var::Slot { .. } | Var::Flat { .. } | Var::Elsewhere))
     }
 
     /// Is this head a special form here? Only when nothing shadows it --
@@ -325,6 +481,10 @@ impl<'a> Cx<'a> {
                 match self.resolve(sym)? {
                     Var::Local { depth, idx, checked: false } => self.ops.push(Op::Local { depth, idx }),
                     Var::Local { depth, idx, checked: true } => self.ops.push(Op::LocalDef { depth, idx, sym: sym.0 }),
+                    Var::Flat { slot, checked: false } => self.ops.push(Op::Arg(slot)),
+                    Var::Flat { slot, checked: true } => self.ops.push(Op::ArgDef { slot, sym: sym.0 }),
+                    // A void pass: see `Var::Elsewhere`.
+                    Var::Elsewhere => self.ops.push(Op::Unspecified),
                     Var::Slot { frame, idx } => self.ops.push(Op::Slot { frame: frame.0, idx }),
                     Var::Global(s, r) => {
                         let i = self.global_slot(s, r);
@@ -516,14 +676,48 @@ impl<'a> Cx<'a> {
                 let mut defs = Vec::new();
                 self.scan_defines(body, &mut defs)?;
                 frame.extend(defs);
+                let (id, flat) = self.open_scope(true);
+                if flat {
+                    // S14: the inits are on the stack; each pops into its
+                    // own slot, last first, and a define's slot starts
+                    // undefined -- explicitly, since a slot can be entered
+                    // again once loops are jumps.
+                    let mut slots = Vec::with_capacity(frame.len());
+                    for _ in &frame {
+                        slots.push(self.new_slot()?);
+                    }
+                    for &s in slots[..vars.len()].iter().rev() {
+                        self.ops.push(Op::SetArg(s));
+                    }
+                    for &s in &slots[vars.len()..] {
+                        self.konst(Value::Undefined);
+                        self.ops.push(Op::SetArg(s));
+                    }
+                    let start = self.here();
+                    self.scopes.push(frame.clone());
+                    self.defs_from.push(vars.len());
+                    self.kinds.push(Kind::Flat { slots: slots.clone(), unit: self.unit, id });
+                    let out = self.body(body, tail);
+                    self.scopes.pop();
+                    self.defs_from.pop();
+                    self.kinds.pop();
+                    out?;
+                    let end = self.here();
+                    for (&s, &n) in slots.iter().zip(&frame) {
+                        self.slot_names.push((s, n, start, end));
+                    }
+                    return Ok(());
+                }
                 let ni = self.names.len() as u32;
                 self.names.push(Rc::new(frame.clone()));
                 self.ops.push(Op::PushEnv { names: ni, ninit: vars.len() as u32 });
                 self.scopes.push(frame);
                 self.defs_from.push(vars.len());
+                self.kinds.push(Kind::Heap);
                 let out = self.body(body, tail);
                 self.scopes.pop();
                 self.defs_from.pop();
+                self.kinds.pop();
                 out?;
                 if !tail {
                     self.ops.push(Op::PopEnv);
@@ -537,19 +731,25 @@ impl<'a> Cx<'a> {
                 let ni = self.names.len() as u32;
                 self.names.push(Rc::new(vec![n]));
                 self.ops.push(Op::PushEnv { names: ni, ninit: 0 });
+                // The loop name's frame is always a heap one: the loop
+                // closure it holds refers to it.
                 self.scopes.push(vec![n]);
                 self.defs_from.push(1);
+                self.kinds.push(Kind::Heap);
                 let lam = self.lambda_inner(Some(n), vars.clone(), Vec::new(), Vec::new(), None, None, body);
                 self.scopes.pop();
                 self.defs_from.pop();
+                self.kinds.pop();
                 let lam = lam?;
                 self.scopes.push(vec![n]);
                 self.defs_from.push(1);
+                self.kinds.push(Kind::Heap);
                 self.ops.push(Op::MakeClosure(lam));
                 self.ops.push(Op::SetLocal { depth: 0, idx: 0 });
                 self.ops.push(Op::Local { depth: 0, idx: 0 });
                 self.scopes.pop();
                 self.defs_from.pop();
+                self.kinds.pop();
                 let argc = vars.len() as u32;
                 self.ops.push(Op::InsertBelow(argc));
                 let form = self.forms.len() as u32;
@@ -596,8 +796,9 @@ impl<'a> Cx<'a> {
         frame.extend(rest);
         frame.extend(named.iter().map(|p| p.name));
         frame.extend(keys);
-        let inner = Cx::new(self.vm, self.scopes.clone(), self.defs_from.clone(), self.runtime, Rc::new(Vec::new()));
-        let code = inner.body_unit(frame, body)?;
+        let plain = opt.is_empty() && named.is_empty() && keys.is_none() && rest.is_none();
+        let outer = self.outer();
+        let code = unit(self.vm, &outer, |cx| cx.body_unit(frame.clone(), body, plain))?;
         let i = self.lambdas.len() as u32;
         self.lambdas.push(Rc::new(Lambda {
             name,
@@ -615,10 +816,14 @@ impl<'a> Cx<'a> {
     /// A sub-block for `%try` and `%parameterize`: same scope, own code,
     /// run as a nested frame that returns to this one.
     fn block(&mut self, e: Value) -> R<u32> {
-        let mut inner = Cx::new(self.vm, self.scopes.clone(), self.defs_from.clone(), self.runtime, Rc::new(Vec::new()));
-        inner.expr(e, true)?;
-        inner.ops.push(Op::Return);
-        let code = inner.finish();
+        // A unit of its own, run as a nested frame with its own base: a
+        // flat variable of this frame it refers to is a capture.
+        let outer = self.outer();
+        let code = unit(self.vm, &outer, |cx| {
+            cx.expr(e, true)?;
+            cx.ops.push(Op::Return);
+            Ok(())
+        })?;
         let i = self.blocks.len() as u32;
         self.blocks.push(code);
         Ok(i)
@@ -695,7 +900,10 @@ impl<'a> Cx<'a> {
             // sits somewhere the scan did not look, and T0 can have it.
             if let Some(scope) = self.scopes.last() {
                 match scope.iter().rposition(|&s| s == sym) {
-                    Some(idx) => self.ops.push(Op::SetLocal { depth: 0, idx: narrow(idx)? }),
+                    Some(idx) => match self.kinds.last() {
+                        Some(Kind::Flat { slots, .. }) => self.ops.push(Op::SetArg(slots[idx])),
+                        _ => self.ops.push(Op::SetLocal { depth: 0, idx: narrow(idx)? }),
+                    },
                     None => return decline("a define outside a body"),
                 }
             } else if self.runtime.is_some() {
@@ -709,6 +917,9 @@ impl<'a> Cx<'a> {
             match self.resolve(sym)? {
                 Var::Local { depth, idx, checked: false } => self.ops.push(Op::SetLocal { depth, idx }),
                 Var::Local { depth, idx, checked: true } => self.ops.push(Op::SetLocalDef { depth, idx, sym: sym.0 }),
+                Var::Flat { slot, checked: false } => self.ops.push(Op::SetArg(slot)),
+                Var::Flat { slot, checked: true } => self.ops.push(Op::SetArgDef { slot, sym: sym.0 }),
+                Var::Elsewhere => self.ops.push(Op::Pop),
                 Var::Slot { .. } => return decline("set! of a library binding"),
                 Var::Global(s, r) => {
                     let i = self.global_slot(s, r);
@@ -759,8 +970,16 @@ impl<'a> Cx<'a> {
         Ok(())
     }
 
-    /// Hand `form` to T0 at run time.
+    /// Hand `form` to T0 at run time. T0 is handed the environment, and
+    /// it can name any variable in scope, so every flat scope in sight is
+    /// captured -- this unit's, which recompile on the heap, and any
+    /// enclosing unit's.
     fn interp(&mut self, form: Value) -> R<()> {
+        for k in &self.kinds {
+            if let Kind::Flat { unit, id, .. } = k {
+                self.cap.captured.borrow_mut().insert((*unit, *id));
+            }
+        }
         let i = self.forms.len() as u32;
         self.forms.push(form);
         self.ops.push(Op::Interp(i));

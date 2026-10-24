@@ -193,3 +193,40 @@ next plan, not this one.
 3. **ray's `make-texture` loop** (2.7 µs/texel of prelude Scheme, ~8% of the
    fruit bowl interpreted): move it into Rust in ray alongside this, or let
    S14 speed it up as ordinary Scheme?
+
+## Results
+
+### S14a + S14b, together (2026-10-24)
+
+Built as one step, since a flat `let` and flat parameters share every
+mechanism: `Kind::{Heap, Flat}` per compile-time scope, the `unit` driver
+that recompiles a body with any flat scope something reached into moved to
+the heap (a nested `lambda`, a `%try`/`%parameterize` block, an `Interp`
+hand-off), and four ops — `Arg`, `SetArg`, `ArgDef`, `SetArgDef` — over
+`vstack[base + i]`. A flat-parameter procedure's frame starts at its callee:
+slot 0 the procedure, then the arguments where the call left them, then
+defines and `let`s. Only a plain lambda list goes flat. `apply` (the door
+`map`, `apply` and a host's `call_procedure` use) pushes the same layout. A
+break's view builds an environment from the slots in scope at the frame's
+pc (`Vm::frame_envs`), rooted until the next break; `a_break_handler_sees_
+live_frames_and_can_return_a_value` covers it. T2 declines any unit with
+flat slots (`native_for`, and `t2.rs` for completeness) until S14f.
+
+| per operation (ray-scm, T1) | before | after |
+|---|---|---|
+| 2-arg call | 166 ns | 103 ns |
+| call + `let*` of 4 | 341 ns | 187 ns (≈5 ns a binding, from ≈37) |
+| `hash2` | 292 ns | 199 ns |
+| `fbm` | 8.5 µs | 5.4 µs — `fbm`'s own loop still a closure (S14c) |
+
+`a_flat_call_allocates_nothing`: 10,000 calls, 0 heap objects
+(`Engine::allocations`, added for it — `obj_count` cannot say, a collection
+between readings hides what was made). The fuzzer's arms 50–53 (an escaping
+closure, a guard over the frame, shadowing lets, every door into a flat
+procedure) and a deliberate break of the capture pass (keep the first pass
+always: 882 mismatches in 1000) show it is watching. Gate: tests, clippy 0,
+conformance 1112/71 unchanged, fuzz 0 mismatches over seeds 42/7/1234/99,
+benchmarks, boot, scm-llvm.
+
+Found on the way, fixed separately (bf4427c): the safepoint's step count was
+per entry, so a host's many short calls never collected.
