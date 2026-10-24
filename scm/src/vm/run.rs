@@ -171,7 +171,6 @@ impl Vm {
         if let Some(f) = self.native_for(&code) {
             return self.run_native(code, f, pc, env, base);
         }
-        let mut ticks: u32 = 0;
         // On any failure the frame goes back on the stack with `pc` just
         // past the op in progress, so the backtrace can name the calls
         // pending in it -- and so the collector, on a safepoint, sees it.
@@ -183,9 +182,9 @@ impl Vm {
             }};
         }
         loop {
-            ticks += 1;
-            if ticks >= 1024 {
-                ticks = 0;
+            self.ticks += 1;
+            if self.ticks >= 1024 {
+                self.ticks = 0;
                 self.stack.push(Frame::Code { code: Rc::clone(&code), pc, env, base });
                 let r = self.safepoint(&Step::Run);
                 self.stack.pop();

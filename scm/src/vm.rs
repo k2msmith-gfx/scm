@@ -530,6 +530,15 @@ pub struct Vm {
     docs: HashMap<SymId, String>,
     /// Host functions, indexed by `PrimId` alongside `prims` and `vm_prims`.
     host_fns: Vec<Option<HostFn>>,
+    /// Steps since the last safepoint, for EVERY entry into the run loops
+    /// together. It was a local of each entry, so a host that calls into
+    /// Scheme many times — ray's `make-texture`, 590,000 texel calls of a
+    /// few hundred steps each — never reached 1024 in any one of them and
+    /// never collected: 17.5 million objects later the arena's high-water
+    /// mark made every later collection a sweep of all of it (2026-10-24).
+    /// Here the cadence holds across entries, and each safepoint is still
+    /// taken inside a run loop, where every root is in view.
+    pub(crate) ticks: u32,
     /// Guards against a macro that expands into itself. Requirement 8: a
     /// runaway must be an error, not a hang.
     /// **Consecutive** macro expansions, reset whenever a value is returned.
@@ -745,6 +754,7 @@ impl Vm {
             expansions: 0,
             expansion_cache: HashMap::new(),
             host_fns: Vec::new(),
+            ticks: 0,
             docs: HashMap::new(),
             current_call: Value::Unspecified,
             last_backtrace: Vec::new(),
@@ -1265,13 +1275,13 @@ impl Vm {
 
     fn eval_inner(&mut self, start: Step, base: usize) -> VResult<Value> {
         let mut step = start;
-        let mut ticks: u32 = 0;
         loop {
             // The safepoint. Collection will live here too (S3), which is why
-            // it is one place rather than scattered through the match.
-            ticks += 1;
-            if ticks >= 1024 {
-                ticks = 0;
+            // it is one place rather than scattered through the match. The
+            // count is the VM's, not this entry's: see `Vm::ticks`.
+            self.ticks += 1;
+            if self.ticks >= 1024 {
+                self.ticks = 0;
                 // `?` here would return WITHOUT capturing a backtrace, so a
                 // client got the *previous* failure's frames -- an interrupt
                 // reported where the last error happened, which is worse

@@ -392,3 +392,29 @@ fn capturing_output_roots_the_port_it_displaces() {
     // …and it is still a usable port, not a reused slot.
     i.eval("(display \"after\")").expect("the restored port still works");
 }
+
+/// A host that calls into Scheme many times, each call short, must still
+/// collect. The safepoint's step count was a local of each entry into the
+/// run loops, so a call of a few hundred steps never reached the 1024 that
+/// takes one, and ray's `make-texture` — 590,000 texel calls from Rust —
+/// ran with ZERO collections while the heap grew from 41 thousand objects
+/// to 17.5 million (2026-10-24). The count is the VM's now (`Vm::ticks`).
+#[test]
+fn many_short_calls_from_the_host_still_collect() {
+    let mut vm = Vm::new();
+    vm.eval_str("(define (texel u v) (let ((a (list u v)) (b (list v u))) (list (car a) (car b) 0.5)))")
+        .expect("define the texel");
+    let Value::Symbol(name) = vm.engine.sym("texel") else { unreachable!() };
+    let f = vm.global(name).expect("texel is defined");
+    let before = vm.engine.collections();
+    for i in 0..200_000 {
+        let u = Value::Flonum(i as f64 * 1e-5);
+        vm.call_procedure(f, vec![u, u]).expect("a texel call");
+    }
+    assert!(vm.engine.collections() > before, "200,000 host calls and not one collection");
+    assert!(
+        vm.engine.obj_count() < 500_000,
+        "the heap grew to {} objects: the host calls' garbage was never collected",
+        vm.engine.obj_count()
+    );
+}
