@@ -258,3 +258,16 @@ reset each pass.
 another) and 55 (non-tail recursion, the name escaping). Gate: tests,
 clippy 0, conformance 1112/71, fuzz 0 mismatches over 4 seeds x 3000,
 benchmarks, boot, scm-llvm.
+
+### S14d — calls inside `run_code`: measured, and DROPPED (2026-10-24)
+
+Built (a compiled callee's frame popped and run in place of `Step::Run`; a
+`Return` straight into a compiled caller above a new `run_floor` the
+trampoline kept), tests and fuzzer green — and worth nothing: minimum of six
+alternating runs against S14c, same machine and load, a call 1% faster, a
+`let*`-of-4 call 4%, `fbm` 1%. Leaving `run_code` was never the cost of a
+call; `do_call`'s own work is (the arena lookup and match on the callee,
+two `Rc` clones, the caller's `Frame::Code` pushed and later dropped, the
+frame-stack bookkeeping). Not kept: a new invariant on the most delicate
+path in the VM for 1% is a bad trade. If calls are the cost after S14e,
+that list is where to look.
