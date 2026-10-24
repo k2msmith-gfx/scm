@@ -1793,6 +1793,45 @@ the census's guesses in two places**:
   turns on whether a saved scene carries its drawings — a boundary question
   for the reference-image feature, not a clean-up.
 
+☑ **The return-value fix — BUILT 2026-10-23, every verb on the list but the
+deferred `measure-*`.** One converter, `%standard` in `00-janet-compat.scm`
+(an array becomes its list, a table its alist, walked; the eval channel's
+`%show` is now the same function, so what a test prints is what a caller
+gets). Three shapes of change, chosen by who calls the verb:
+
+- **Built directly as alists** — `faces`, `edges`, `verts`.
+- **Body wrapped** in `(%standard …)` — `inset`, `array-curves`,
+  `array-objects`, `tools`, `tool-census`, `boot-audit`, `hybrid-state`,
+  `perf`, `reference-state`, `options-type`, `set-snap`, `menu-deltas`,
+  `ui-config-replay`, `session-set`, and `options-arm`'s answer (a tool's
+  answer is now a copy).
+- **SPLIT, where the prelude drives the live value** — `%options-state`,
+  `%history-load` (`*repl-history*` pushes onto it), `%session-get` (the
+  UI-config replay passes stored values on), `%toolbox-tools` (the toolbox
+  editors insert and remove). The prelude's own call sites take the `%`
+  name, renamed outside strings and comments only; the public verb is
+  `(%standard (%… ))`.
+
+Two places a standard value comes BACK IN needed the other half:
+`set-toolbox` turns alist entries back into tables (`%record`), because its
+group test was `(table? t)` and its mirror is what the session file saves —
+`(set-toolbox :tools (toolbox-tools))` round-trips, and the session format
+is unchanged. And `%j`/`%p` (`readable`) could not print an improper list —
+`map` over `(:tip . "ball")` raised — which the first test to print an
+alist found. `%standard` raises on a table that contains itself rather than
+recursing; closures are not walked, so a state's undo thunks are not cycles.
+
+**Measured:** modeler legs 210 / 249. UI harness 102/110 before the one
+harness fix — `test_recorder` found its button with `(struct? $)` and now
+asks `(not (keyword? $))`, the harness depending on the old shape, which is
+exactly M5c's subject. Of the other seven reds, five fail identically at
+HEAD (they expect `.janet` buffer names; the harness opens the `.scm` twins
+since M5a), `test_history_tool` is the known 13/16, and `test_agent_mcp`
+reads 36/50 here against 34/50 at HEAD on the same machine, the same twelve
+real failures both sides; the difference is two render-TIMING checks (~120 s
+renders against each other), which move run to run. The 38/50 recorded at
+M5a is a machine-state number, not a baseline.
+
 Coverage: 79 verbs were never observed, 25 of them in the agent category.
 Closing that (re-running the pass-set under the census) is optional and
 would come first if wanted.
