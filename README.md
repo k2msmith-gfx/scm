@@ -448,9 +448,13 @@ and refuses anything else with a message naming the offending call
 ([docs/s11-leaf.md](docs/s11-leaf.md)). A leaf can be recompiled while a
 render is running.
 
-The **general tier** compiles bytecode to native code at 1.3× the VM, which
-[docs/s13-general-tier.md](docs/s13-general-tier.md) explains is the call
-protocol's ceiling rather than the generated code's.
+The **general tier** compiles bytecode to native code. It measured 1.3× the
+VM of its day, which [docs/s13-general-tier.md](docs/s13-general-tier.md)
+explains is the call protocol's ceiling rather than the generated code's.
+**Since S14 (2026-10-24) it declines most code**: it does not yet compile
+S14's flat-frame, loop and arithmetic ops, so a unit using any of them runs
+on T1 -- and T1 alone is now faster than T2 was
+([docs/s14-flat-frames-plan.md](docs/s14-flat-frames-plan.md), S14f).
 
 ### What you need
 
@@ -565,6 +569,13 @@ instrument, and it is the one that gates a commit.
 | finished within 120 s | 3 | **33** |
 | timed out | 41 | 20 |
 | outside the subset | 4 | 4 |
+
+These figures predate S14 (2026-10-24), which made T1 itself roughly 2×
+faster on calls, loops and arithmetic -- `fib 30` 261 → 148 ms, `fbm`
+135 → 78 ms -- and moved scm from **0.91× to 1.40×** Steel's speed on the
+shared benchmark set ([docs/vs-steel.md](docs/vs-steel.md),
+[docs/s14-flat-frames-plan.md](docs/s14-flat-frames-plan.md)). The suite
+below has not been re-run since.
 
 T1 is **6.7×** T0 across the reduced suite (53.7 s → 8.0 s), 5.0× on
 `fib 30`, and 17× on `nboyer`. The outliers are the ones you would expect:

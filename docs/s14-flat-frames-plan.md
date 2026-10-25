@@ -338,3 +338,13 @@ Next, in this order, each measured alone as S14's stages were:
 Not a VM matter: ray's `fruit-bowl.scm` solver is still 5.7x Janet because
 its `world-spheres` conses fresh lists every call -- a scene rewrite to
 vectors, not an engine change.
+
+
+## Against Steel, after S14 (2026-10-24)
+
+The shared ten-program set ([vs-steel.md](vs-steel.md)), one `--features
+jit` build, Steel 0.8.2: **T1 is 1.40× Steel's speed, up from 0.91×** on
+2026-10-13 -- faster on 7 of 9, level on `lists`, still behind on `strings`.
+`fib` 261 → 148 ms, `loop` 513 → 247 ms, `vec` 218 → 90 ms, `lists` 3572 →
+1710 ms, `fbm` 135 → 78 ms. The jit column (T2) reads the same, 1.38×,
+because T2 declines every unit using S14's ops (S14f): it is running T1.

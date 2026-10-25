@@ -85,3 +85,26 @@ measurement is that its non-leaf code is not interpreter-bound. The leaf
 compiler is 199× T1 on the texel loop; T2 is 1.3×. The honest state: T2
 works, costs more than it gives on short programs, and the plan's option to
 stop here is a live one.
+
+
+## Status after S14 (2026-10-24)
+
+S14 ([s14-flat-frames-plan.md](s14-flat-frames-plan.md)) changed T1 under
+this tier. Variables nothing captures now live on the value stack (`Arg`,
+`SetArg`, `ArgDef`, `SetArgDef`), tail-only named lets are jumps
+(`JumpCall`), and two-operand arithmetic is one op (`Arith`). **T2 does not
+compile any of them yet**: `Vm::native_for` declines a unit with flat slots,
+and `t2.rs` declines the ops, so nearly every compiled unit now runs on T1.
+
+That is not a regression in what runs -- every result is T1's, which agrees
+with T0 -- but it is in what T2 is for. On the shared Steel benchmark set
+([vs-steel.md](vs-steel.md)) a `--features jit` build reads **1.38×** Steel
+with `SCM_TIER=t2` and **1.40×** with T1: the same, because T2 is running T1.
+Before S14 it was the other way round, T2 1.06× against T1's 0.91× -- and
+plain T1 today is faster than T2 was then.
+
+Two of the three items under "The decision this poses" above were, in
+effect, taken by S14 for T1 rather than for T2: the environment pool became
+something better (no environment at all for an uncaptured frame), and
+unboxed locals are the flat slots. Teaching T2 the new ops is **S14f**; until
+then, T2 is not worth enabling.
