@@ -177,3 +177,61 @@ fn a_loop_body_define_is_fresh_each_time() {
     let mut vm = Vm::new();
     assert_eq!(eval(&mut vm, "(let loop ((i 0) (acc 0)) (define d (* i 10)) (if (= i 3) acc (loop (+ i 1) (+ acc d))))"), "30");
 }
+
+// ── S14e: arithmetic and comparisons as one op, guarded on the callee being
+// the primitive, with the primitive itself for every case not answered in
+// place. Each of these is a case where a fast path could differ.
+
+#[test]
+fn inline_arithmetic_is_the_primitive_in_every_case() {
+    let mut vm = Vm::new();
+    let mut ev = |s: &str| eval(&mut vm, s);
+    // fixnum overflow widens to a bignum, as the primitive does
+    assert_eq!(ev("(let ((x 9223372036854775807)) (+ x 1))"), "9223372036854775808");
+    assert_eq!(ev("(let ((x -9223372036854775808)) (- x))"), "9223372036854775808");
+    // unary minus is 0 - x: (- 0.0) is 0.0, not -0.0
+    assert_eq!(ev("(let ((z 0.0)) (eqv? (- z) 0.0))"), "#t");
+    // mixed fixnum/flonum folds to a flonum
+    assert_eq!(ev("(let ((a 2) (b 0.5)) (list (+ a b) (* a b) (- a b) (/ a b)))"), "(2.5 1.0 1.5 4.0)");
+    // exact division stays the primitive's: exact when it divides, and the
+    // exact-zero error
+    assert_eq!(ev("(let ((a 8) (b 4)) (/ a b))"), "2");
+    assert_eq!(ev("(let ((a 8) (b 3)) (exact? (/ a b)))"), "#f");
+    let e = vm.eval_str("(let ((a 1) (b 0)) (/ a b))").expect_err("exact zero");
+    assert!(format!("{e}").contains("division by exact zero"), "{e}");
+}
+
+#[test]
+fn inline_comparisons_are_exact_where_the_primitive_is() {
+    let mut vm = Vm::new();
+    // a mixed comparison is exact, not by conversion: 2^53 + 1 is not 2^53.0
+    assert_eq!(eval(&mut vm, "(let ((a 9007199254740993) (b 9007199254740992.0)) (= a b))"), "#f");
+    assert_eq!(eval(&mut vm, "(let ((a 9007199254740993) (b 9007199254740992.0)) (> a b))"), "#t");
+    // NaN compares false every way
+    assert_eq!(eval(&mut vm, "(let ((n (/ 0.0 0.0))) (list (= n n) (< n 1.0) (>= n 1.0)))"), "(#f #f #f)");
+    assert_eq!(eval(&mut vm, "(let ((a 3) (b 3)) (list (= a b) (<= a b) (< a b) (>= a b) (> a b)))"), "(#t #t #f #t #f)");
+}
+
+#[test]
+fn inline_arithmetic_errors_are_the_primitives() {
+    let mut vm = Vm::new();
+    let e = vm.eval_str("(let ((a 1) (b \"x\")) (+ a b))").expect_err("not a number");
+    let direct = vm.eval_str("(apply + (list 1 \"x\"))").expect_err("not a number");
+    assert_eq!(format!("{e}"), format!("{direct}"));
+}
+
+/// A redefined `+` is seen on the next execution -- and an operand that
+/// redefines it does NOT change which `+` the call already evaluated, as on
+/// T0, where the callee is evaluated first.
+#[test]
+fn a_redefined_operator_is_honoured_in_order() {
+    let mut vm = Vm::new();
+    eval(&mut vm, "(define (add a b) (+ a b))");
+    assert_eq!(eval(&mut vm, "(add 2 3)"), "5");
+    eval(&mut vm, "(define saved +)");
+    eval(&mut vm, "(set! + (lambda (a b) (* a b)))");
+    assert_eq!(eval(&mut vm, "(add 2 3)"), "6");
+    eval(&mut vm, "(set! + saved)");
+    assert_eq!(eval(&mut vm, "(add 2 3)"), "5");
+    assert_eq!(eval(&mut vm, "(define (f) (+ (begin (set! + -) 10) 1)) (let ((r (f))) (set! + saved) r)"), "11");
+}

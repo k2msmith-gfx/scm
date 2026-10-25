@@ -271,3 +271,42 @@ two `Rc` clones, the caller's `Frame::Code` pushed and later dropped, the
 frame-stack bookkeeping). Not kept: a new invariant on the most delicate
 path in the VM for 1% is a bad trade. If calls are the cost after S14e,
 that list is where to look.
+
+### S14e — arithmetic as an op (2026-10-24)
+
+`(+ a b)`, `(- a b)`, `(* a b)`, `(/ a b)`, `(- a)` and the five two-operand
+comparisons compile to `Op::Arith` when the head is a global holding that
+primitive at compile time. The CALLEE IS STILL EVALUATED FIRST and sits
+under the operands -- T0's order, so an operand that redefines `+` cannot
+change which `+` the call already has; the first version looked the global
+up after the operands and would have disagreed with T0 on exactly that.
+At run time the op compares the callee with the primitive and computes in
+place only the cases the primitive answers the same way (prim.rs `arith`,
+`div`, `compare`): two fixnums with overflow checks, a flonum fold for any
+pair with a flonum, unary minus as `0 - x` (so `(- 0.0)` is `0.0`), `/` only
+with a flonum, comparisons of two fixnums or two flonums. Everything else --
+overflow to a bignum, exact division and exact zero, the exact mixed
+comparison past 2^53, a non-number, a redefined operator -- is `do_call`,
+the primitive's own path, so every result and every error is the
+primitive's. Tests pin each of those cases; fuzzer arm 56 mixes flonums,
+unary minus and comparisons.
+
+Against S14c, minimum of six alternating runs under the same load:
+
+| | S14c | S14e | |
+|---|---|---|---|
+| empty `do` iteration | 31 ns | 20 ns | 1.55x |
+| 2-arg call | 82 ns | 67 ns | 1.22x |
+| call + `let*` of 4 | 140 ns | 113 ns | 1.24x |
+| `hash2` | 175 ns | 151 ns | 1.16x |
+| `fbm` | 5.05 µs | 4.22 µs | 1.20x |
+
+**S14 so far, from the start** (same benchmarks, ray-scm/scm-cli T1):
+empty loop 76 -> 20 ns (3.8x), a call 166 -> 67 ns (2.5x), `hash2` 292 ->
+151 ns (1.9x), `fbm` 8.5 -> 4.2 µs (2.0x). Janet's `fbm` is 1.16 µs: the gap
+is now ~3.6x, from 7.3x. What is left is per-op dispatch (`run_code`'s
+match), `do_call`'s own work, and a value-stack VM's instruction count --
+the register-machine question, which is a plan of its own.
+
+Gate: tests, clippy 0, conformance 1112/71, fuzz 0 mismatches over 5 seeds
+x 3000, benchmarks, boot, scm-llvm.

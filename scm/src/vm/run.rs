@@ -319,6 +319,30 @@ impl Vm {
                         fail!(e);
                     }
                 }
+                Op::Arith { op, prim, form } => {
+                    let unary = op == crate::code::ArithOp::Neg;
+                    let n = if unary { 2 } else { 3 };
+                    let at = self.vstack.len() - n;
+                    let (callee, a) = (self.vstack[at], self.vstack[at + 1]);
+                    let b = if unary { Value::Unspecified } else { self.vstack[at + 2] };
+                    let pid = crate::value::PrimId(prim);
+                    if callee == Value::Primitive(pid) {
+                        if let Some(v) = arith_fast(op, a, b) {
+                            self.vstack.truncate(at);
+                            self.current_call = Value::Unspecified;
+                            self.vstack.push(v);
+                            continue;
+                        }
+                    }
+                    // Not a case the fast path answers, or not the
+                    // primitive any more: an ordinary call, which for the
+                    // primitive is `do_call`'s plain path.
+                    match self.do_call(&code, pc, env, base, (n - 1) as u32, form, false) {
+                        Ok(None) => {}
+                        Ok(Some(step)) => return Ok(step),
+                        Err(e) => fail!(e),
+                    }
+                }
                 Op::Jump(t) => pc = t as usize,
                 Op::JumpCall { target, form } => {
                     self.current_call = code.forms[form as usize];
@@ -406,6 +430,76 @@ impl Vm {
                     return Ok(self.enter_code(block, env));
                 }
             }
+        }
+    }
+}
+
+/// S14e: the cases `Op::Arith` computes in place, each exactly as the
+/// primitive would (prim.rs `arith`, `div`, `compare`): `None` for every
+/// other case, which then goes to the primitive.
+///
+/// - `+ - *`: two fixnums by checked arithmetic (overflow -> `None`: the
+///   primitive widens to a bignum); a fixnum and a flonum, or two flonums,
+///   as the primitive's float fold does -- each operand `as f64`, in order.
+/// - unary `-`: `0 - x`, the fold with identity 0, so `(- 0.0)` is `0.0`.
+/// - `/`: only with a flonum operand (the float fold); two fixnums have the
+///   exact-division and exact-zero rules, which are the primitive's.
+/// - comparisons: two fixnums, or two flonums (a NaN compares false); a
+///   mixed pair is compared EXACTLY by the primitive, not by conversion.
+fn arith_fast(op: crate::code::ArithOp, a: Value, b: Value) -> Option<Value> {
+    use crate::code::ArithOp as A;
+    use std::cmp::Ordering;
+    let fl = |v: Value| match v {
+        Value::Fixnum(n) => Some(n as f64),
+        Value::Flonum(x) => Some(x),
+        _ => None,
+    };
+    let floats = matches!((a, b), (Value::Flonum(_), Value::Flonum(_) | Value::Fixnum(_)) | (Value::Fixnum(_), Value::Flonum(_)));
+    match op {
+        A::Add | A::Sub | A::Mul => {
+            if let (Value::Fixnum(x), Value::Fixnum(y)) = (a, b) {
+                let r = match op {
+                    A::Add => x.checked_add(y),
+                    A::Sub => x.checked_sub(y),
+                    _ => x.checked_mul(y),
+                }?;
+                return Some(Value::Fixnum(r));
+            }
+            if !floats {
+                return None;
+            }
+            let (x, y) = (fl(a)?, fl(b)?);
+            Some(Value::Flonum(match op {
+                A::Add => x + y,
+                A::Sub => x - y,
+                _ => x * y,
+            }))
+        }
+        A::Neg => match a {
+            Value::Fixnum(x) => 0i64.checked_sub(x).map(Value::Fixnum),
+            Value::Flonum(x) => Some(Value::Flonum(0.0 - x)),
+            _ => None,
+        },
+        A::Div => {
+            if !floats {
+                return None;
+            }
+            Some(Value::Flonum(fl(a)? / fl(b)?))
+        }
+        A::Eq | A::Lt | A::Gt | A::Le | A::Ge => {
+            let ord = match (a, b) {
+                (Value::Fixnum(x), Value::Fixnum(y)) => Some(x.cmp(&y)),
+                (Value::Flonum(x), Value::Flonum(y)) => x.partial_cmp(&y),
+                _ => return None,
+            };
+            let holds = |o: Ordering| match op {
+                A::Eq => o == Ordering::Equal,
+                A::Lt => o == Ordering::Less,
+                A::Gt => o == Ordering::Greater,
+                A::Le => o != Ordering::Greater,
+                _ => o != Ordering::Less,
+            };
+            Some(Value::Bool(ord.is_some_and(holds)))
         }
     }
 }

@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{Formals, Vm};
-use crate::code::{Code, Lambda, Op};
+use crate::code::{ArithOp, Code, Lambda, Op};
 use crate::heap::Obj;
 use crate::value::{ObjRef, SymId, Value};
 
@@ -687,6 +687,26 @@ impl<'a> Cx<'a> {
             self.ops.push(Op::Unspecified);
             return Ok(());
         }
+        // S14e: two-operand arithmetic or comparison (or unary minus) on a
+        // global that holds the primitive of that name right now: the
+        // operands, then one `Arith` op in place of a callee and a call.
+        if let Value::Symbol(h) = head
+            && let Var::Global(s, r) = self.resolve(h)?
+            && let Some(op) = arith_op(self.vm.engine.interner.sym_name(r), parts.len() - 1)
+            && let Some(Value::Primitive(pid)) = self.vm.global(s).or_else(|| self.vm.global(r))
+            && self.vm.plain_prim(pid)
+        {
+            let start = self.here();
+            for p in &parts {
+                self.expr(*p, false)?;
+            }
+            let form = self.forms.len() as u32;
+            self.forms.push(expr);
+            let at = self.here();
+            self.ops.push(Op::Arith { op, prim: pid.0, form });
+            self.calls.push((start, at, form));
+            return Ok(());
+        }
         // An application. The callee is evaluated first, then the
         // arguments left to right, as T0 does.
         let start = self.here();
@@ -1151,6 +1171,23 @@ impl<'a> Cx<'a> {
     fn binding_items(&self, v: Value) -> R<Vec<Value>> {
         self.vm.binding_items(v).map_err(|e| Decline(format!("{e}")))
     }
+}
+
+/// S14e: which `ArithOp` a call of NAME with ARGC operands is, if any.
+fn arith_op(name: &str, argc: usize) -> Option<ArithOp> {
+    Some(match (name, argc) {
+        ("+", 2) => ArithOp::Add,
+        ("-", 2) => ArithOp::Sub,
+        ("-", 1) => ArithOp::Neg,
+        ("*", 2) => ArithOp::Mul,
+        ("/", 2) => ArithOp::Div,
+        ("=", 2) => ArithOp::Eq,
+        ("<", 2) => ArithOp::Lt,
+        (">", 2) => ArithOp::Gt,
+        ("<=", 2) => ArithOp::Le,
+        (">=", 2) => ArithOp::Ge,
+        _ => return None,
+    })
 }
 
 fn narrow(n: usize) -> R<u16> {

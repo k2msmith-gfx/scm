@@ -14,6 +14,22 @@ use std::rc::Rc;
 use crate::heap::{NamedParam, Param};
 use crate::value::{SymId, Value};
 
+/// S14e: the arithmetic and comparisons `Op::Arith` stands in for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    /// `(- x)`: the primitive computes `0 - x`, so `(- 0.0)` is `0.0`.
+    Neg,
+    Eq,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     /// Push `consts[i]`.
@@ -57,6 +73,17 @@ pub enum Op {
     /// it replaces would have, so a runaway stopped mid-loop still says
     /// `(loop)` in its backtrace; then jumps.
     JumpCall { target: u32, form: u32 },
+    /// S14e: `(+ a b)`, `(< a b)`, `(- a)` … with the callee and operands on
+    /// the stack, evaluated in a call's order (callee first, as T0 does, so
+    /// an operand that redefines `+` cannot change which `+` this is).
+    /// `prim` is the primitive the head named when this compiled. While the
+    /// callee IS it, two fixnums or flonums (or a fixnum and a flonum, where
+    /// the primitive folds to a flonum) are computed in place; any other
+    /// operands go to the primitive itself -- overflow, exact division, a
+    /// mixed comparison, a non-number -- so every result and every error is
+    /// the primitive's. Any other callee is called like any procedure.
+    /// `form` is the call form, for the backtrace and the error.
+    Arith { op: ArithOp, prim: u32, form: u32 },
     /// Pop; branch if false.
     JumpIfFalse(u32),
     /// The callee and `argc` arguments are on the stack, callee lowest.

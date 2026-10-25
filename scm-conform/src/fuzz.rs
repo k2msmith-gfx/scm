@@ -528,12 +528,12 @@ impl Gen {
 
     fn int(&mut self, depth: u32) -> String {
         let d = depth - 1;
-        // 56, not 50: arms 46, 47 and 48 were added for bignum growth,
-        // the copy-at-import check and calls through an import; 50-55 for
-        // S14's flat frames and loops; and the `_` arm (49) is a real case
+        // 57, not 50: arms 46, 47 and 48 were added for bignum growth,
+        // the copy-at-import check and calls through an import; 50-56 for
+        // S14's flat frames, loops and inline arithmetic; and the `_` arm (49) is a real case
         // (`raise-continuable`) rather than a filler -- leaving the bound
         // alone silently drops whatever sits last.
-        match self.rng.below(56) {
+        match self.rng.below(57) {
             0..=3 => {
                 let op = *self.rng.pick(&["+", "-", "*"]);
                 let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d));
@@ -641,6 +641,9 @@ impl Gen {
             // S14c: a named let that is NOT a loop -- non-tail recursion, and
             // its name escaping as a value.
             55 => { let a = self.expr(Ty::Int, d); format!("(+ (let f ((n (modulo (abs {a}) 6))) (if (= n 0) 1 (* n (f (- n 1))))) (let g ((n 2)) (if (procedure? g) (if (= n 0) 7 (g (- n 1))) 0)))") }
+            // S14e: inline arithmetic on flonums, mixed pairs and unary minus,
+            // with comparisons, brought back to an exact integer.
+            56 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let* ((x (* {a} 0.5)) (y (- {b})) (z (/ x (if (= y 0) 3 y)))) (+ (if (< x z) 1 2) (if (>= (- z) x) 4 8) (exact (round (* 4 (+ x (- y) z))))))") }
             _ => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(with-exception-handler (lambda (e) {a}) (lambda () (+ {b} (raise-continuable 'c))))") }
         }
     }
