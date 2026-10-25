@@ -310,3 +310,31 @@ the register-machine question, which is a plan of its own.
 
 Gate: tests, clippy 0, conformance 1112/71, fuzz 0 mismatches over 5 seeds
 x 3000, benchmarks, boot, scm-llvm.
+
+## Where S14 leaves it, and what next (2026-10-24)
+
+Profile of `fbm` after S14e (`sample`, 6 s): allocation and collection are
+GONE from it (they were ~27%). `run_code` is 66% -- dispatch and value-stack
+traffic -- then `do_call` 8%, `eval_inner` 6.6% (the trampoline), `arith_fast`
+5.7%, `sin` 5.6%, `enter_code_at` 2.2%. A call is still ~67 ns against
+Janet's 12; `fbm` is 4.2 µs against 1.16.
+
+Next, in this order, each measured alone as S14's stages were:
+
+1. **Superinstructions** for the commonest sequences (`Arg Arg Arith`,
+   `Arg Const Arith`, compare-and-branch): most of a register VM's cut in
+   dispatches without changing the compiler's shape.
+2. **The call path**: the per-call `Rc` traffic, the size of the
+   `Frame::Code` pushed per call, the trampoline round-trip. S14d showed
+   leaving `run_code` is not itself the cost, so this is about shrinking
+   what a call does.
+3. **Only then, a register VM** if dispatch still dominates: ~2-3x S14's
+   work (the compiler targets registers; ~25 three-operand ops; T2 ported or
+   declining), for an expected 1.3-1.5x -- published stack-vs-register
+   comparisons (Lua 5; Shi et al., "Virtual Machine Showdown") find 30-47%
+   fewer instructions and ~25-35% less time. The differential fuzzer is what
+   makes it tractable.
+
+Not a VM matter: ray's `fruit-bowl.scm` solver is still 5.7x Janet because
+its `world-spheres` conses fresh lists every call -- a scene rewrite to
+vectors, not an engine change.
