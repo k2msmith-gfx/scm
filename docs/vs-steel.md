@@ -196,27 +196,36 @@ decision about `call/cc` and `set!`. That is a design change, not a tweak.
 
 Same machine (Apple M3 Pro), same Steel 0.8.2, scm at `36be1bb` (S14:
 flat frames, named-let loops as jumps, inline arithmetic --
-[s14-flat-frames-plan.md](s14-flat-frames-plan.md)). T1 only: T2 declines
-any unit using S14's new ops until S14f teaches it them, so a T2 column
-would be mostly T1. Load average 1.65 -- quieter than either run above.
+[s14-flat-frames-plan.md](s14-flat-frames-plan.md)), built with `--features
+jit` so both tiers run from one binary: T1, and the jit column (T2,
+`SCM_TIER=t2`). Load average ~1.1-1.6, quieter than either run above. One
+run of the harness for both columns; a T1-only run a few minutes earlier
+read 1.46x for the same set, so treat the second decimal as noise.
 
-| program | Steel | T1, 10-13 | T1 now | T1 speedup | Steel / T1 |
-|---|---|---|---|---|---|
-| `startup` | 53 ms | 7 ms | 6 ms | — | 9.1× |
-| `fib` 30 | 188 ms | 261 ms | 144 ms | 1.8× | 1.3× |
-| `tak` 24 16 8 | 166 ms | 246 ms | 145 ms | 1.7× | 1.1× |
-| `loop`, 5M with `modulo` | 384 ms | 513 ms | 242 ms | 2.1× | 1.6× |
-| `vec`, fill and sum 1M | 208 ms | 218 ms | 85 ms | 2.6× | 2.4× |
-| `strings` | 81 ms | 104 ms | 98 ms | 1.1× | 0.8× |
-| `closures`, 1M | 171 ms | 230 ms | 139 ms | 1.7× | 1.2× |
-| `lists` | 1759 ms | 3572 ms | 1715 ms | 2.1× | 1.0× |
-| `fbm`, 128² | 144 ms | 135 ms | 74 ms | 1.8× | 1.9× |
-| `callcc` | 205 ms | 82 ms | 78 ms | 1.05× | 2.6× |
-| **geometric mean, excluding startup** | | | | | **1.46×** (was 0.91×) |
+| program | Steel | T1, 10-13 | T1 now | jit now | T1 speedup | Steel / T1 | Steel / jit |
+|---|---|---|---|---|---|---|---|
+| `startup` | 51 ms | 7 ms | 11 ms | 8 ms | — | 4.7× | 6.0× |
+| `fib` 30 | 185 ms | 261 ms | 148 ms | 148 ms | 1.8× | 1.2× | 1.2× |
+| `tak` 24 16 8 | 165 ms | 246 ms | 147 ms | 148 ms | 1.7× | 1.1× | 1.1× |
+| `loop`, 5M with `modulo` | 384 ms | 513 ms | 247 ms | 245 ms | 2.1× | 1.6× | 1.6× |
+| `vec`, fill and sum 1M | 205 ms | 218 ms | 90 ms | 91 ms | 2.4× | 2.3× | 2.2× |
+| `strings` | 79 ms | 104 ms | 102 ms | 104 ms | 1.0× | 0.8× | 0.8× |
+| `closures`, 1M | 171 ms | 230 ms | 145 ms | 153 ms | 1.6× | 1.2× | 1.1× |
+| `lists` | 1772 ms | 3572 ms | 1710 ms | 1720 ms | 2.1× | 1.0× | 1.0× |
+| `fbm`, 128² | 138 ms | 135 ms | 78 ms | 79 ms | 1.7× | 1.8× | 1.8× |
+| `callcc` | 201 ms | 82 ms | 82 ms | 82 ms | 1.0× | 2.4× | 2.4× |
+| **geometric mean, excluding startup** | | | | | | **1.40×** (was 0.91×) | **1.38×** (was 1.06×) |
 
 T1 was the slower of the two on 7 of 9; it is now faster on 7 and level on
 `lists`. Loops, calls and arithmetic (`fib`, `tak`, `loop`, `vec`, `fbm`)
-moved 1.7–2.6×. `lists`, the case the first reading blamed on the
+moved 1.7–2.4×. `lists`, the case the first reading blamed on the
 collector re-marking a large live set, halved: far fewer environments are
 allocated, so there is far less to collect. `strings` (string primitives)
 and `callcc` (already scm's strength) were never S14's to move.
+
+**The jit column is T1's, and that is expected.** T2 declines any compiled
+unit that uses S14's new ops (`Arg`, `SetArg`, `JumpCall`, `Arith` …) until
+S14f teaches it them, and every one of these programs uses them, so T2 runs
+almost nothing natively. Before S14 the jit tier was the faster one (1.06×
+against T1's 0.91×); now plain T1 is faster than old T2 was. S14f -- T2
+compiling the new ops -- is where a jit column would separate again.
