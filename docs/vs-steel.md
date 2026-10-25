@@ -191,3 +191,32 @@ frames, or reusing the environment in place on a self-tail-call when
 nothing captures it, is the next real win -- `assv` tail-calls itself 100
 times per lookup -- and it needs compile-time escape analysis and a
 decision about `call/cc` and `set!`. That is a design change, not a tweak.
+
+## After S14, 2026-10-24
+
+Same machine (Apple M3 Pro), same Steel 0.8.2, scm at `36be1bb` (S14:
+flat frames, named-let loops as jumps, inline arithmetic --
+[s14-flat-frames-plan.md](s14-flat-frames-plan.md)). T1 only: T2 declines
+any unit using S14's new ops until S14f teaches it them, so a T2 column
+would be mostly T1. Load average 1.65 -- quieter than either run above.
+
+| program | Steel | T1, 10-13 | T1 now | T1 speedup | Steel / T1 |
+|---|---|---|---|---|---|
+| `startup` | 53 ms | 7 ms | 6 ms | — | 9.1× |
+| `fib` 30 | 188 ms | 261 ms | 144 ms | 1.8× | 1.3× |
+| `tak` 24 16 8 | 166 ms | 246 ms | 145 ms | 1.7× | 1.1× |
+| `loop`, 5M with `modulo` | 384 ms | 513 ms | 242 ms | 2.1× | 1.6× |
+| `vec`, fill and sum 1M | 208 ms | 218 ms | 85 ms | 2.6× | 2.4× |
+| `strings` | 81 ms | 104 ms | 98 ms | 1.1× | 0.8× |
+| `closures`, 1M | 171 ms | 230 ms | 139 ms | 1.7× | 1.2× |
+| `lists` | 1759 ms | 3572 ms | 1715 ms | 2.1× | 1.0× |
+| `fbm`, 128² | 144 ms | 135 ms | 74 ms | 1.8× | 1.9× |
+| `callcc` | 205 ms | 82 ms | 78 ms | 1.05× | 2.6× |
+| **geometric mean, excluding startup** | | | | | **1.46×** (was 0.91×) |
+
+T1 was the slower of the two on 7 of 9; it is now faster on 7 and level on
+`lists`. Loops, calls and arithmetic (`fib`, `tak`, `loop`, `vec`, `fbm`)
+moved 1.7–2.6×. `lists`, the case the first reading blamed on the
+collector re-marking a large live set, halved: far fewer environments are
+allocated, so there is far less to collect. `strings` (string primitives)
+and `callcc` (already scm's strength) were never S14's to move.
