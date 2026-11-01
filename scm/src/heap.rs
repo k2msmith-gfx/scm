@@ -29,6 +29,9 @@ use crate::value::{KwId, ObjRef, SymId, Value};
 pub struct Param {
     pub name: SymId,
     pub default: Option<Value>,
+    /// S26: the hidden slot `(given? name)` reads -- a symbol no source can
+    /// spell, bound beside the parameter to `#t` when the caller supplied it.
+    pub given: SymId,
 }
 
 /// A keyword parameter. The parameter's name *is* the keyword, so `kw` is
@@ -39,6 +42,8 @@ pub struct NamedParam {
     pub name: SymId,
     pub kw: KwId,
     pub default: Option<Value>,
+    /// S26: as [`Param::given`].
+    pub given: SymId,
 }
 
 /// What kind of condition an error object carries. R7RS asks `read-error?`

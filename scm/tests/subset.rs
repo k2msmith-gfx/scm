@@ -166,6 +166,30 @@ fn the_documented_lambda_list_holds() {
 }
 
 #[test]
+fn the_documented_given_holds() {
+    // "(given? NAME) is #t when the caller supplied the argument for NAME and
+    // #f when it did not" -- the document's own example, verbatim.
+    let grid = "(define (set-grid :on (on #t)) (if (given? on) (list 'set on) 'toggle))";
+    assert_eq!(eval(&format!("{grid} (list (set-grid) (set-grid :on #f) (set-grid :on #t))")),
+               "(toggle (set #f) (set #t))");
+    let live = "(define (live [mode #f] [ms #f]) (list (given? mode) (given? ms)))";
+    assert_eq!(eval(&format!("{live} (list (live) (live #f))")), "((#f #f) (#t #f))");
+    // "An explicit #f counts as supplied; a written default does not."
+    assert_eq!(eval("(define (f &opt (x 1)) (given? x)) (list (f) (f #f) (f 1))"), "(#f #t #t)");
+    // The absent binding is unchanged: still #f.
+    assert_eq!(eval("(define (f &opt x) x) (f)"), "#f");
+    // "It is syntax, not a procedure" -- and it yields to a binding of its name.
+    assert!(eval("(map given? '(1))").contains("unbound variable"));
+    assert_eq!(eval("(define (given? x) 'mine) (given? 1)"), "mine");
+    // "a parameter shadowed by an inner let ... is an error naming the variable"
+    assert!(eval("(define (f &opt x) (let ((x 1)) (given? x))) (f)")
+        .contains("given?: `x` is not an optional or keyword parameter here"));
+    // "It reaches across closures", and into a later default.
+    assert_eq!(eval("(define (k &opt x) (lambda () (given? x))) (list ((k)) ((k 0)))"), "(#f #t)");
+    assert_eq!(eval("(define (f &opt x (y (given? x))) y) (list (f) (f 1))"), "(#f #t)");
+}
+
+#[test]
 fn the_documented_additions_hold() {
     // 2. Keywords are a type of their own, and `#:at` is the same datum.
     assert_eq!(eval("(list (keyword? :at) (symbol? :at) (eq? :at #:at))"), "(#t #f #t)");

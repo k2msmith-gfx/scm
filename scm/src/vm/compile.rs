@@ -187,6 +187,10 @@ impl Vm {
         frame.extend(rest);
         frame.extend(named.iter().map(|p| p.name));
         frame.extend(keys);
+        // S26: the supplied-flags, after every parameter -- `apply` binds
+        // them in this order.
+        frame.extend(opt.iter().map(|p| p.given));
+        frame.extend(named.iter().map(|p| p.given));
         let plain = opt.is_empty() && named.is_empty() && keys.is_none() && rest.is_none();
         let outer = Outer::root(env);
         unit(self, &outer, |cx| cx.body_unit(frame.clone(), body, plain))
@@ -585,6 +589,9 @@ impl<'a> Cx<'a> {
         {
             let s = &self.vm.syms;
             let args = &parts[1..];
+            if resolved == s.given {
+                return self.given(args);
+            }
             if resolved == s.quote {
                 return match args {
                     [v] => {
@@ -936,6 +943,30 @@ impl<'a> Cx<'a> {
         Ok(())
     }
 
+    /// S26: `(given? NAME)` is a read of NAME's supplied-flag, which `apply`
+    /// binds in the same frame as the parameter. T0's rule is that the
+    /// nearest binding of NAME must be that parameter; here that is "NAME
+    /// and its flag resolve to the same frame". Anything else -- unbound, not
+    /// a parameter, shadowed, the wrong shape -- is declined, so T0 runs the
+    /// unit and raises its error at the moment it reaches the form, which is
+    /// the moment T0 alone would have raised it.
+    fn given(&mut self, args: &[Value]) -> R<()> {
+        let [Value::Symbol(name)] = args else {
+            return decline("given?: not one name");
+        };
+        let Some(&flag) = self.vm.given_flags.get(name) else {
+            return decline("given?: not a parameter");
+        };
+        let same_frame = match (self.resolve(*name)?, self.resolve(flag)?) {
+            (Var::Local { depth: a, .. }, Var::Local { depth: b, .. }) => a == b,
+            _ => false,
+        };
+        if !same_frame {
+            return decline("given?: not an optional or keyword parameter here");
+        }
+        self.expr(Value::Symbol(flag), false)
+    }
+
     fn lambda(&mut self, name: Option<SymId>, formals: Value, body: &[Value]) -> R<()> {
         let f = self.vm.parse_formals(formals).map_err(|e| Decline(format!("{e}")))?;
         let Formals { params, opt, named, keys, rest } = f;
@@ -964,6 +995,8 @@ impl<'a> Cx<'a> {
         frame.extend(rest);
         frame.extend(named.iter().map(|p| p.name));
         frame.extend(keys);
+        frame.extend(opt.iter().map(|p| p.given));
+        frame.extend(named.iter().map(|p| p.given));
         let plain = opt.is_empty() && named.is_empty() && keys.is_none() && rest.is_none();
         let outer = self.outer();
         let code = unit(self.vm, &outer, |cx| cx.body_unit(frame.clone(), body, plain))?;

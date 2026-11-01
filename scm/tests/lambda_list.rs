@@ -419,3 +419,130 @@ fn a_printed_signature_reads_back_with_the_same_call_shape() {
         r#"(#t "(f a [b] :at at :m m &keys r)" "(g a [b] :at at :m m &keys r)")"#
     );
 }
+
+// ---- S26: (given? NAME) -------------------------------------------------
+
+/// Run on T0 and T1 and insist they agree; answer the shared result.
+#[track_caller]
+fn both_tiers(src: &str) -> String {
+    let show = |tier| {
+        let mut vm = Vm::with_tier(tier);
+        match vm.eval_str(src) {
+            Ok(v) => write_str(&vm.engine, v),
+            Err(e) => format!("error: {e}"),
+        }
+    };
+    let t0 = show(scm::Tier::T0);
+    let t1 = show(scm::Tier::T1);
+    assert_eq!(t0, t1, "T0 and T1 disagree on {src:?}");
+    t1
+}
+
+#[test]
+fn given_answers_for_an_optional_parameter() {
+    let f = "(define (f &opt x) (given? x)) ";
+    assert_eq!(both_tiers(&format!("{f} (list (f) (f 1))")), "(#f #t)");
+    // Racket's spelling declares the same thing.
+    let g = "(define (g a [b 0]) (given? b)) ";
+    assert_eq!(both_tiers(&format!("{g} (list (g 1) (g 1 2))")), "(#f #t)");
+}
+
+#[test]
+fn given_answers_for_a_keyword_parameter_in_every_spelling() {
+    for formals in ["(f :on (on #t))", "(f #:on on)", "(f &named (on #t))", "(f &named on &keys ks)"] {
+        let src = format!("(define {formals} (given? on)) (list (f) (f :on 1))");
+        assert_eq!(both_tiers(&src), "(#f #t)", "formals {formals}");
+    }
+}
+
+#[test]
+fn an_explicit_false_counts_as_given() {
+    // The two bugs that asked for this: `(live)` turning live render OFF,
+    // and `toggle-grid` never hiding the grid.
+    let src = "(define (set-grid :on (on #t)) (if (given? on) (list 'set on) 'toggle))
+               (list (set-grid) (set-grid :on #f) (set-grid :on #t))";
+    assert_eq!(both_tiers(src), "(toggle (set #f) (set #t))");
+    let src = "(define (live [mode #f] [ms #f]) (list (given? mode) (given? ms)))
+               (list (live) (live #f) (live #f #f))";
+    assert_eq!(both_tiers(src), "((#f #f) (#t #f) (#t #t))");
+}
+
+#[test]
+fn a_written_default_does_not_count_as_given() {
+    let src = "(define (f &opt (x 5) &named (w 7)) (list x (given? x) w (given? w)))
+               (list (f) (f 5 :w 7))";
+    assert_eq!(both_tiers(src), "((5 #f 7 #f) (5 #t 7 #t))");
+}
+
+#[test]
+fn given_leaves_what_an_absent_parameter_is_bound_to_alone() {
+    // 100% backward compatible: absent with no default is still #f.
+    assert_eq!(both_tiers("(define (f &opt x :k k) (list x k)) (f)"), "(#f #f)");
+}
+
+#[test]
+fn given_reaches_across_closures_and_into_later_defaults() {
+    assert_eq!(both_tiers("(define (k &opt x) (lambda () (given? x))) (list ((k)) ((k #f)))"), "(#f #t)");
+    assert_eq!(both_tiers("(define (f &opt x (y (given? x))) y) (list (f) (f 1))"), "(#f #t)");
+    // Through a named let, which T1 may compile as a loop.
+    let src = "(define (f &opt n) (let lp ((i 0)) (if (< i 3) (lp (+ i 1)) (given? n)))) (list (f) (f 9))";
+    assert_eq!(both_tiers(src), "(#f #t)");
+}
+
+#[test]
+fn misusing_given_is_an_error_naming_the_variable() {
+    for (src, name) in [
+        ("(define (f a) (given? a)) (f 1)", "a"),               // required
+        ("(define (f &keys ks) (given? ks)) (f)", "ks"),        // the bag
+        ("(define (f . r) (given? r)) (f)", "r"),               // a rest
+        ("(given? car)", "car"),                                // a global
+        ("(given? nowhere)", "nowhere"),                        // unbound
+        ("(define (f &opt x) (let ((x 1)) (given? x))) (f 1)", "x"), // shadowed
+        ("(define (f &opt x) ((lambda (x) (given? x)) 2)) (f 1)", "x"),
+    ] {
+        let e = both_tiers(src);
+        assert!(e.starts_with("error: "), "{src} gave {e}");
+        assert!(e.contains(&format!("`{name}` is not an optional or keyword parameter")), "{src} gave {e}");
+    }
+    assert!(both_tiers("(define (f &opt x) (given? x 1)) (f)").contains("expected one parameter name"));
+    assert!(both_tiers("(define (f &opt x) (given? 'x)) (f)").contains("expected one parameter name"));
+}
+
+#[test]
+fn given_is_syntax_and_yields_to_a_binding_of_its_name() {
+    // Not a value...
+    assert!(both_tiers("(map given? '(1))").contains("unbound variable"));
+    // ...and a program that already defines `given?` keeps its own.
+    assert_eq!(both_tiers("(define (given? x) (list 'mine x)) (define (f &opt y) (given? y)) (f)"), "(mine #f)");
+    assert_eq!(both_tiers("(let ((given? (lambda (x) 'local))) (given? 1))"), "local");
+}
+
+#[test]
+fn t1_compiles_given_rather_than_declining() {
+    let mut vm = Vm::with_tier(scm::Tier::T1);
+    vm.eval_str("(define (f &opt x :k k) (list (given? x) (given? k)))").unwrap();
+    let before = vm.tier_fallbacks();
+    let v = vm.eval_str("(f 1)").unwrap();
+    assert_eq!(write_str(&vm.engine, v), "(#t #f)");
+    assert_eq!(vm.tier_fallbacks(), before, "declined: {:?}", vm.last_decline());
+}
+
+#[test]
+fn the_hidden_flags_are_not_shown_as_locals() {
+    // An inspector (the break REPL, the debugger's locals) lists bindings;
+    // the supplied-flags are an implementation detail and stay out of it.
+    let mut vm = Vm::new();
+    vm.eval_str("(define (f &opt x :k k) (car x))").unwrap();
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let sink = std::rc::Rc::clone(&seen);
+    vm.set_break_handler(Some(Box::new(move |vm: &mut Vm, _e: &scm::VmError| {
+        for f in vm.live_frames() {
+            sink.borrow_mut().extend(vm.bindings_of(f.env).into_iter().map(|(n, _)| n));
+        }
+        scm::BreakAction::Abort
+    })));
+    assert!(vm.eval_str("(f 1)").is_err());
+    let names = seen.borrow();
+    assert!(names.iter().any(|n| n == "x"), "{names:?}");
+    assert!(!names.iter().any(|n| n.starts_with("given?")), "{names:?}");
+}

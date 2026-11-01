@@ -199,3 +199,20 @@ fn a_compiled_closure_runs_from_a_rayon_pool() {
         .collect();
     assert_eq!(serial, parallel);
 }
+
+/// S26: the leaf tier takes no optional or keyword parameters, so a
+/// procedure that asks `given?` is refused -- cleanly, at the lambda list,
+/// never compiled with a guess at what the hidden flag would hold. And a
+/// `given?` in a plain-parameter body is refused too, as any form outside
+/// the leaf subset is.
+#[test]
+fn a_procedure_asking_given_is_refused() {
+    let mut vm = Vm::new();
+    vm.eval_str("(define (shade u &opt (v 0.5)) (if (given? v) (* u v) u))").unwrap();
+    let proc = vm.eval_str("shade").unwrap();
+    let why = verdict_proc(&mut vm, "shade", proc).expect_err("an optional parameter");
+    assert!(why.to_string().contains("optional, named or rest parameter"), "{why}");
+    vm.eval_str("(define (plain u v) (if (given? u) u v))").unwrap();
+    let proc = vm.eval_str("plain").unwrap();
+    assert!(verdict_proc(&mut vm, "plain", proc).is_err(), "a plain leaf asking given? must be refused");
+}

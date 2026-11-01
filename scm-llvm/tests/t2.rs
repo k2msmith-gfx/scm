@@ -60,6 +60,30 @@ fn t2_agrees_with_t1_on_hot_programs() {
 }
 
 #[test]
+fn t2_agrees_on_given() {
+    // S26: `(given? x)` is a read of a hidden slot of the parameter frame,
+    // so T2 compiles it as it compiles any local -- and must agree.
+    let programs = [
+        "(define (f &opt x :k (k 1)) (list (given? x) (given? k))) \
+         (let loop ([i 0] [acc '()]) (if (= i 50) (reverse acc) \
+           (loop (+ i 1) (cons (if (even? i) (f #f) (f 1 :k #f)) acc))))",
+        "(define (g [m #f]) (if (given? m) 1 0)) \
+         (let loop ([i 0] [s 0]) (if (= i 100) s (loop (+ i 1) (+ s (if (odd? i) (g #f) (g))))))",
+        "(define (h &opt x) (let ((x 1)) (given? x))) \
+         (let loop ([i 0]) (if (= i 10) (h) (loop (+ i 1))))",
+    ];
+    let mut native_units = 0;
+    for src in programs {
+        let want = show(&mut Vm::new(), src);
+        let mut b = t2();
+        let got = show(&mut b, src);
+        assert_eq!(got, want, "{src}");
+        native_units += b.native_units();
+    }
+    assert!(native_units > 0);
+}
+
+#[test]
 fn errors_in_native_code_are_the_same_errors_with_the_same_backtrace() {
     let mut a = Vm::new();
     let mut b = t2();

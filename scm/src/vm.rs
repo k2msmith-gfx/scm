@@ -21,7 +21,7 @@
 //! tested against, so it is written for clarity over speed.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -585,6 +585,11 @@ pub struct Vm {
     callcc_prim: Option<PrimId>,
     dynamic_wind_prim: Option<PrimId>,
     next_cont_id: u64,
+    /// S26: each optional or keyword parameter's name, to the hidden symbol
+    /// its supplied-flag is bound under (see `given_flag`), and the set of
+    /// those symbols, so an inspector can leave them out.
+    given_flags: HashMap<SymId, SymId>,
+    given_syms: HashSet<SymId>,
 }
 
 struct SpecialForms {
@@ -615,6 +620,22 @@ struct SpecialForms {
     amp_opt: SymId,
     amp_named: SymId,
     amp_keys: SymId,
+    /// S26: `(given? NAME)`.
+    given: SymId,
+}
+
+/// S26: what `(given? …)` says when it is not given one name.
+pub(crate) const GIVEN_SHAPE: &str = "given?: expected one parameter name, as in (given? x)";
+
+/// S26: what `(given? NAME)` says when NAME's nearest binding is not an
+/// optional or keyword parameter. One message for every way of getting it
+/// wrong -- unbound, a required parameter, a global, a parameter shadowed
+/// by an inner binding -- so the tiers cannot disagree on which.
+pub(crate) fn given_misuse(name: &str) -> String {
+    format!(
+        "given?: `{name}` is not an optional or keyword parameter here \
+         (given? asks of the nearest binding of the name, which must be one)"
+    )
 }
 
 /// A parsed lambda list.
@@ -725,6 +746,7 @@ impl Vm {
             amp_opt: engine.interner.symbol("&opt"),
             amp_named: engine.interner.symbol("&named"),
             amp_keys: engine.interner.symbol("&keys"),
+            given: engine.interner.symbol("given?"),
         };
         let mut vm = Vm {
             engine,
@@ -774,6 +796,8 @@ impl Vm {
             callcc_prim: None,
             dynamic_wind_prim: None,
             next_cont_id: 1,
+            given_flags: HashMap::new(),
+            given_syms: HashSet::new(),
         };
         crate::prim::install(&mut vm);
         {
@@ -1518,6 +1542,9 @@ impl Vm {
         while let Some(r) = cur {
             let Obj::Env { parent, slots } = self.engine.obj(r) else { break };
             for (s, v) in slots.iter().rev() {
+                if self.is_given_flag(*s) {
+                    continue;
+                }
                 out.push((self.engine.interner.sym_name(self.engine.resolve(*s)).to_string(), *v));
             }
             cur = *parent;
@@ -1926,6 +1953,9 @@ impl Vm {
         env: Option<ObjRef>,
     ) -> VResult<Option<Step>> {
         let s = &self.syms;
+        if head == s.given {
+            return self.given_form(args, env).map(|v| Some(Step::Return(v)));
+        }
         if head == s.quote {
             return match args {
                 // `syntax->datum`: a template-introduced identifier is renamed
@@ -2558,6 +2588,7 @@ impl Vm {
                             name: p.name,
                             kw,
                             default: p.default,
+                            given: p.given,
                         });
                         continue;
                     }
@@ -2583,6 +2614,7 @@ impl Vm {
                                 name: p.name,
                                 kw,
                                 default: p.default,
+                                given: p.given,
                             });
                         }
                         Section::Keys => match car {
@@ -2611,20 +2643,29 @@ impl Vm {
             Value::Symbol(s) => Ok(Param {
                 name: s,
                 default: None,
+                given: self.given_flag(s),
             }),
             Value::Obj(r) if matches!(self.engine.obj(r), Obj::Vector { .. }) => {
                 let Obj::Vector { items, .. } = self.engine.obj(r) else {
                     unreachable!("guarded")
                 };
                 match items.as_slice() {
-                    [Value::Symbol(name), default] => Ok(Param {
-                        name: *name,
-                        default: Some(*default),
-                    }),
-                    [Value::Symbol(name)] => Ok(Param {
-                        name: *name,
-                        default: None,
-                    }),
+                    [Value::Symbol(name), default] => {
+                        let (name, default) = (*name, *default);
+                        Ok(Param {
+                            name,
+                            default: Some(default),
+                            given: self.given_flag(name),
+                        })
+                    }
+                    [Value::Symbol(name)] => {
+                        let name = *name;
+                        Ok(Param {
+                            name,
+                            default: None,
+                            given: self.given_flag(name),
+                        })
+                    }
                     _ => Err(self.err("expected [NAME default]")),
                 }
             }
@@ -2641,10 +2682,67 @@ impl Vm {
                 Ok(Param {
                     name,
                     default: Some(default),
+                    given: self.given_flag(name),
                 })
             }
             _ => Err(self.err("expected NAME or (NAME default)")),
         }
+    }
+
+    /// S26: the hidden symbol a parameter's supplied-flag is bound under.
+    ///
+    /// One per parameter NAME, made on first use and kept, so the binder,
+    /// `(given? NAME)` on T0 and the T1 compiler all name the same slot
+    /// without agreeing on anything else. It is `fresh`, so no source text
+    /// can spell it: a program cannot read, bind or `set!` it except through
+    /// `given?`. Keyed by the name as written, which is what makes a
+    /// template-introduced parameter (renamed for hygiene) get a flag of its
+    /// own, distinct from a user's parameter of the same spelling.
+    pub(crate) fn given_flag(&mut self, name: SymId) -> SymId {
+        if let Some(&f) = self.given_flags.get(&name) {
+            return f;
+        }
+        let f = self.engine.interner.fresh("given?");
+        self.given_flags.insert(name, f);
+        self.given_syms.insert(f);
+        f
+    }
+
+    /// S26: is `sym` one of the hidden supplied-flags?
+    pub(crate) fn is_given_flag(&self, sym: SymId) -> bool {
+        self.given_syms.contains(&sym)
+    }
+
+    /// S26: `(given? NAME)` on T0. True iff the nearest binding of NAME is an
+    /// optional or keyword parameter whose argument the caller supplied.
+    ///
+    /// The nearest binding decides, and it must be the parameter: the frame
+    /// that binds NAME must also hold NAME's flag. So a `let` that shadows
+    /// the parameter makes `given?` an error rather than a question about a
+    /// variable the reader of the code cannot see -- and T1 refuses the same
+    /// thing (`compile.rs`'s `given`), so both tiers report it, at the same
+    /// moment, with the same message.
+    fn given_form(&mut self, args: &[Value], env: Option<ObjRef>) -> VResult<Value> {
+        let [Value::Symbol(name)] = args else {
+            return Err(self.err(GIVEN_SHAPE));
+        };
+        let name = *name;
+        let flag = self.given_flags.get(&name).copied();
+        let mut cur = env;
+        while let Some(r) = cur {
+            let Obj::Env { parent, slots } = self.engine.obj(r) else { break };
+            if slots.iter().any(|&(s, _)| s == name) {
+                if let Some(f) = flag
+                    && let Some(&(_, v)) = slots.iter().rev().find(|&&(s, _)| s == f)
+                {
+                    return Ok(v);
+                }
+                break;
+            }
+            cur = *parent;
+        }
+        let shown = self.engine.interner.sym_name(self.engine.resolve(name)).to_string();
+        Err(self.err(given_misuse(&shown)))
     }
 
     fn resume(&mut self, frame: Frame, v: Value) -> VResult<Step> {
@@ -3132,7 +3230,11 @@ impl Vm {
                 };
 
                 let mut slots: Vec<(SymId, Value)> =
-                    self.engine.slots(params.len() + opt.len() + named.len() + 2);
+                    self.engine.slots(params.len() + 2 * (opt.len() + named.len()) + 2);
+                // S26: each optional and keyword parameter's supplied-flag,
+                // bound after every parameter (the T1 compiler lays the
+                // frame out in the same order) and read only by `given?`.
+                let mut flags: Vec<(SymId, Value)> = Vec::with_capacity(opt.len() + named.len());
                 let mut todo: Vec<(SymId, Value)> = Vec::new();
                 let mut i = 0usize;
 
@@ -3152,7 +3254,9 @@ impl Vm {
 
                 // Optional positionals, in order.
                 for p in opt.iter() {
-                    if i < args.len() && !starts_named_while_filling(args[i]) {
+                    let supplied = i < args.len() && !starts_named_while_filling(args[i]);
+                    flags.push((p.given, Value::Bool(supplied)));
+                    if supplied {
                         slots.push((p.name, args[i]));
                         i += 1;
                     } else {
@@ -3213,7 +3317,9 @@ impl Vm {
                 }
 
                 for p in named.iter() {
-                    match supplied.iter().rev().find(|(k, _)| *k == p.kw) {
+                    let found = supplied.iter().rev().find(|(k, _)| *k == p.kw);
+                    flags.push((p.given, Value::Bool(found.is_some())));
+                    match found {
                         Some((_, v)) => slots.push((p.name, *v)),
                         None => {
                             slots.push((p.name, Value::Bool(false)));
@@ -3233,6 +3339,7 @@ impl Vm {
                     let bag = self.engine.list(&pairs);
                     slots.push((keys_sym, bag));
                 }
+                slots.extend(flags);
 
                 if let Some(c) = &code {
                     // The slots its internal defines will fill: a read

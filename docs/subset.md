@@ -165,6 +165,59 @@ keyword arguments are order-independent.
 input that declares the same **call shape** — same arity, same keywords, same
 rest — though not the same definition, because a default is not shown.
 
+**Asking whether an argument was supplied: `(given? NAME)`.** A default
+cannot say "the caller did not pass this", and an absent parameter with no
+default is `#f` — which existing code relies on (`(if material …)`) and which
+therefore stays exactly as it is. So the question is asked separately:
+
+    (given? NAME)
+
+is `#t` when the caller supplied the argument for NAME and `#f` when it did
+not, where NAME is an **optional or keyword parameter** of an enclosing
+procedure, in any spelling above (`&opt`, `[b 0]`, `&named`, `:at (at #f)`,
+`#:at at`). An explicit `#f` **counts as supplied**; a written default
+**does not** — `given?` reports what the caller did, never what the default
+did:
+
+```scheme
+(define (set-grid :on (on #t))
+  (if (given? on) (list 'set on) 'toggle))
+
+(set-grid)          ; => toggle
+(set-grid :on #f)   ; => (set #f)
+(set-grid :on #t)   ; => (set #t)
+
+(define (live [mode #f] [ms #f]) (list (given? mode) (given? ms)))
+(live)              ; => (#f #f)
+(live #f)           ; => (#t #f)
+```
+
+The rules:
+
+- **It is syntax, not a procedure.** `given?` cannot be passed, applied or
+  stored; `(map given? …)` is an unbound-variable error. Like every special
+  form here it yields to a binding of its name: a program that defines its own
+  `given?`, globally or locally, gets its own, so no existing program changes
+  meaning.
+- **NAME's nearest binding must be the parameter.** A required parameter, a
+  `&keys` or rest name, a global, an unbound name, or a parameter **shadowed**
+  by an inner `let` or `lambda` is an error naming the variable —
+  `given?: `x` is not an optional or keyword parameter here` — not a question
+  about a variable the reader cannot see. The error is raised when the form is
+  evaluated, which is when scm raises every syntax error (a malformed `if`
+  included), and every tier raises it at that moment with that message.
+- **It reaches across closures.** `(define (k &opt x) (lambda () (given? x)))`
+  answers for `k`'s call, and a later parameter's default may ask about an
+  earlier one: `(define (f &opt x (y (given? x))) y)`.
+- **Under `&keys`**, `given?` still answers for the declared keyword parameters;
+  the bag itself already says which keywords came.
+- `case-lambda` is out of scope: its clause is chosen by arity, which already
+  says what was supplied.
+
+It costs one hidden binding per optional or keyword parameter, made by the
+binder beside the parameter, under a name no source can spell. A procedure
+with a plain lambda list is untouched.
+
 ### 2. Keywords
 
 A first-class type, disjoint from symbols: see *The deviations* §3, since it
