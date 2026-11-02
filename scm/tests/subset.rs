@@ -300,3 +300,45 @@ fn val_conversion_truncates_rather_than_refusing() {
     // the document tells the reader to do.
     assert!(i.write(&deep).unwrap().starts_with("(((("));
 }
+
+#[test]
+fn every_exit_from_a_dynamic_wind_runs_its_after() {
+    // "Every exit from a `dynamic-wind`'s extent runs its `after` thunk ...
+    // and an error nothing catches, which leaves the extent on its way to
+    // the host. Pending afters run innermost first ..."
+    let mut it = Interp::new().unwrap();
+    it.eval("(define log '()) (define (note x) (set! log (cons x log)))").unwrap();
+    let e = it
+        .eval(
+            "(dynamic-wind (lambda () #f)
+               (lambda () (dynamic-wind (lambda () #f) (lambda () (error \"x\")) (lambda () (note 'inner))))
+               (lambda () (note 'outer)))",
+        )
+        .expect_err("the error reaches the host");
+    assert!(format!("{e:?}").contains('x'), "{e:?}");
+    let v = it.eval("(reverse log)").unwrap();
+    assert_eq!(it.write(&v).unwrap(), "(inner outer)");
+    // "An `after` that raises replaces the error."
+    let e = it
+        .eval("(dynamic-wind (lambda () #f) (lambda () (error \"old\")) (lambda () (error \"new\")))")
+        .err()
+        .unwrap();
+    assert!(format!("{e:?}").contains("new"), "{e:?}");
+    // "A host stop runs no afters."
+    it.eval("(define done #f)").unwrap();
+    it.set_fuel(Some(20));
+    assert!(it.eval("(dynamic-wind (lambda () #f) (lambda () (let l () (l))) (lambda () (set! done #t)))").is_err());
+    it.set_fuel(None);
+    let v = it.eval("done").unwrap();
+    assert_eq!(it.value(&v).unwrap(), Val::Bool(false));
+}
+
+#[test]
+fn unary_minus_keeps_the_sign_of_zero() {
+    // "`(- x)` is negation, not `(- 0 x)` ... An exact zero has no sign."
+    assert_eq!(eval("(- 0.0)"), "-0.0");
+    assert_eq!(eval("(/ 1 (- 0.0))"), "-inf.0");
+    assert_eq!(eval("(eqv? (- 0.0) -0.0)"), "#t");
+    assert_eq!(eval("(+ -0.0)"), "-0.0");
+    assert_eq!(eval("(- 0)"), "0");
+}

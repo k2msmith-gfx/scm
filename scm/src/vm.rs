@@ -238,7 +238,12 @@ enum Frame {
     ContMark { id: u64, param_depth: usize },
     /// A `dynamic-wind` in progress: `after` must run however the body
     /// leaves -- normally, by an escape continuation, or by an error.
-    Wind { after: Value },
+    ///
+    /// `param_depth` is the dynamic-binding depth at the `dynamic-wind`
+    /// call, so an unwind can put back whatever a `parameterize` inside the
+    /// body installed before `after` runs: R7RS runs it in the dynamic
+    /// environment of the `dynamic-wind` call.
+    Wind { after: Value, param_depth: usize },
     /// `before` has run and its value is **discarded**; now call the body.
     /// `ConsumeValues` would have passed `before`'s result to a thunk that
     /// takes no arguments.
@@ -250,11 +255,23 @@ enum Frame {
     /// return is a chain of one, and an unwind is a chain of however many
     /// `dynamic-wind`s it crossed. Three separate mechanisms is how this
     /// usually goes wrong.
+    ///
+    /// Each `after` carries its wind's `param_depth`, restored before it
+    /// runs; `restore_to` is the depth to leave once the chain is done (an
+    /// escape continuation's or a `%try`'s), `None` when nothing beyond
+    /// the afters' own depths needs restoring.
     WindChain {
-        afters: Rc<Vec<Value>>,
+        afters: Rc<Vec<(Value, usize)>>,
         idx: usize,
         value: Value,
+        restore_to: Option<usize>,
     },
+    /// An error nothing above this evaluation's base will catch, parked
+    /// while the pending `after` thunks run (innermost first). When the
+    /// chain above it returns into it, the error is re-raised to the host
+    /// unchanged -- no second break, and the backtrace already captured is
+    /// the original failure's. See `unwind_uncaught`.
+    Rethrow { err: VmError },
     /// An element of a `[…]` vector is being evaluated. This is the whole
     /// reason the reader keeps a `bracket` flag: a bracket vector *evaluates*
     /// its elements, where `#(…)` is a constant (plan §4.5).
@@ -335,7 +352,7 @@ impl Frame {
             Frame::ParamRestore { .. } | Frame::Catch { .. } | Frame::ContMark { .. } => {
                 return;
             }
-            Frame::Wind { after } => {
+            Frame::Wind { after, .. } => {
                 out.push(*after);
                 return;
             }
@@ -344,8 +361,16 @@ impl Frame {
                 return;
             }
             Frame::WindChain { afters, value, .. } => {
-                out.extend(afters.iter().copied());
+                out.extend(afters.iter().map(|(a, _)| *a));
                 out.push(*value);
+                return;
+            }
+            Frame::Rethrow { err } => {
+                // The raised object lives only here while the afters run,
+                // and they can collect.
+                if let VmError::Raised(v, _) = err {
+                    out.push(*v);
+                }
                 return;
             }
             Frame::ConsumeValues { consumer } => {
@@ -1269,15 +1294,11 @@ impl Vm {
         self.drop_operands_above(at);
         // An error leaving a `dynamic-wind` runs its `after` as well. The
         // thunks are queued here and run after the condition is built, so a
-        // failing `after` cannot lose the original condition.
-        let mut afters: Vec<Value> = Vec::new();
-        for frame in self.stack[at..].iter().rev() {
-            if let Frame::Wind { after } = frame {
-                afters.push(*after);
-            }
-        }
+        // failing `after` cannot lose the original condition. The catch's
+        // own parameter depth is restored once they have run, each `after`
+        // seeing its own wind's.
+        let afters = self.pending_afters(at);
         self.stack.truncate(at);
-        self.restore_params(param_depth);
         // What the condition *is*: a raised object as itself, and a
         // Rust-originated refusal as an error object, so a handler can ask it
         // for a message either way.
@@ -1291,7 +1312,63 @@ impl Vm {
             _ => unreachable!("guarded above"),
         };
         let pair = self.engine.cons(Value::Bool(false), condition);
-        Ok(Some(self.wind_chain(afters, pair)))
+        Ok(Some(self.wind_chain(afters, pair, Some(param_depth))))
+    }
+
+    /// An error nothing above `base` catches is leaving this evaluation --
+    /// for the host, or for the Rust caller of a nested evaluation -- and so
+    /// is leaving the extent of every `dynamic-wind` above `base`. R7RS runs
+    /// each `after` whenever control leaves the extent, and an error
+    /// unwinding to the top level does; this used to hand the error straight
+    /// back and leave every `after` unrun (ray's `in-group` stayed open, and
+    /// `(with-scene :b (error "boom"))` left `:b` current).
+    ///
+    /// `Ok(step)` runs the pending afters, innermost first, above a
+    /// `Frame::Rethrow` that re-raises `e` once they are done; `Err(e)` is
+    /// "nothing to run, propagate now".
+    ///
+    /// - **Only ordinary errors** (`Error`, `Raised`). Interrupt, out-of-fuel
+    ///   and out-of-memory are the host saying *stop*, and running arbitrary
+    ///   Scheme on the way out of one would defeat that: an `after` can loop,
+    ///   allocate or block as well as any body can. They propagate at once,
+    ///   afters unrun, and a host that cancels must reset its own state.
+    /// - **An `after` that itself raises replaces the error** (R7RS leaves it
+    ///   unspecified). Its error is uncaught too, so it arrives here with the
+    ///   old `Rethrow` beneath it: the remaining afters still run, and the
+    ///   new error is the one the host sees.
+    /// - **The break REPL sees the frames first**: `maybe_break` runs before
+    ///   this, with the stack intact, and the afters run only once the break
+    ///   is left with `Abort`.
+    fn unwind_uncaught(&mut self, base: usize, e: VmError) -> Result<Step, VmError> {
+        if !matches!(e, VmError::Error(_) | VmError::Raised(..)) {
+            return Err(e);
+        }
+        let afters = self.pending_afters(base);
+        if afters.is_empty() {
+            return Err(e);
+        }
+        self.drop_operands_above(base);
+        self.stack.truncate(base);
+        self.push(Frame::Rethrow { err: e });
+        Ok(self.wind_chain(afters, Value::Unspecified, None))
+    }
+
+    /// The `after` thunks still to run if the stack is cut back to `at`,
+    /// innermost first, each with the parameter depth to run it at: every
+    /// `Wind` above `at`, and the not-yet-started tail of any `WindChain`
+    /// (an `after` that raised mid-chain must not drop the outer ones).
+    fn pending_afters(&self, at: usize) -> Vec<(Value, usize)> {
+        let mut afters = Vec::new();
+        for frame in self.stack[at..].iter().rev() {
+            match frame {
+                Frame::Wind { after, param_depth } => afters.push((*after, *param_depth)),
+                Frame::WindChain { afters: chain, idx, .. } => {
+                    afters.extend(chain[idx + 1..].iter().copied());
+                }
+                _ => {}
+            }
+        }
+        afters
     }
 
     fn restore_params(&mut self, depth: usize) {
@@ -1348,6 +1425,12 @@ impl Vm {
                         return Ok(v);
                     }
                     let frame = self.stack.pop().expect("stack.len() > base");
+                    // The afters of an uncaught error have all run: re-raise
+                    // it as it was, past the break handler and without a new
+                    // backtrace (the one captured is the failure's own).
+                    if let Frame::Rethrow { err } = frame {
+                        return Err(err);
+                    }
                     self.resume(frame, v)
                 }
             };
@@ -1369,11 +1452,14 @@ impl Vm {
                             BreakAction::Abort => {}
                         }
                     }
-                    match self.unwind_to_catch(base, e)? {
-                        Some(s) => s,
-                        None => {
+                    match self.unwind_to_catch(base, e) {
+                        Ok(Some(s)) => s,
+                        Ok(None) => {
                             unreachable!("unwind_to_catch returns Err when it cannot catch")
                         }
+                        // Nothing catches it: run the afters it is leaving,
+                        // then hand it on.
+                        Err(e) => self.unwind_uncaught(base, e)?,
                     }
                 }
             };
@@ -1608,29 +1694,30 @@ impl Vm {
         }
     }
 
-    fn unwind_to(&mut self, at: usize, v: Value) -> Step {
+    fn unwind_to(&mut self, at: usize, v: Value, restore_to: usize) -> Step {
         self.drop_operands_above(at);
-        let mut afters: Vec<Value> = Vec::new();
-        for frame in self.stack[at..].iter().rev() {
-            if let Frame::Wind { after } = frame {
-                afters.push(*after);
-            }
-        }
+        let afters = self.pending_afters(at);
         self.stack.truncate(at);
-        self.wind_chain(afters, v)
+        self.wind_chain(afters, v, Some(restore_to))
     }
 
-    /// Run `afters` in order, then return `v`.
-    fn wind_chain(&mut self, afters: Vec<Value>, v: Value) -> Step {
+    /// Run `afters` in order, each at its own parameter depth, then restore
+    /// to `restore_to` (if any) and return `v`.
+    fn wind_chain(&mut self, afters: Vec<(Value, usize)>, v: Value, restore_to: Option<usize>) -> Step {
         if afters.is_empty() {
+            if let Some(d) = restore_to {
+                self.restore_params(d);
+            }
             return Step::Return(v);
         }
-        let first = afters[0];
+        let (first, depth) = afters[0];
+        self.restore_params(depth);
         let afters = Rc::new(afters);
         self.push(Frame::WindChain {
             afters,
             idx: 0,
             value: v,
+            restore_to,
         });
         // `apply` can fail, and a failing `after` is an ordinary error --
         // which will then unwind through any remaining winds, correctly.
@@ -2848,29 +2935,37 @@ impl Vm {
             Frame::ContMark { .. } => Ok(Step::Return(v)),
             // The body of a `dynamic-wind` returned normally: run `after`,
             // then hand back the body's value.
-            Frame::Wind { after } => Ok(self.wind_chain(vec![after], v)),
+            Frame::Wind { after, param_depth } => Ok(self.wind_chain(vec![(after, param_depth)], v, None)),
             // `before` is done and its value is not the body's argument.
             Frame::WindBody { thunk } => self.apply(thunk, Vec::new()),
             Frame::WindChain {
                 afters,
                 idx,
                 value,
+                restore_to,
             } => {
                 // `v` here is whatever the `after` thunk returned, and R7RS
                 // discards it -- the value that leaves a `dynamic-wind` is
                 // the body's.
                 let next = idx + 1;
                 if next < afters.len() {
-                    let thunk = afters[next];
+                    let (thunk, depth) = afters[next];
+                    self.restore_params(depth);
                     self.push(Frame::WindChain {
                         afters,
                         idx: next,
                         value,
+                        restore_to,
                     });
                     return self.apply(thunk, Vec::new());
                 }
+                if let Some(d) = restore_to {
+                    self.restore_params(d);
+                }
                 Ok(Step::Return(value))
             }
+            // Only `eval_inner` pops one, and it intercepts it there.
+            Frame::Rethrow { err } => Err(err),
             Frame::Assign { sym, define, env } => {
                 self.bind(sym, v, define, env)?;
                 Ok(Step::Return(Value::Unspecified))
@@ -3040,7 +3135,8 @@ impl Vm {
                 return Err(self.err("dynamic-wind: expects before, thunk and after"));
             };
             let (before, thunk, after) = (*before, *thunk, *after);
-            self.push(Frame::Wind { after });
+            let param_depth = self.param_bindings.len();
+            self.push(Frame::Wind { after, param_depth });
             self.push(Frame::WindBody { thunk });
             return self.apply(before, Vec::new());
         }
@@ -3085,10 +3181,9 @@ impl Vm {
                 unreachable!("found a ContMark")
             };
             // Escaping through a `dynamic-wind` must run its `after`, which
-            // is most of what `dynamic-wind` is *for*.
-            let step = self.unwind_to(at, v);
-            self.restore_params(param_depth);
-            return Ok(step);
+            // is most of what `dynamic-wind` is *for*. The mark's parameter
+            // depth is restored once the afters have run.
+            return Ok(self.unwind_to(at, v, param_depth));
         }
         // `(call-with-values producer consumer)`: apply the producer with no
         // arguments, then hand whatever it produced to the consumer. It has

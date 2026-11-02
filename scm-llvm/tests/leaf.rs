@@ -320,3 +320,21 @@ fn a_handle_is_small_and_describes_itself() {
     assert_eq!(f.call(&[0.5, 0.5]), None, "the wrong arity is None, not UB");
     assert_eq!(f.call3(&[0.5]), None, "the wrong shape is None, not UB");
 }
+
+/// Unary minus is negation in the leaf compiler as in the VM: `(- x)` of
+/// `0.0` is `-0.0` (2026-11-01, when the VM's `0 - x` was found and fixed;
+/// the leaf compiler already emitted `fneg`, and this pins it).
+#[test]
+fn unary_minus_keeps_the_sign_of_zero() {
+    let mut vm = Vm::new();
+    vm.eval_str("(define (neg x) (- x)) (define (inv-neg x) (/ 1.0 (- x)))").unwrap();
+    let neg = compile(&mut vm, "neg", Shape::Scalar).unwrap();
+    let inv = compile(&mut vm, "inv-neg", Shape::Scalar).unwrap();
+    let z = neg.call(&[0.0]).unwrap();
+    assert!(z == 0.0 && z.is_sign_negative(), "(- 0.0) => {z}");
+    assert!(neg.call(&[-0.0]).unwrap().is_sign_positive());
+    assert_eq!(inv.call(&[0.0]), Some(f64::NEG_INFINITY));
+    // And T0/T1 agree on the bits.
+    let t = vm.eval_str("(neg 0.0)").unwrap();
+    assert!(matches!(t, Value::Flonum(x) if x.to_bits() == z.to_bits()), "{t:?}");
+}

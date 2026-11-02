@@ -43,6 +43,10 @@ const PROGRAMS: &[&str] = &[
     "(define (deep n) (if (= n 0) 0 (+ 1 (deep (- n 1))))) (deep 3000)",
     "(let loop ([i 0] [s 0]) (if (= i 100) s (loop (+ i 1) (+ s (string->number (number->string i))))))",
     "(let loop ([i 1] [s 0]) (if (> i 60) s (loop (+ i 1) (+ s (expt 2 (modulo i 50))))))",
+    // Unary minus is negation: the sign of zero survives (2026-11-01).
+    "(define (neg x) (- x)) (let loop ([i 0] [acc '()]) (if (= i 50) (list (car acc) (/ 1 (neg 0.0)) (neg 0) (eqv? (neg 0.0) -0.0)) (loop (+ i 1) (cons (neg 0.0) acc))))",
+    // A caught error leaving nested winds runs both afters, innermost first.
+    "(define n '()) (define (f x) (dynamic-wind (lambda () #f) (lambda () (dynamic-wind (lambda () #f) (lambda () (if (odd? x) (car '()) x)) (lambda () (set! n (cons 'in n))))) (lambda () (set! n (cons 'out n))))) (let loop ([i 0] [s 0]) (if (= i 40) (list s (length n) (list-tail n 76)) (loop (+ i 1) (+ s (guard (e (#t 0)) (f i)))))))",
 ];
 
 #[test]
@@ -142,4 +146,31 @@ fn a_tail_loop_in_native_code_keeps_the_stack_flat_and_is_interruptible() {
     vm.set_fuel(Some(100));
     let r = vm.eval_str("(loop 0)");
     assert!(matches!(r, Err(scm::VmError::OutOfFuel)), "{r:?}");
+}
+
+/// An error nothing catches still runs the `after` thunks it leaves, on its
+/// way to the host -- from compiled code as from T1 (2026-11-01).
+#[test]
+fn t2_runs_after_thunks_on_an_uncaught_error() {
+    let mut want = None;
+    for mut vm in [Vm::new(), t2()] {
+        vm.eval_str(
+            "(define log '())
+             (define (f x)
+               (dynamic-wind (lambda () #f)
+                 (lambda () (dynamic-wind (lambda () #f)
+                                          (lambda () (if (= x 30) (error \"boom\" x) x))
+                                          (lambda () (set! log (cons 'in log)))))
+                 (lambda () (set! log (cons 'out log)))))",
+        )
+        .unwrap();
+        let e = vm.eval_str("(let loop ([i 0]) (f i) (loop (+ i 1)))").unwrap_err();
+        assert!(format!("{e}").contains("boom"), "{e}");
+        let got = show(&mut vm, "(list (length log) (car log) (cadr log))");
+        assert_eq!(got, "(62 out in)");
+        match &want {
+            None => want = Some(got),
+            Some(w) => assert_eq!(&got, w),
+        }
+    }
 }

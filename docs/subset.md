@@ -49,6 +49,35 @@ ports, `eval` with `interaction-environment`, `call/cc` within the limit
 below, and the full character, string, vector, bytevector and list
 surfaces.
 
+### Leaving a `dynamic-wind`
+
+**Every exit from a `dynamic-wind`'s extent runs its `after` thunk**:
+a normal return, an escape continuation, an error a `guard` catches, and
+**an error nothing catches**, which leaves the extent on its way to the
+host. Pending afters run innermost first, each in the dynamic environment
+of its own `dynamic-wind` call (a `parameterize` inside the body is undone
+first), and the error then reaches `Interp::eval`, `Interp::call` or the
+Rust caller of a nested evaluation unchanged — same message, same raised
+object, same backtrace. Where R7RS is silent, scm decides:
+
+- **An `after` that raises replaces the error.** The remaining, outer
+  afters still run; the host sees the later error.
+- **A host stop runs no afters.** Interrupt, out-of-fuel and the heap cap
+  are not errors a script can see, and an `after` is arbitrary code that
+  could loop or allocate as well as the body could, so they propagate at
+  once with every pending `after` unrun. A host that cancels a script owns
+  the cleanup of whatever the script was holding.
+- **The break REPL inspects first.** A break handler runs at the raise point
+  with every frame still live, and the afters run only when the break is
+  aborted; a break that returns a value resumes as if nothing had failed.
+
+### The sign of zero
+
+Inexact arithmetic is IEEE 754 and keeps the sign of zero. **`(- x)` is
+negation, not `(- 0 x)`**: `(- 0.0)` is `-0.0`, so `(/ 1 (- 0.0))` is
+`-inf.0` and `(eqv? (- 0.0) -0.0)` is `#t`. `(+ x)` is `x`, so `(+ -0.0)`
+is `-0.0`. An exact zero has no sign: `(- 0)` is `0`.
+
 ## The feature identifiers
 
 `(features)` is the machine-readable half of this document and is kept

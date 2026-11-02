@@ -441,7 +441,8 @@ impl Vm {
 /// - `+ - *`: two fixnums by checked arithmetic (overflow -> `None`: the
 ///   primitive widens to a bignum); a fixnum and a flonum, or two flonums,
 ///   as the primitive's float fold does -- each operand `as f64`, in order.
-/// - unary `-`: `0 - x`, the fold with identity 0, so `(- 0.0)` is `0.0`.
+/// - unary `-`: negation, so `(- 0.0)` is `-0.0` (not `0 - x`, which
+///   loses the sign of zero); a fixnum is `0 - x`, checked.
 /// - `/`: only with a flonum operand (the float fold); two fixnums have the
 ///   exact-division and exact-zero rules, which are the primitive's.
 /// - comparisons: two fixnums, or two flonums (a NaN compares false); a
@@ -477,7 +478,7 @@ fn arith_fast(op: crate::code::ArithOp, a: Value, b: Value) -> Option<Value> {
         }
         A::Neg => match a {
             Value::Fixnum(x) => 0i64.checked_sub(x).map(Value::Fixnum),
-            Value::Flonum(x) => Some(Value::Flonum(0.0 - x)),
+            Value::Flonum(x) => Some(Value::Flonum(-x)),
             _ => None,
         },
         A::Div => {

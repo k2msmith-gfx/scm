@@ -239,11 +239,23 @@ fn arith(
 }
 
 fn add(e: &mut Engine, a: &[Value]) -> PResult {
+    // `(+ x)` is `x`, not `0 + x`: for a flonum the two differ in the sign
+    // of zero, and `(+ -0.0)` must stay `-0.0`.
+    if let [Value::Flonum(x)] = a {
+        return Ok(Value::Flonum(*x));
+    }
     arith("+", e, a, 0, i64::checked_add, BigInt::add, |x, y| x + y)
 }
 fn sub(e: &mut Engine, a: &[Value]) -> PResult {
     if a.is_empty() {
         return Err(err("-: needs at least one argument"));
+    }
+    // `(- x)` is NEGATION, not `0 - x`: IEEE `0.0 - 0.0` is `+0.0`, so the
+    // fold with identity 0 answered `(- 0.0)` => `0.0` where R7RS and IEEE
+    // want `-0.0` (and `(/ 1 (- 0.0))` => `-inf.0`). Exact `(- 0)` is
+    // still the fold's `0`: an exact zero has no sign.
+    if let [Value::Flonum(x)] = a {
+        return Ok(Value::Flonum(-*x));
     }
     arith("-", e, a, 0, i64::checked_sub, BigInt::sub, |x, y| x - y)
 }
