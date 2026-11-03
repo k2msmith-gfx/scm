@@ -21,13 +21,19 @@ use std::path::{Path, PathBuf};
 
 use crate::text::Doc;
 
-/// Where a name is defined, already in the editor's coordinates.
+/// Where a name is defined, in both of an editor's coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Site {
     pub uri: String,
+    /// 0-based.
     pub line: u32,
+    /// LSP's column: UTF-16 code units from the line's start.
     pub character: u32,
     pub end_character: u32,
+    /// The same column in CHARACTERS, for an editor that is not LSP -- the
+    /// index keeps no text, so it cannot be worked out from `character`
+    /// afterwards.
+    pub column: u32,
     /// Which `define…` bound it, for a workspace-symbol listing.
     pub form: String,
     pub detail: Option<String>,
@@ -99,6 +105,7 @@ impl Index {
             .map(|d| {
                 let (line, character) = doc.position(d.name_at);
                 let (_, end_character) = doc.position(d.name_at + d.name.chars().count());
+                let column = doc.column(d.name_at);
                 (
                     d.name,
                     Site {
@@ -106,6 +113,7 @@ impl Index {
                         line,
                         character,
                         end_character,
+                        column,
                         form: d.form,
                         detail: d.detail,
                     },
@@ -246,6 +254,18 @@ mod tests {
         for name in ["point", "make-point", "point?", "point-x"] {
             assert_eq!(ix.sites(name).len(), 1, "{name} is not indexed");
         }
+    }
+
+    /// The two columns part company after a character outside the BMP: an
+    /// emoji is one character and two UTF-16 units, so `g` -- defined after
+    /// one on the same line -- is a column further on for LSP than for an
+    /// editor counting characters.
+    #[test]
+    fn a_site_carries_its_column_in_characters_and_in_utf16() {
+        let mut ix = Index::default();
+        ix.update("file:///e.scm", "(define (f) \"\u{1F600}\") (define (g) 1)\n");
+        let g = &ix.sites("g")[0];
+        assert_eq!((g.line, g.column, g.character), (0, 26, 27));
     }
 
     #[test]

@@ -42,7 +42,7 @@ run a scene's side effects on every keystroke.
 
 An editor's buffer is **unparseable most of the time**: every half-typed
 form is an incomplete datum. A reader-based outline would blink out on the
-keystroke after `(define (`, so `text.rs` lexes instead, and the outline of
+keystroke after `(define (`, so `scm-text`'s `text.rs` lexes instead, and the outline of
 a file being written still lists the definition being written. `imenu` has
 always worked this way.
 
@@ -151,9 +151,20 @@ characters would put the cursor in the wrong place on the first line
 holding an emoji — the test uses one, with a `λ` beside it, since `λ` is
 one unit and 🙂 is two.
 
-## The dependency
+An index `Site` carries the column BOTH ways — `character` in UTF-16 for
+this server, `column` in characters for an editor that is not LSP — because
+the index keeps no text from which to convert one into the other later.
 
-`serde_json`, and it is in this crate rather than `scm-cli` deliberately:
+## The dependencies
+
+**`scm-text`**, the token scan (`text.rs`) and the definition index
+(`index.rs`). They were modules of this crate until 2026-11-02, when ray's
+modeler wanted go-to-definition in its own editor pane: that pane is inside
+the session already, so it links the index rather than talking to a language
+server, and the two files moved to a library with no dependencies at all.
+Nothing in them changed but a `column` on `Site` and `Doc::is_empty`.
+
+**`serde_json`**, and it is in this crate rather than `scm-cli` deliberately:
 the `scm` binary has a 10 ms boot budget with a test enforcing it (§7, S10)
 and a `--batch` sweep pays it per scene, while an editor server lives for
 hours. The embeddable `scm` crate keeps its no-dependencies rule either

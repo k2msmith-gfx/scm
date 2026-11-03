@@ -1,0 +1,13 @@
+[package]
+name = "scm-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scheme source as an editor sees it: a token scan that survives a half-typed buffer, and a definition index across files"
+
+# No dependencies, and in particular not the interpreter: this answers
+# questions about TEXT -- what is defined where, what is around the cursor --
+# which a buffer can be asked while it is unparseable. `scm-lsp` is one
+# client; ray's modeler links it for its editor pane's go-to-definition,
+# which is why it is a library and not a module of the language server.
+[dependencies]

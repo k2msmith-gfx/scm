@@ -352,8 +352,13 @@ name = "scm-lsp"
 version = "0.0.1"
 dependencies = [
  "schemers",
+ "scm-text",
  "serde_json",
 ]
+
+[[package]]
+name = "scm-text"
+version = "0.0.1"
 
 [[package]]
 name = "semver"

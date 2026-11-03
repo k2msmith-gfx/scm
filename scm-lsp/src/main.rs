@@ -19,10 +19,8 @@
 //! boot budget with a test enforcing it, and an editor server that lives
 //! for hours should not make a `--batch` sweep pay for a JSON parser.
 
-mod index;
 mod session;
-mod text;
-use text as scm_text;
+use scm_text::{index, text};
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};

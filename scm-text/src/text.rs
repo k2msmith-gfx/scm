@@ -88,6 +88,10 @@ impl Doc {
         self.chars.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.chars.is_empty()
+    }
+
     /// A char offset as an LSP position: a 0-based line, and **UTF-16 code
     /// units** from the line's start. An editor that counted characters
     /// would put the cursor in the wrong place the moment a line held an
@@ -103,6 +107,17 @@ impl Doc {
             .map(|c| c.len_utf16())
             .sum();
         (line as u32, col as u32)
+    }
+
+    /// A char offset's column in CHARACTERS from its line's start -- the
+    /// column an editor that is not LSP counts.
+    pub fn column(&self, offset: usize) -> u32 {
+        let offset = offset.min(self.chars.len());
+        let line = match self.line_starts.binary_search(&offset) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        (offset - self.line_starts[line]) as u32
     }
 
     /// The inverse. A position past the end of a line clamps to its end,
@@ -241,11 +256,13 @@ impl Doc {
     /// case above misses every one of them -- which made `point-x`
     /// unreachable by go-to-definition in the file that defines it.
     ///
-    ///     (define-record-type point
-    ///       (make-point x y)        ; constructor
-    ///       point?                  ; predicate
-    ///       (x point-x)             ; accessor
-    ///       (y point-y set-y!))     ; accessor and modifier
+    /// ```text
+    /// (define-record-type point
+    ///   (make-point x y)        ; constructor
+    ///   point?                  ; predicate
+    ///   (x point-x)             ; accessor
+    ///   (y point-y set-y!))     ; accessor and modifier
+    /// ```
     fn record_type_names(&self, open: usize, end: usize) -> Vec<Definition> {
         let kids = self.children(open);
         let mut out = Vec::new();
