@@ -174,9 +174,7 @@
         ((_ v (p ... . rest) sk fk) (%mell v p rest sk fk))
         ((_ v (p ___ . rest) sk fk) (%mell v p rest sk fk))
         ((_ v #(p eee) sk fk)
-         (if (vector? v)
-             (let ((as-list (vector->list v))) (%m as-list (p eee) sk fk))
-             fk))
+         (%mvec v (p eee) (p eee) (0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16) sk fk))
         ((_ v () sk fk) (if (null? v) sk fk))
         ((_ v (p . q) sk fk)
          (if (pair? v)
@@ -187,6 +185,36 @@
          (%if-id leaf
                  (%if-wild leaf sk (let ((leaf v)) sk))
                  (if (equal? v leaf) sk fk)))))
+
+    ;; A vector pattern with no ellipsis is matched in place: the length
+    ;; checked once, then each element read with `vector-ref`. `%mvec` counts
+    ;; the patterns off a list of indices, so the count it ends on IS the
+    ;; length. One with an ellipsis, or longer than the list, goes through
+    ;; `vector->list` and the list rules -- which every vector pattern did
+    ;; before, at 3-4 times the cost of the reads it stands for.
+    (define-syntax %mvec
+      (syntax-rules eee (... ___)
+        ((_ v ps (... . r) idx sk fk) (%mvec-list v ps sk fk))
+        ((_ v ps (___ . r) idx sk fk) (%mvec-list v ps sk fk))
+        ((_ v ps () (n . idx) sk fk)
+         (if (and (vector? v) (= (vector-length v) n))
+             (%mvec-at v ps (0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16) sk fk)
+             fk))
+        ((_ v ps (p . r) (i . idx) sk fk) (%mvec v ps r idx sk fk))
+        ((_ v ps (p . r) () sk fk) (%mvec-list v ps sk fk))))
+
+    (define-syntax %mvec-at
+      (syntax-rules ()
+        ((_ v () idx sk fk) sk)
+        ((_ v (p . r) (i . idx) sk fk)
+         (let ((elt (vector-ref v i))) (%m elt p (%mvec-at v r idx sk fk) fk)))))
+
+    (define-syntax %mvec-list
+      (syntax-rules ()
+        ((_ v ps sk fk)
+         (if (vector? v)
+             (let ((as-list (vector->list v))) (%m as-list ps sk fk))
+             fk))))
 
     ;; A quasipattern is data except where it is unquoted.
     (define-syntax %mq

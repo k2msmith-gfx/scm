@@ -229,3 +229,30 @@ fn t0_reuses_a_local_expansion_between_collections() {
     // mints a match's ~50 again only after a collection has emptied it.
     assert!(minted <= 100 * (gcs as u32 + 1), "{minted} names in 200 calls, {gcs} collections");
 }
+
+/// `(srfi 204)` matches a vector pattern without an ellipsis in place --
+/// one length check, then `vector-ref`s -- so it allocates nothing beyond
+/// what any clause does (the failure thunk for the next clause, and its
+/// frame), where converting the vector to a list made a pair per element.
+#[test]
+fn a_fixed_vector_pattern_allocates_no_list() {
+    let mut vm = Vm::with_tier(Tier::T1);
+    eval(&mut vm, "(import (srfi 204))");
+    eval(&mut vm, "(define (f v) (match v (#(a b c d) (+ a b c d)) (#(a b ...) b) (_ 0)))");
+    eval(&mut vm, "(define (g v) (match v ((? vector?) 10) (#(a b ...) b) (_ 0)))");
+    let v = vm.eval_str("#(1 2 3 4)").unwrap();
+    let mut per_call = Vec::new();
+    for name in ["f", "g"] {
+        let p = global(&mut vm, name);
+        vm.call_procedure(p, vec![v]).unwrap();
+        let before = vm.engine.allocations();
+        for _ in 0..1_000 {
+            assert_eq!(vm.call_procedure(p, vec![v]).unwrap(), Value::Fixnum(10));
+        }
+        per_call.push((vm.engine.allocations() - before) / 1_000);
+    }
+    assert_eq!(per_call[0], per_call[1], "#(a b c d) allocated more than a predicate pattern");
+    // The ellipsis pattern still takes the list path, and still works.
+    assert_eq!(eval(&mut vm, "(f #(1 2 3))"), "(2 3)");
+    assert_eq!(eval(&mut vm, "(f '(1 2 3 4))"), "0");
+}

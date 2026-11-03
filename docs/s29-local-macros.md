@@ -148,13 +148,22 @@ after is at 100,000.
 | `(match x (:a 1) (_ 3))` | 34.7 | 0.179 | 4.8 |
 | `(match x (:a 1) (:b 2) (_ 3))` | 48.8 | 0.203 | 5.2 |
 | four `vector-ref`s | 0.114 | 0.125 | 2.0 |
-| `(match v (#(a b c d) …))` | 193 | 0.448 | 25.8 |
+| `(match v (#(a b c d) …))` | 193 | 0.448, then 0.268 | 25.8 |
 | `car`/`cadr` with checks | 0.148 | 0.155 | 4.3 |
 | `(match l ((a b . _) …) (_ 0))` | 156 | 0.221 | 23.0 |
 
-On T1 a match is within 2× of the hand-written test except the vector
-pattern, which `204.sld` matches by converting the vector to a list
-(3.6×; see below).
+On T1 a match is within 2× of the hand-written test (the hand-written
+code checks nothing; the match checks types and lengths). The residue is
+mostly `204.sld`'s failure thunk: each clause with a successor binds
+`(lambda () <next clauses>)`, a closure and its frame per call.
+
+The vector pattern was still 3.6× after the VM fix because `204.sld`
+matched `#(p …)` by converting the vector to a list — four pairs per call.
+A second commit matches a vector pattern without an ellipsis in place
+(`%mvec`: one `vector-length` check, then `vector-ref`s), 0.448 → 0.268
+µs; one with an ellipsis, or more than 16 elements, keeps the list path.
+`a_fixed_vector_pattern_allocates_no_list` pins it (6 objects a call
+before, 2 after — the same as a predicate pattern).
 
 ## Not done
 

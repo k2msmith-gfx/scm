@@ -1124,6 +1124,17 @@ expander change.
   data. The SRFI forbids two ellipses in one list, which is exactly what makes
   counting sufficient.
 
+### What a match costs (S29)
+
+A `match` in a procedure costs about what the `cond` or `vector-ref`s it
+stands for do — within 2× on T1 — since S29 made the VM expand this
+library's internal macros once per call site and compile them
+([s29-local-macros.md](s29-local-macros.md)). One change here came with
+it: a vector pattern with no ellipsis is matched in place (`%mvec`, a
+length check and `vector-ref`s), where it used to be converted with
+`vector->list` and matched as a list, a pair per element per call. With
+an ellipsis, or past 16 elements, it still takes the list path.
+
 ## What is still absent
 
 The control and testing SRFIs: 34/35, 41, 45, 113, 117, 121, 64, 19, 48,
