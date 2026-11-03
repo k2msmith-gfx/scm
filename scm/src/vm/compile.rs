@@ -20,7 +20,8 @@ use std::rc::Rc;
 
 use super::{Formals, Vm};
 use crate::code::{ArithOp, Code, Lambda, Op};
-use crate::heap::Obj;
+use crate::heap::{AliasEnv, Obj};
+use crate::syntax::SyntaxRules;
 use crate::value::{ObjRef, SymId, Value};
 
 /// Why the compiler would not take a form. Not an error: T0 gets the form.
@@ -49,7 +50,17 @@ enum Var {
     /// A slot of a permanent frame -- a library's -- by address.
     Slot { frame: ObjRef, idx: u16 },
     Global(SymId, SymId),
+    /// A macro bound in a scope: a `let-syntax`/`letrec-syntax` this unit
+    /// (or one it is nested in) compiled -- `scoped`, whose renames name
+    /// the binding form ([`AliasEnv::Scope`]) -- or a finished library's
+    /// own, whose renames name the library frame. A use is expanded here,
+    /// at compile time; any other use of the name declines.
+    Macro { rules: Rc<SyntaxRules>, scoped: bool },
 }
+
+/// The macros a `let-syntax`/`letrec-syntax` binds, in binding order: the
+/// first names of the scope at the index they are recorded with.
+type SyntaxScope = Rc<[Rc<SyntaxRules>]>;
 
 /// S14. What a compile-time scope is at run time.
 #[derive(Clone)]
@@ -91,6 +102,7 @@ struct Capture {
 #[derive(Clone)]
 struct Outer {
     scopes: Vec<Vec<SymId>>,
+    syntax: Vec<(usize, SyntaxScope)>,
     defs_from: Vec<usize>,
     kinds: Vec<Kind>,
     runtime: Option<ObjRef>,
@@ -103,6 +115,9 @@ struct Cx<'a> {
     /// runtime environment frame; a `Flat` one becomes frame slots.
     scopes: Vec<Vec<SymId>>,
     kinds: Vec<Kind>,
+    /// Which scopes are a `let-syntax`/`letrec-syntax`'s, innermost last:
+    /// `(index into scopes, its macros)`.
+    syntax: Vec<(usize, SyntaxScope)>,
     cap: Rc<Capture>,
     /// This unit's id, and the ids of its scopes the capture pass forced
     /// onto the heap. Scope ids count up in the order scopes open, which a
@@ -199,7 +214,14 @@ impl Vm {
 
 impl Outer {
     fn root(runtime: Option<ObjRef>) -> Self {
-        Outer { scopes: Vec::new(), defs_from: Vec::new(), kinds: Vec::new(), runtime, cap: Rc::new(Capture::default()) }
+        Outer {
+            scopes: Vec::new(),
+            syntax: Vec::new(),
+            defs_from: Vec::new(),
+            kinds: Vec::new(),
+            runtime,
+            cap: Rc::new(Capture::default()),
+        }
     }
 }
 
@@ -238,6 +260,7 @@ impl<'a> Cx<'a> {
             vm,
             scopes: outer.scopes.clone(),
             kinds: outer.kinds.clone(),
+            syntax: outer.syntax.clone(),
             cap: Rc::clone(&outer.cap),
             unit,
             force_heap,
@@ -266,6 +289,7 @@ impl<'a> Cx<'a> {
     fn outer(&self) -> Outer {
         Outer {
             scopes: self.scopes.clone(),
+            syntax: self.syntax.clone(),
             defs_from: self.defs_from.clone(),
             kinds: self.kinds.clone(),
             runtime: self.runtime,
@@ -346,14 +370,75 @@ impl<'a> Cx<'a> {
 
     // ---- resolution ------------------------------------------------------
 
-    /// T0's `lookup_exact` over the chain, then its global rules. Only a
-    /// heap scope is a link of the runtime chain, so only a heap scope adds
-    /// to the depth.
+    /// T0's `lookup` -- the chain for the name as written, then a global
+    /// of that name, then a renamed name where its macro was defined, then
+    /// the global of the hygiene-resolved name.
     fn resolve(&self, sym: SymId) -> R<Var> {
-        let mut depth: usize = 0;
-        for ((scope, &from), kind) in self.scopes.iter().zip(&self.defs_from).zip(&self.kinds).rev() {
+        if let Some(v) = self.resolve_exact(sym, self.scopes.len())? {
+            return Ok(v);
+        }
+        let resolved = self.vm.engine.resolve(sym);
+        if resolved == sym || self.vm.global(sym).is_some() {
+            return Ok(Var::Global(sym, resolved));
+        }
+        match self.vm.engine.alias_env(sym) {
+            // A template-introduced name from a macro defined in a *local*
+            // scope means what it meant there (T0's `alias_env` step). A
+            // library's frame is such a scope and it is permanent, so a
+            // reference into it is a direct slot read, and once the library
+            // has loaded a name absent from it is absent for good and means
+            // its global. Any other frame has no address this compiler can
+            // give it, and T0 keeps those closures -- the suite's "forward
+            // hygienic refs" case.
+            Some(AliasEnv::Frame(def)) => {
+                if let Obj::Env { parent: None, slots } = self.vm.engine.obj(def) {
+                    if let Some(idx) = slots.iter().rposition(|(s, _)| self.vm.engine.resolve(*s) == resolved) {
+                        if let Value::Obj(m) = slots[idx].1
+                            && let Obj::Macro(rules) = self.vm.engine.obj(m)
+                        {
+                            if self.vm.sealed_library_frame(def) {
+                                return Ok(Var::Macro { rules: Rc::clone(rules), scoped: false });
+                            }
+                            return decline("a local macro");
+                        }
+                        return Ok(Var::Slot { frame: def, idx: narrow(idx)? });
+                    }
+                    if self.vm.sealed_library_frame(def) {
+                        return Ok(Var::Global(sym, resolved));
+                    }
+                }
+                decline("a reference through a locally defined macro")
+            }
+            // A `let-syntax`/`letrec-syntax` macro's: what the name means
+            // at that form, which is the scopes outside it (or, recursive,
+            // up to and including it) -- however many scopes the use is
+            // nested in since.
+            Some(AliasEnv::Scope { origin, recursive }) => {
+                let Some(k) = self.syntax_scope(origin) else {
+                    return decline("a reference through a locally defined macro");
+                };
+                self.capture_scope(k);
+                let top = if recursive { k + 1 } else { k };
+                Ok(self.resolve_exact(resolved, top)?.unwrap_or(Var::Global(sym, resolved)))
+            }
+            Some(AliasEnv::Global) | None => Ok(Var::Global(sym, resolved)),
+        }
+    }
+
+    /// `sym`, exactly as written, in `scopes[..top]` and then the runtime
+    /// chain beneath them -- T0's `lookup_exact` without the globals. The
+    /// depth counts every heap scope above `top` too, since the code runs
+    /// at the innermost one.
+    fn resolve_exact(&self, sym: SymId, top: usize) -> R<Option<Var>> {
+        let mut depth: usize = self.kinds[top..].iter().filter(|k| matches!(k, Kind::Heap)).count();
+        for i in (0..top).rev() {
+            let (scope, from, kind) = (&self.scopes[i], self.defs_from[i], &self.kinds[i]);
             if let Some(idx) = scope.iter().rposition(|&s| s == sym) {
-                return Ok(match kind {
+                if let Some(rules) = self.syntax_macro(i, idx) {
+                    self.capture_scope(i);
+                    return Ok(Some(Var::Macro { rules, scoped: true }));
+                }
+                return Ok(Some(match kind {
                     Kind::Heap => Var::Local { depth: narrow(depth)?, idx: narrow(idx)?, checked: idx >= from },
                     Kind::Flat { slots, unit, .. } if *unit == self.unit => {
                         Var::Flat { slot: slots[idx], checked: idx >= from }
@@ -367,7 +452,7 @@ impl<'a> Cx<'a> {
                         self.cap.captured.borrow_mut().insert((*unit, *id));
                         Var::Elsewhere
                     }
-                });
+                }));
             }
             if matches!(kind, Kind::Heap) {
                 depth += 1;
@@ -380,46 +465,62 @@ impl<'a> Cx<'a> {
             };
             if let Some(idx) = slots.iter().rposition(|(s, _)| *s == sym) {
                 if let Value::Obj(m) = slots[idx].1
-                    && matches!(self.vm.engine.obj(m), Obj::Macro(_))
+                    && let Obj::Macro(rules) = self.vm.engine.obj(m)
                 {
+                    // A finished library's macro is one object for good;
+                    // any other frame's is made per evaluation.
+                    if parent.is_none() && self.vm.sealed_library_frame(r) {
+                        return Ok(Some(Var::Macro { rules: Rc::clone(rules), scoped: false }));
+                    }
                     return decline("a local macro");
                 }
                 // A frame that already exists: whether this slot is a
                 // define's cannot be told, so it is read checked.
-                return Ok(Var::Local { depth: narrow(depth)?, idx: narrow(idx)?, checked: true });
+                return Ok(Some(Var::Local { depth: narrow(depth)?, idx: narrow(idx)?, checked: true }));
             }
             depth += 1;
             cur = *parent;
         }
-        let resolved = self.vm.engine.resolve(sym);
-        // A template-introduced name from a macro defined in a *local*
-        // scope means what it meant there (T0's `alias_env` step). A
-        // library's frame is such a scope and it is permanent, so a
-        // reference into it is a direct slot read; any other local scope
-        // has no address this compiler can give it, and T0 keeps those
-        // closures -- the suite's "forward hygienic refs" case.
-        if resolved != sym
-            && let Some(Some(def)) = self.vm.engine.alias_env(sym)
+        Ok(None)
+    }
+
+    /// The macro at `idx` of scope `i`, when that scope is a
+    /// `let-syntax`'s and the slot is one of its macros.
+    fn syntax_macro(&self, i: usize, idx: usize) -> Option<Rc<SyntaxRules>> {
+        let (_, macros) = self.syntax.iter().rev().find(|(at, _)| *at == i)?;
+        macros.get(idx).cloned()
+    }
+
+    /// The innermost scope whose `let-syntax` made the rules `origin`.
+    fn syntax_scope(&self, origin: u64) -> Option<usize> {
+        self.syntax
+            .iter()
+            .rev()
+            .find(|(_, macros)| macros.iter().any(|m| m.origin() == Some(origin)))
+            .map(|&(at, _)| at)
+    }
+
+    /// Something in this unit means a name of scope `i`'s through its
+    /// macros. If `i` is an enclosing unit's flat scope, it has to exist at
+    /// run time: a closure compiled again from its environment (after a
+    /// new macro) or handed to T0 finds the macro by looking there.
+    fn capture_scope(&self, i: usize) {
+        if let Kind::Flat { unit, id, .. } = &self.kinds[i]
+            && *unit != self.unit
         {
-            if let Obj::Env { parent: None, slots } = self.vm.engine.obj(def)
-                && let Some(idx) = slots.iter().rposition(|(s, _)| self.vm.engine.resolve(*s) == resolved)
-            {
-                if let Value::Obj(m) = slots[idx].1
-                    && matches!(self.vm.engine.obj(m), Obj::Macro(_))
-                {
-                    return decline("a local macro");
-                }
-                return Ok(Var::Slot { frame: def, idx: narrow(idx)? });
-            }
-            return decline("a reference through a locally defined macro");
+            self.cap.captured.borrow_mut().insert((*unit, *id));
         }
-        Ok(Var::Global(sym, resolved))
     }
 
     fn is_local(&self, sym: SymId) -> R<bool> {
         Ok(matches!(
             self.resolve(sym)?,
-            Var::Local { .. } | Var::Slot { .. } | Var::Flat { .. } | Var::Loop { .. } | Var::Elsewhere
+            Var::Local { .. }
+                | Var::Slot { .. }
+                | Var::Flat { .. }
+                | Var::Loop { .. }
+                | Var::Elsewhere
+                | Var::Macro { .. }
         ))
     }
 
@@ -440,8 +541,23 @@ impl<'a> Cx<'a> {
             let Obj::Pair(Value::Symbol(head), _) = *self.vm.engine.obj(r) else {
                 return Ok(expr);
             };
-            if self.is_local(head)? {
-                return Ok(expr);
+            match self.resolve(head)? {
+                Var::Macro { rules, scoped } => {
+                    let out = if scoped {
+                        rules.expand_scoped(&mut self.vm.engine, expr)
+                    } else {
+                        rules.expand(&mut self.vm.engine, expr)
+                    };
+                    match out {
+                        Ok(next) => {
+                            expr = next;
+                            continue;
+                        }
+                        Err(e) => return decline(format!("expansion failed: {e}")),
+                    }
+                }
+                Var::Global(..) => {}
+                _ => return Ok(expr),
             }
             match self.vm.expand_once(expr) {
                 Ok(Some(next)) => expr = next,
@@ -544,6 +660,8 @@ impl<'a> Cx<'a> {
                         let i = self.global_slot(s, r);
                         self.ops.push(Op::Global(i));
                     }
+                    // T0 answers the macro object itself; nothing should.
+                    Var::Macro { .. } => return decline("a local macro used as a value"),
                 }
                 Ok(())
             }
@@ -651,15 +769,10 @@ impl<'a> Cx<'a> {
                 return decline("a library form");
             }
             if resolved == s.let_syntax || resolved == s.letrec_syntax {
-                // Self-contained: T0 evaluates it here, in this
-                // environment, and this code resumes with the value. Not in
-                // tail position, though: a T0 sub-evaluation returns to this
-                // frame, which would make a tail call inside it grow the
-                // stack.
-                if tail {
-                    return decline("a local syntax form in tail position");
-                }
-                return self.interp(expr);
+                let recursive = resolved == s.letrec_syntax;
+                let Value::Obj(form) = expr else { return decline("let-syntax") };
+                let args = args.to_vec();
+                return self.let_syntax(form, &args, tail, recursive);
             }
         }
         // S14c: a call of a loop's name. In tail position of that loop (or
@@ -781,61 +894,9 @@ impl<'a> Cx<'a> {
         }
         match name {
             None => {
-                let mut frame = vars.clone();
                 let mut defs = Vec::new();
                 self.scan_defines(body, &mut defs)?;
-                frame.extend(defs);
-                let (id, flat) = self.open_scope(true);
-                if flat {
-                    // S14: the inits are on the stack; each pops into its
-                    // own slot, last first, and a define's slot starts
-                    // undefined -- explicitly, since a slot can be entered
-                    // again once loops are jumps.
-                    let mut slots = Vec::with_capacity(frame.len());
-                    for _ in &frame {
-                        slots.push(self.new_slot()?);
-                    }
-                    for &s in slots[..vars.len()].iter().rev() {
-                        self.ops.push(Op::SetArg(s));
-                    }
-                    for &s in &slots[vars.len()..] {
-                        self.konst(Value::Undefined);
-                        self.ops.push(Op::SetArg(s));
-                    }
-                    let start = self.here();
-                    self.scopes.push(frame.clone());
-                    self.defs_from.push(vars.len());
-                    self.kinds.push(Kind::Flat { slots: slots.clone(), unit: self.unit, id });
-                    let out = self.body(body, tail);
-                    self.scopes.pop();
-                    self.defs_from.pop();
-                    self.kinds.pop();
-                    out?;
-                    let end = self.here();
-                    for (&s, &n) in slots.iter().zip(&frame) {
-                        self.slot_names.push((s, n, start, end));
-                    }
-                    return Ok(());
-                }
-                let ni = self.names.len() as u32;
-                self.names.push(Rc::new(frame.clone()));
-                self.ops.push(Op::PushEnv { names: ni, ninit: vars.len() as u32 });
-                self.scopes.push(frame);
-                self.defs_from.push(vars.len());
-                self.kinds.push(Kind::Heap);
-                // Not loop-tail inside: a jump out would leave this frame
-                // on the chain.
-                let saved_lt = std::mem::take(&mut self.lt);
-                let out = self.body(body, tail);
-                self.lt = saved_lt;
-                self.scopes.pop();
-                self.defs_from.pop();
-                self.kinds.pop();
-                out?;
-                if !tail {
-                    self.ops.push(Op::PopEnv);
-                }
-                Ok(())
+                self.let_scope(vars, defs, body, tail, None)
             }
             Some(n) => {
                 // S14c: two scope ids either way, so a recompile sees the
@@ -886,6 +947,145 @@ impl<'a> Cx<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// An unnamed `let`'s scope -- or a `let-syntax`'s, with `syn` -- once
+    /// its inits are on the stack: `vars` and then the body's `defs`.
+    fn let_scope(
+        &mut self,
+        vars: Vec<SymId>,
+        defs: Vec<SymId>,
+        body: &[Value],
+        tail: bool,
+        syn: Option<SyntaxScope>,
+    ) -> R<()> {
+        let mut frame = vars.clone();
+        frame.extend(defs);
+        let (id, flat) = self.open_scope(true);
+        if flat {
+            // S14: the inits are on the stack; each pops into its
+            // own slot, last first, and a define's slot starts
+            // undefined -- explicitly, since a slot can be entered
+            // again once loops are jumps.
+            let mut slots = Vec::with_capacity(frame.len());
+            for _ in &frame {
+                slots.push(self.new_slot()?);
+            }
+            for &s in slots[..vars.len()].iter().rev() {
+                self.ops.push(Op::SetArg(s));
+            }
+            for &s in &slots[vars.len()..] {
+                self.konst(Value::Undefined);
+                self.ops.push(Op::SetArg(s));
+            }
+            let start = self.here();
+            self.push_syntax(&syn);
+            self.scopes.push(frame.clone());
+            self.defs_from.push(vars.len());
+            self.kinds.push(Kind::Flat { slots: slots.clone(), unit: self.unit, id });
+            let out = self.body(body, tail);
+            self.scopes.pop();
+            self.defs_from.pop();
+            self.kinds.pop();
+            self.pop_syntax(&syn);
+            out?;
+            let end = self.here();
+            for (&s, &n) in slots.iter().zip(&frame) {
+                self.slot_names.push((s, n, start, end));
+            }
+            return Ok(());
+        }
+        let ni = self.names.len() as u32;
+        self.names.push(Rc::new(frame.clone()));
+        self.ops.push(Op::PushEnv { names: ni, ninit: vars.len() as u32 });
+        self.push_syntax(&syn);
+        self.scopes.push(frame);
+        self.defs_from.push(vars.len());
+        self.kinds.push(Kind::Heap);
+        // Not loop-tail inside: a jump out would leave this frame
+        // on the chain.
+        let saved_lt = std::mem::take(&mut self.lt);
+        let out = self.body(body, tail);
+        self.lt = saved_lt;
+        self.scopes.pop();
+        self.defs_from.pop();
+        self.kinds.pop();
+        self.pop_syntax(&syn);
+        out?;
+        if !tail {
+            self.ops.push(Op::PopEnv);
+        }
+        Ok(())
+    }
+
+    fn push_syntax(&mut self, syn: &Option<SyntaxScope>) {
+        if let Some(m) = syn {
+            self.syntax.push((self.scopes.len(), Rc::clone(m)));
+        }
+    }
+
+    fn pop_syntax(&mut self, syn: &Option<SyntaxScope>) {
+        if syn.is_some() {
+            self.syntax.pop();
+        }
+    }
+
+    /// `let-syntax` and `letrec-syntax`, as a scope whose slots hold the
+    /// macro objects -- constants, made here once. Every use of a name in
+    /// it is expanded here, so at run time the slots are read only if
+    /// something hands the scope to T0 or recompiles a closure inside it
+    /// from its environment; either of those captures the scope, which
+    /// puts it on the heap where T0's lookup finds the macros by their
+    /// origin. Otherwise it is flat and costs a store per macro.
+    ///
+    /// A body with definitions declines: T0 puts them in the form's own
+    /// frame, and this would need the frame to hold them.
+    fn let_syntax(&mut self, form: ObjRef, args: &[Value], tail: bool, recursive: bool) -> R<()> {
+        let who = if recursive { "letrec-syntax" } else { "let-syntax" };
+        let Some((spec, body)) = args.split_first() else {
+            return decline(who);
+        };
+        if body.is_empty() {
+            return decline(who);
+        }
+        let mut names = Vec::new();
+        let mut macros = Vec::new();
+        for (i, b) in self.binding_items(*spec)?.into_iter().enumerate() {
+            match self.binding_items(b)?.as_slice() {
+                [Value::Symbol(n), rules] => {
+                    let parsed = self
+                        .vm
+                        .local_rules(form, i, *n, *rules, recursive)
+                        .map_err(|e| Decline(format!("{who}: {e}")))?;
+                    names.push(*n);
+                    macros.push(parsed);
+                }
+                _ => return decline(who),
+            }
+        }
+        let syn: SyntaxScope = macros.into();
+        // The body's definitions, found with the macros in scope, since a
+        // use of one may expand into a `define`.
+        let some = Some(Rc::clone(&syn));
+        self.push_syntax(&some);
+        self.scopes.push(names.clone());
+        self.defs_from.push(names.len());
+        self.kinds.push(Kind::Heap);
+        let mut defs = Vec::new();
+        let scanned = self.scan_defines(body, &mut defs);
+        self.scopes.pop();
+        self.defs_from.pop();
+        self.kinds.pop();
+        self.pop_syntax(&some);
+        scanned?;
+        if !defs.is_empty() {
+            return decline(format!("a definition in a {who} body"));
+        }
+        for rules in syn.iter() {
+            let m = self.vm.engine.alloc(Obj::Macro(Rc::clone(rules)));
+            self.konst(m);
+        }
+        self.let_scope(names, Vec::new(), body, tail, Some(syn))
     }
 
     /// S14c: a named `let` as a loop. The inits are on the stack; they pop
@@ -1115,7 +1315,15 @@ impl<'a> Cx<'a> {
                 self.ops.push(Op::DefineGlobal(i));
             }
         } else {
+            // T0's `bind` follows a renamed name only to a global, never
+            // into the frame a local macro was defined in.
+            if matches!(self.vm.engine.alias_env(sym), Some(AliasEnv::Scope { .. }))
+                && self.resolve_exact(sym, self.scopes.len())?.is_none()
+            {
+                return decline("set! of a name a local macro introduced");
+            }
             match self.resolve(sym)? {
+                Var::Macro { .. } => return decline("set! of a local macro"),
                 Var::Local { depth, idx, checked: false } => self.ops.push(Op::SetLocal { depth, idx }),
                 Var::Local { depth, idx, checked: true } => self.ops.push(Op::SetLocalDef { depth, idx, sym: sym.0 }),
                 Var::Flat { slot, checked: false } => self.ops.push(Op::SetArg(slot)),

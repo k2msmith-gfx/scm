@@ -37,18 +37,28 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::heap::{Engine, Obj};
+use crate::heap::{AliasEnv, Engine, Obj};
 use crate::value::{ObjRef, SymId, Value};
 
 #[derive(Debug)]
 pub struct SyntaxRules {
     pub name: SymId,
-    literals: Vec<SymId>,
+    literals: Rc<[SymId]>,
     ellipsis: SymId,
-    rules: Vec<(Value, Value)>,
+    rules: Rc<[(Value, Value)]>,
     /// The environment the macro was defined in. Template references resolve
     /// here, not at the call site.
     def_env: Option<ObjRef>,
+    /// Set for the rules of a `let-syntax`/`letrec-syntax` binding: which
+    /// parse they came from, and which of the two forms bound them. See
+    /// [`AliasEnv::Scope`].
+    origin: Option<(u64, bool)>,
+}
+
+/// The renames of one expansion, and what each one's alias points at.
+struct Renames {
+    map: HashMap<SymId, SymId>,
+    alias: AliasEnv,
 }
 
 #[derive(Clone, Debug)]
@@ -166,16 +176,61 @@ impl SyntaxRules {
         }
         Ok(SyntaxRules {
             name,
-            literals,
+            literals: literals.into(),
             ellipsis,
-            rules,
+            rules: rules.into(),
             def_env,
+            origin: None,
         })
+    }
+
+    /// These rules as a `let-syntax` (`recursive: false`) or
+    /// `letrec-syntax` binding's, made by the parse numbered `origin`.
+    pub fn with_origin(mut self, origin: u64, recursive: bool) -> SyntaxRules {
+        self.origin = Some((origin, recursive));
+        self
+    }
+
+    /// The same rules defined in `def_env`: one parse, many evaluations of
+    /// the binding form. Shares the patterns and templates.
+    pub fn with_def_env(&self, def_env: Option<ObjRef>) -> SyntaxRules {
+        SyntaxRules {
+            name: self.name,
+            literals: Rc::clone(&self.literals),
+            ellipsis: self.ellipsis,
+            rules: Rc::clone(&self.rules),
+            def_env,
+            origin: self.origin,
+        }
+    }
+
+    /// `Some(origin)` for a `let-syntax`/`letrec-syntax` binding's rules.
+    pub fn origin(&self) -> Option<u64> {
+        self.origin.map(|(o, _)| o)
+    }
+
+    /// Expand with the renames pointing at the binding form, not at
+    /// `def_env`: [`AliasEnv::Scope`]. Only for rules that have an origin;
+    /// the result is then the same for every evaluation of the binding
+    /// form, which is what lets a call site's expansion be cached.
+    pub fn expand_scoped(&self, e: &mut Engine, form: Value) -> SynResult<Value> {
+        let Some((origin, recursive)) = self.origin else {
+            return self.expand(e, form);
+        };
+        self.expand_with(e, form, AliasEnv::Scope { origin, recursive })
     }
 
     /// Expand a use of this macro. `form` is the whole call.
     pub fn expand(&self, e: &mut Engine, form: Value) -> SynResult<Value> {
-        for (pat, tmpl) in &self.rules {
+        let alias = match self.def_env {
+            Some(r) => AliasEnv::Frame(r),
+            None => AliasEnv::Global,
+        };
+        self.expand_with(e, form, alias)
+    }
+
+    fn expand_with(&self, e: &mut Engine, form: Value, alias: AliasEnv) -> SynResult<Value> {
+        for (pat, tmpl) in self.rules.iter() {
             let mut b = Bindings::new();
             // The pattern's own head is ignored -- it names the macro, and
             // R7RS says it is not a pattern variable.
@@ -193,7 +248,7 @@ impl SyntaxRules {
             let pat_rest = (pat_items[1..].to_vec(), pat_tail);
             let form_rest = (form_items[1..].to_vec(), form_tail);
             if self.match_seq(e, &pat_rest.0, pat_rest.1, &form_rest.0, form_rest.1, &mut b) {
-                let mut renames: HashMap<SymId, SymId> = HashMap::new();
+                let mut renames = Renames { map: HashMap::new(), alias };
                 return self.instantiate(e, *tmpl, &b, &mut renames);
             }
         }
@@ -391,7 +446,7 @@ impl SyntaxRules {
         e: &mut Engine,
         tmpl: Value,
         b: &Bindings,
-        renames: &mut HashMap<SymId, SymId>,
+        renames: &mut Renames,
     ) -> SynResult<Value> {
         match tmpl {
             Value::Symbol(s) => {
@@ -488,7 +543,7 @@ impl SyntaxRules {
         e: &mut Engine,
         tmpl: Value,
         b: &Bindings,
-        renames: &mut HashMap<SymId, SymId>,
+        renames: &mut Renames,
     ) -> SynResult<Value> {
         match tmpl {
             Value::Symbol(s) => {
@@ -535,7 +590,7 @@ impl SyntaxRules {
         e: &mut Engine,
         sub: Value,
         b: &Bindings,
-        renames: &mut HashMap<SymId, SymId>,
+        renames: &mut Renames,
         depth: usize,
     ) -> SynResult<Vec<Value>> {
         let mut vars = Vec::new();
@@ -578,15 +633,15 @@ impl SyntaxRules {
         &self,
         e: &mut Engine,
         sym: SymId,
-        renames: &mut HashMap<SymId, SymId>,
+        renames: &mut Renames,
     ) -> SymId {
-        if let Some(&r) = renames.get(&sym) {
+        if let Some(&r) = renames.map.get(&sym) {
             return r;
         }
         let base = e.interner.sym_name(sym).to_string();
         let fresh = e.interner.fresh(&base);
-        e.set_alias(fresh, sym, self.def_env);
-        renames.insert(sym, fresh);
+        e.set_alias(fresh, sym, renames.alias);
+        renames.map.insert(sym, fresh);
         fresh
     }
 
@@ -597,7 +652,7 @@ impl SyntaxRules {
     /// Patterns and templates are heap data, and the macro table is the only
     /// thing holding them.
     pub fn trace(&self, out: &mut Vec<Value>) {
-        for (pat, tmpl) in &self.rules {
+        for (pat, tmpl) in self.rules.iter() {
             out.push(*pat);
             out.push(*tmpl);
         }

@@ -32,7 +32,7 @@ pub mod native;
 mod run;
 
 use crate::code::{CodeState, Tier};
-use crate::heap::{Engine, NamedParam, Obj, Param};
+use crate::heap::{AliasEnv, Engine, NamedParam, Obj, Param};
 use crate::syntax::{MacroTable, SyntaxRules};
 use crate::value::{KwId, ObjRef, PrimId, SymId, Value};
 use crate::writer::write_str;
@@ -404,6 +404,22 @@ impl Frame {
     }
 }
 
+/// What a cached local-macro expansion was made with, and so what a later
+/// use of the same call cell must find for the cache to answer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalMacro {
+    /// This macro object. Its expansion's renames point at its own
+    /// definition frame, so it is a pure function of the form and the
+    /// object -- and a different object, even from the same source, is a
+    /// miss. A library's macros are one object each, for good.
+    Object(ObjRef),
+    /// Any macro made by the `let-syntax`/`letrec-syntax` parse with this
+    /// origin, found in the use-site chain. Its renames are
+    /// [`AliasEnv::Scope`], so the expansion serves every evaluation of
+    /// the binding form.
+    Origin(u64),
+}
+
 enum Step {
     Eval(Value, Option<ObjRef>),
     Return(Value),
@@ -527,6 +543,27 @@ pub struct Vm {
     ///   stops `eval` of generated forms from leaking an entry per form. The
     ///   cost is a cold cache after each GC; the benefit holds between them.
     expansion_cache: HashMap<ObjRef, Value>,
+    /// The same for a use of a LOCAL macro -- one bound in a frame, by
+    /// `let-syntax`, `letrec-syntax`, an internal `define-syntax` or a
+    /// library body -- keyed on the call's cell, and valid only for the
+    /// macro it was made with ([`LocalMacro`]). Cleared on every collection
+    /// with the global one, for the same reasons.
+    ///
+    /// Without it a library's own macros, which its exported ones expand
+    /// into, were expanded again on every evaluation: `match` from
+    /// `(srfi 204)` cost 17-430 µs a call where `cond` costs 0.1.
+    local_expansions: HashMap<ObjRef, (LocalMacro, Value)>,
+    /// `let-syntax`/`letrec-syntax` rules already parsed, keyed on the
+    /// binding form's cell and the binding's index. Entering the form again -- every call of
+    /// the procedure it is in -- reuses the parse, and with it the origin
+    /// that [`AliasEnv::Scope`] names. Cleared on every collection: the
+    /// key is a heap cell, and a parse made again after one is a new
+    /// origin, which is harmless because a rename is always looked up
+    /// with the origin of the macro that made it.
+    local_rules: HashMap<(ObjRef, usize), Rc<SyntaxRules>>,
+    /// The next origin number for a `let-syntax`/`letrec-syntax` parse.
+    /// Never reused.
+    next_origin: u64,
     /// Names successive `eval_str` inputs, so two REPL entries are
     /// distinguishable in a backtrace.
     eval_count: u64,
@@ -812,6 +849,9 @@ impl Vm {
             high_water: 0,
             expansions: 0,
             expansion_cache: HashMap::new(),
+            local_expansions: HashMap::new(),
+            local_rules: HashMap::new(),
+            next_origin: 0,
             host_fns: Vec::new(),
             ticks: 0,
             view_envs: Vec::new(),
@@ -1928,6 +1968,8 @@ impl Vm {
         // stack or the step in flight still refers to it -- and both of those
         // are traced below, so an expansion being evaluated right now is safe.
         self.expansion_cache.clear();
+        self.local_expansions.clear();
+        self.local_rules.clear();
         self.lambda_cache.clear();
         let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() * 2 + 8);
         // WHERE EACH GROUP STARTS, for the audit below: a stale root says
@@ -2093,9 +2135,28 @@ impl Vm {
                                 self.engine.interner.sym_name(self.engine.resolve(head))
                             )));
                         }
-                        let out = rules
-                            .expand(&mut self.engine, expr)
-                            .map_err(VmError::Error)?;
+                        // Scoped renames only when the binding form's frame
+                        // is on this chain and holds THIS macro -- so the
+                        // lookup that resolves them finds it. A macro object
+                        // reached any other way (one that escaped its form as
+                        // a value) keeps renames into its own frame.
+                        let key = match rules.origin() {
+                            Some(o) if self.scope_frame(env, o).is_some_and(|(_, m)| m == mr) => {
+                                LocalMacro::Origin(o)
+                            }
+                            _ => LocalMacro::Object(mr),
+                        };
+                        if let Some(&(k, cached)) = self.local_expansions.get(&r)
+                            && k == key
+                        {
+                            return Ok(Step::Eval(cached, env));
+                        }
+                        let out = match key {
+                            LocalMacro::Origin(_) => rules.expand_scoped(&mut self.engine, expr),
+                            LocalMacro::Object(_) => rules.expand(&mut self.engine, expr),
+                        }
+                        .map_err(VmError::Error)?;
+                        self.local_expansions.insert(r, (key, out));
                         return Ok(Step::Eval(out, env));
                     }
                     // A macro use is expanded before anything else is decided
@@ -2126,7 +2187,7 @@ impl Vm {
                     if let Value::Symbol(head) = car
                         && self.lookup_exact(head, env).is_none()
                         && let Some(step) =
-                            self.special_form(self.engine.resolve(head), &args, env)?
+                            self.special_form(self.engine.resolve(head), &args, env, r)?
                     {
                         // A special form, and only because nothing shadows its
                         // name: a local called `if` is a variable, not syntax.
@@ -2145,6 +2206,7 @@ impl Vm {
         head: SymId,
         args: &[Value],
         env: Option<ObjRef>,
+        form: ObjRef,
     ) -> VResult<Option<Step>> {
         let s = &self.syms;
         if head == s.given {
@@ -2227,8 +2289,7 @@ impl Vm {
             let new_env = self.engine.env(env, slots);
             let def_env = if recursive { Some(new_env) } else { env };
             for (i, &(name, rules)) in names.iter().enumerate() {
-                let parsed = SyntaxRules::parse(&mut self.engine, name, rules, def_env)
-                    .map_err(VmError::Error)?;
+                let parsed = self.local_rules(form, i, name, rules, recursive)?.with_def_env(def_env);
                 let m = self.engine.alloc(Obj::Macro(Rc::new(parsed)));
                 if let Obj::Env { slots, .. } = self.engine.obj_mut(new_env) {
                     slots[i].1 = m;
@@ -3608,7 +3669,22 @@ impl Vm {
             // the name has to be looked up there before the globals. This is
             // the case the comment above predicted: "the alias will have to
             // carry its own environment", and now it does.
-            if let Some(def_env @ Some(_)) = self.engine.alias_env(sym)
+            let def_env = match self.engine.alias_env(sym) {
+                Some(AliasEnv::Frame(r)) => Some(r),
+                // The binding form's frame on THIS chain -- see
+                // `AliasEnv::Scope` for why not the frame of the
+                // expansion that made the name.
+                Some(AliasEnv::Scope { origin, recursive }) => match self.scope_frame(env, origin) {
+                    Some((f, _)) if recursive => Some(f),
+                    Some((f, _)) => match self.engine.obj(f) {
+                        Obj::Env { parent, .. } => *parent,
+                        _ => None,
+                    },
+                    None => None,
+                },
+                Some(AliasEnv::Global) | None => None,
+            };
+            if def_env.is_some()
                 && let Some(v) = self.lookup_exact(resolved, def_env)
             {
                 return Some(v);
@@ -3632,6 +3708,58 @@ impl Vm {
             cur = *parent;
         }
         self.global(sym)
+    }
+
+    /// The innermost frame of `env`'s chain that binds a macro made by the
+    /// `let-syntax`/`letrec-syntax` parse `origin`, and that macro.
+    fn scope_frame(&self, env: Option<ObjRef>, origin: u64) -> Option<(ObjRef, ObjRef)> {
+        let mut cur = env;
+        while let Some(r) = cur {
+            let Obj::Env { parent, slots } = self.engine.obj(r) else {
+                return None;
+            };
+            for &(_, v) in slots.iter().rev() {
+                if let Value::Obj(m) = v
+                    && let Obj::Macro(rules) = self.engine.obj(m)
+                    && rules.origin() == Some(origin)
+                {
+                    return Some((r, m));
+                }
+            }
+            cur = *parent;
+        }
+        None
+    }
+
+    /// A `let-syntax`/`letrec-syntax` binding's rules, parsed once per
+    /// binding form between collections (`local_rules`). The result has no
+    /// definition environment yet: each evaluation of the form supplies its
+    /// own with [`SyntaxRules::with_def_env`].
+    ///
+    /// Keyed on the FORM's cell and the binding's index, not on the
+    /// `(syntax-rules …)` cell: a template can put one spec into two
+    /// binding forms, nested, and two forms must not share an origin. A
+    /// form's own cell is in one place in the tree.
+    pub(crate) fn local_rules(
+        &mut self,
+        form: ObjRef,
+        index: usize,
+        name: SymId,
+        spec: Value,
+        recursive: bool,
+    ) -> VResult<Rc<SyntaxRules>> {
+        let key = (form, index);
+        if let Some(rules) = self.local_rules.get(&key) {
+            return Ok(Rc::clone(rules));
+        }
+        let origin = self.next_origin;
+        self.next_origin += 1;
+        let parsed = SyntaxRules::parse(&mut self.engine, name, spec, None)
+            .map_err(VmError::Error)?
+            .with_origin(origin, recursive);
+        let parsed = Rc::new(parsed);
+        self.local_rules.insert(key, Rc::clone(&parsed));
+        Ok(parsed)
     }
 
     /// `set!` must find an existing binding; `define` creates one, in the

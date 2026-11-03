@@ -593,6 +593,33 @@ impl std::fmt::Debug for OutputSink {
     }
 }
 
+/// Where a renamed template identifier means what it means: the
+/// environment its macro was defined in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AliasEnv {
+    /// A top-level macro's: the globals.
+    Global,
+    /// One particular frame -- a library's, or an internal
+    /// `define-syntax`'s. The frame is a collector root for as long as the
+    /// alias exists.
+    Frame(ObjRef),
+    /// A `let-syntax` (`recursive: false`) or `letrec-syntax` macro's,
+    /// named by the binding form rather than by one evaluation's frame.
+    ///
+    /// `origin` identifies the parsed rules; every macro object made from
+    /// them carries it. The definition environment is found at LOOKUP time:
+    /// the innermost frame of the use-site chain that binds a macro with
+    /// this origin is the `letrec-syntax` frame itself, and its parent is
+    /// the `let-syntax` one. That is what lets one expansion of a call site
+    /// serve every evaluation of it -- a frame recorded here would be the
+    /// first evaluation's, and a later call (a different frame, different
+    /// values) would read the first call's variables. A renamed identifier
+    /// is only ever evaluated lexically inside the binding form that made
+    /// it, so the frame is on the chain; at most one is, because one binding
+    /// form cannot be lexically inside itself.
+    Scope { origin: u64, recursive: bool },
+}
+
 /// Everything a running Scheme owns below the control stack.
 #[derive(Debug)]
 pub struct Engine {
@@ -659,7 +686,11 @@ pub struct Engine {
     /// The envs here are GC roots, which keeps a local macro's definition
     /// frame alive for as long as its alias exists. That is a real cost and
     /// it is bounded the same way the alias table itself is.
-    aliases: HashMap<SymId, (SymId, Option<ObjRef>)>,
+    ///
+    /// A `let-syntax`/`letrec-syntax` macro's renames carry
+    /// [`AliasEnv::Scope`] instead of a frame, so they root nothing: see
+    /// that variant for why.
+    aliases: HashMap<SymId, (SymId, AliasEnv)>,
     pub interner: Interner,
     prim_names: Vec<String>,
 }
@@ -856,11 +887,10 @@ impl Engine {
         work.extend(self.handles.iter().flatten().copied());
         // A local macro's definition frame has to outlive its expansion, so
         // the environments recorded beside the aliases are roots.
-        work.extend(
-            self.aliases
-                .values()
-                .filter_map(|&(_, env)| env.map(Value::Obj)),
-        );
+        work.extend(self.aliases.values().filter_map(|&(_, env)| match env {
+            AliasEnv::Frame(r) => Some(Value::Obj(r)),
+            AliasEnv::Global | AliasEnv::Scope { .. } => None,
+        }));
 
         while let Some(v) = work.pop() {
             let Value::Obj(r) = v else { continue };
@@ -886,7 +916,7 @@ impl Engine {
                         "vm root"
                     } else if self.handles.iter().flatten().any(|&h| h == v) {
                         "host handle"
-                    } else if self.aliases.values().any(|&(_, e)| e.map(Value::Obj) == Some(v)) {
+                    } else if self.aliases.values().any(|&(_, e)| matches!(e, AliasEnv::Frame(r) if Value::Obj(r) == v)) {
                         "macro environment"
                     } else {
                         "reference reached from a root"
@@ -1113,12 +1143,12 @@ impl Engine {
 
     // ---- macro renaming -------------------------------------------------
 
-    pub fn set_alias(&mut self, fresh: SymId, original: SymId, def_env: Option<ObjRef>) {
+    pub fn set_alias(&mut self, fresh: SymId, original: SymId, def_env: AliasEnv) {
         self.aliases.insert(fresh, (original, def_env));
     }
 
     /// Where a renamed identifier's name meant what it meant.
-    pub fn alias_env(&self, sym: SymId) -> Option<Option<ObjRef>> {
+    pub fn alias_env(&self, sym: SymId) -> Option<AliasEnv> {
         self.aliases.get(&sym).map(|&(_, env)| env)
     }
 

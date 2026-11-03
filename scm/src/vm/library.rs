@@ -159,6 +159,16 @@ impl Vm {
         }
     }
 
+    /// Whether `r` is the frame of a library that has finished loading. Its
+    /// bindings are then final -- nothing defines into a library frame
+    /// after its body has run -- so the compiler may decide, once, that a
+    /// name is NOT there and means its global.
+    pub(super) fn sealed_library_frame(&self, r: ObjRef) -> bool {
+        self.libraries
+            .iter()
+            .any(|(name, lib)| lib.frame == r && !self.loading.contains(name))
+    }
+
     /// Process the declarations into `frame`; returns the export table.
     fn library_body(&mut self, frame: ObjRef, decls: &[Value]) -> VResult<Vec<(SymId, SymId)>> {
         let mut export_specs: Vec<Value> = Vec::new();

@@ -21,6 +21,13 @@ the gate's value is agreement and regression, not independent truth.
 With the published inputs this is hours at T0's speed; the comparison is the
 suite's own `results.*` files. See docs/conformance.md for the numbers.
 
+**What a macro use costs**, by hand: `target/release/scm
+scm-conform/bench/macros.scm` (`SCM_TIER=t0` for the interpreter) prints a
+table of `match`, `let-syntax` and a global macro against the `cond`,
+`vector-ref` and `car` they stand for. docs/s29-local-macros.md has the
+numbers before and after S29. The suite pins the same thing by counting,
+not timing, in `scm/tests/local_macros.rs`.
+
 ## Outside the declared subset
 
 | program | needs | why not |
