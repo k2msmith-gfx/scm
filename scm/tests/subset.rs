@@ -342,3 +342,49 @@ fn unary_minus_keeps_the_sign_of_zero() {
     assert_eq!(eval("(+ -0.0)"), "-0.0");
     assert_eq!(eval("(- 0)"), "0");
 }
+
+#[test]
+fn every_condition_reaches_the_handler_and_guard_clauses_run_after_unwinding() {
+    // "Every condition reaches `with-exception-handler`: a `raise`, an
+    // `error`, and a refusal from Rust alike ... A refusal from Rust arrives
+    // as an error object whose message is the refusal's text and whose
+    // irritants are `()`."
+    let mut it = Interp::new().unwrap();
+    let show = |it: &mut Interp, src: &str| {
+        let v = it.eval(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        it.write(&v).unwrap()
+    };
+    assert_eq!(
+        show(
+            &mut it,
+            "(map (lambda (thunk)
+                    (call/cc (lambda (k)
+                      (with-exception-handler
+                        (lambda (e) (k (if (error-object? e) (list (error-object-message e) (error-object-irritants e)) e)))
+                        thunk))))
+                  (list (lambda () (raise 'r)) (lambda () (error \"boom\" 1)) (lambda () (car 5))))"
+        ),
+        "(r (\"boom\" (1)) (\"car: not a pair: 5\" ()))"
+    );
+    // "if the handler returns ... with none left it reaches the host exactly
+    // as it would have with no handler -- `(car 5)` still as
+    // `Error::Script` ..., `(error \"boom\" 1)` as `Error::Raised` with the
+    // text `boom 1`."
+    let e = it.eval("(with-exception-handler (lambda (e) 0) (lambda () (car 5)))").unwrap_err();
+    assert!(matches!(&e, scm::embed::Error::Script(m) if m == "car: not a pair: 5"), "{e:?}");
+    let e = it.eval("(with-exception-handler (lambda (e) 0) (lambda () (error \"boom\" 1)))").unwrap_err();
+    assert!(matches!(&e, scm::embed::Error::Raised { text, .. } if text == "boom 1"), "{e:?}");
+    // "`guard` runs its clauses in the dynamic environment of the `guard`:
+    // every `dynamic-wind` after in the body has run, and a `parameterize`
+    // in the body is no longer in force."
+    assert_eq!(
+        show(
+            &mut it,
+            "(define p (make-parameter 'guard)) (define log '())
+             (guard (e (#t (list (p) log)))
+               (parameterize ([p 'body])
+                 (dynamic-wind (lambda () #f) (lambda () (raise 'x)) (lambda () (set! log '(after))))))"
+        ),
+        "(guard (after))"
+    );
+}

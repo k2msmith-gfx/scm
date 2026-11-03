@@ -385,13 +385,16 @@
 
 ;; ── exceptions ──────────────────────────────────────────────────────────
 ;;
-;; `guard` is built on `%try`, which catches a condition and hands it back as
-;; `(#f . condition)`. `with-exception-handler` is different in kind: its
-;; handler runs *at the raise point*, before any unwinding, so it cannot be
-;; built on a catch. It works instead by keeping the handler stack in a
-;; parameter and having `raise` call the top of it — which means the whole of
-;; it is ordinary Scheme, and `parameterize`'s unwind behaviour gives the
-;; "handler is removed while it runs" rule for free.
+;; The handler stack is a parameter, so `parameterize`'s unwind behaviour
+;; gives the "handler is removed while it runs" rule for free.
+;;
+;; S28: the HANDLER CALL IS MADE BY THE VM, not by `raise`. Every condition
+;; -- `raise`, `error`, `(car 5)`, a host function's refusal -- arrives as a
+;; Rust error, and the VM's error path (`dispatch_to_handler`) calls
+;; `%call-handler` at the raise point, stack intact, whenever a handler is
+;; installed. Before, only the prelude's `raise` looked at `%handlers`, so
+;; `error` and every machine refusal unwound straight past
+;; `with-exception-handler` to the nearest `guard`.
 
 (define %handlers (make-parameter '()))
 
@@ -399,7 +402,23 @@
   (parameterize ([%handlers (cons handler (%handlers))])
     (thunk)))
 
-;; `raise-continuable`: the handler's value becomes the value of the raise.
+;; Called by the VM, with `%handlers` non-empty. If the handler returns, the
+;; raise was non-continuable, and R7RS raises a secondary exception "in the
+;; same dynamic environment as the handler" -- that is, with the next
+;; handler out in force. Raising the same object again inside the
+;; `parameterize` does exactly that (and lets an enclosing `guard` catch it);
+;; with no handler left it reaches the host as the original error.
+(define (%call-handler obj)
+  (let ([hs (%handlers)])
+    (parameterize ([%handlers (cdr hs)])
+      ((car hs) obj)
+      (%raise obj))))
+
+;; `raise`: the VM finds the handler.
+(define (raise obj) (%raise obj))
+
+;; `raise-continuable`: the handler's value becomes the value of the raise,
+;; so it calls the handler itself; with none, it is an ordinary raise.
 (define (raise-continuable obj)
   (let ([hs (%handlers)])
     (if (null? hs)
@@ -407,49 +426,40 @@
         (parameterize ([%handlers (cdr hs)])
           ((car hs) obj)))))
 
-;; `raise`: non-continuable, so if the handler returns, that is itself an
-;; error -- R7RS says a secondary exception is raised in the same dynamic
-;; environment as the handler.
-(define (raise obj)
-  (let ([hs (%handlers)])
-    (if (null? hs)
-        (%raise obj)
-        (begin
-          (parameterize ([%handlers (cdr hs)])
-            ((car hs) obj))
-          (%raise obj)))))
-
-;; `guard` has to do TWO things, because conditions arrive two ways.
+;; `guard`, after R7RS 7.3's reference expansion, escape-only.
 ;;
-;; A `raise` is dispatched through `%handlers` at the raise point, so a guard
-;; that only caught the unwind lost to any `with-exception-handler` installed
-;; OUTSIDE it -- the outer handler ran first and the guard never saw the
-;; condition. R7RS orders handlers innermost-first, so `guard` installs one
-;; too, and escapes to its own continuation with the clause result. Found by
-;; the suite's SRFI-34 example 5: a guard inside a handler, where the guard
-;; must win.
+;; Its handler is innermost-first like any other (SRFI-34 example 5: a guard
+;; inside a handler must win), and it does not run the clauses: it escapes
+;; to the guard's own continuation with a thunk that does. So the clauses
+;; run in the dynamic environment of the `guard` (R7RS 4.2.7) -- every
+;; `dynamic-wind` after in the body has run, and a `parameterize` in the body
+;; is no longer in force. S28: they used to run at the raise point.
 ;;
-;; A machine error -- `(car '())` -- never goes through `raise` at all, so
-;; `%try` is still needed for those. Hence both, in one form.
-;;
-;; When no clause matches, `%guard-clauses` re-raises. Inside the handler that
-;; is already running with `%handlers` popped (`raise` parameterizes the
-;; tail), so the re-raise travels OUTWARD rather than back into this guard.
+;; When no clause matches, `%guard-clauses` re-raises with `raise`, in the
+;; guard's dynamic environment. R7RS re-raises with `raise-continuable` "in
+;; the dynamic environment of the original call to raise", which needs the
+;; handler's continuation re-entered after the guard's was taken; scm's
+;; continuations are escape-only, so that is not available. The outer
+;; handlers are the same ones either way; what differs is that the body's
+;; afters have already run and its parameterizations are gone, and that an
+;; outer handler which RETURNS gets a secondary raise rather than resuming a
+;; `raise-continuable` through the guard. docs/subset.md says so.
 (define-syntax guard
   (syntax-rules ()
     [(_ (var clause ...) body ...)
-     (call-with-current-continuation
-       (lambda (%guard-k)
-         (let ([r (%try (with-exception-handler
-                          (lambda (%condition)
-                            (%guard-k
-                              (let ([var %condition])
-                                (%guard-clauses var clause ...))))
-                          (lambda () body ...)))])
-           (if (car r)
-               (cdr r)
-               (let ([var (cdr r)])
-                 (%guard-clauses var clause ...))))))]))
+     ((call-with-current-continuation
+        (lambda (%guard-k)
+          (with-exception-handler
+            (lambda (%condition)
+              (%guard-k
+                (lambda ()
+                  (let ([var %condition])
+                    (%guard-clauses var clause ...)))))
+            (lambda ()
+              (call-with-values
+                (lambda () body ...)
+                (lambda %vals
+                  (%guard-k (lambda () (apply values %vals))))))))))]))
 
 ;; Like `cond`, except that falling off the end RE-RAISES rather than
 ;; returning #f -- a `guard` that matches nothing must not swallow the

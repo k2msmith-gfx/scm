@@ -54,6 +54,14 @@ pub enum ErrorKind {
     Plain,
     Read,
     File,
+    /// A refusal that began life as a Rust `VmError::Error` -- `(car 5)`, an
+    /// unbound variable, a host function's `Err` -- and was turned into an
+    /// object so a handler could be handed it. Plain to every predicate;
+    /// the difference is that raising it again (a handler returned, or a
+    /// `guard` matched nothing) gives back the original `VmError::Error`,
+    /// so the host sees the same `Error::Script` it would have seen with no
+    /// handler installed.
+    Machine,
 }
 
 /// A port. Textual ports carry characters, binary ports carry bytes, and

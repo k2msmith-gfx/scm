@@ -1859,8 +1859,26 @@ fn error_prim(e: &mut Engine, a: &[Value]) -> PResult {
 
 /// `(raise obj)` -- the primitive underneath the prelude's `raise`, which
 /// adds the handler-stack behaviour on top.
+///
+/// An error object is raised with the text `error` gave it, unprefixed, and
+/// a machine refusal (`ErrorKind::Machine`) goes back to being the
+/// `VmError::Error` it started as. Both matter now that every condition
+/// passes through the handler stack (S28): a handler that returns, or a
+/// `guard` that matches nothing, re-raises the object, and the host must
+/// see the message it would have seen had nothing been installed.
 fn raise_prim(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("%raise", a)?;
+    if let Value::Obj(r) = v
+        && let Obj::ErrorObj { kind, .. } = e.obj(r)
+    {
+        let kind = *kind;
+        let text = write_str(e, v);
+        return Err(if kind == ErrorKind::Machine {
+            VmError::Error(text)
+        } else {
+            VmError::Raised(v, text)
+        });
+    }
     let text = format!("raised: {}", write_str(e, v));
     Err(VmError::Raised(v, text))
 }

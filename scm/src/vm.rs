@@ -480,6 +480,14 @@ pub struct Vm {
     /// Where the evaluation that broke began on the stack, so `live_frames`
     /// shows that evaluation and not the one the handler is nested in.
     break_base: usize,
+    /// The `%handlers` list in force when the current host function was
+    /// entered (`Value::Null` at the top level). A condition raised inside a
+    /// host function's nested evaluation is dispatched only to handlers
+    /// installed *inside* that evaluation -- a list that does not have this
+    /// one as a tail -- and otherwise leaves the nested evaluation as an
+    /// `Err` for the host, exactly as before S28. An outer handler that
+    /// escaped would otherwise unwind past the host's Rust frame.
+    segment_handlers: Value,
     /// An error a native helper stored for the wrapper to raise.
     native_err: Option<VmError>,
     /// How many units T1 compiled.
@@ -789,6 +797,7 @@ impl Vm {
             native_hot: native::HOT,
             break_handler: None,
             break_base: 0,
+            segment_handlers: Value::Null,
             libraries: HashMap::new(),
             loading: Vec::new(),
             source_dir: None,
@@ -1307,7 +1316,7 @@ impl Vm {
             VmError::Error(text) => {
                 let message = self.engine.string(&text);
                 self.engine
-                    .error_obj(message, Value::Null, crate::heap::ErrorKind::Plain)
+                    .error_obj(message, Value::Null, crate::heap::ErrorKind::Machine)
             }
             _ => unreachable!("guarded above"),
         };
@@ -1441,6 +1450,16 @@ impl Vm {
                     // stack still intact. A line later `unwind_to_catch` has
                     // truncated it, so there would be nothing left to walk.
                     self.last_backtrace = self.capture_backtrace(base);
+                    // S28: a condition goes to the innermost handler first,
+                    // at the raise point, with the stack intact -- whether
+                    // it came from `raise`, `error`, or a refusal in Rust.
+                    let e = match self.dispatch_to_handler(e) {
+                        Ok(s) => {
+                            step = s;
+                            continue;
+                        }
+                        Err(e) => e,
+                    };
                     // The break REPL: an error nothing will catch, with a
                     // handler installed, stops here with the frames live.
                     if let Some(action) = self.maybe_break(base, &e) {
@@ -1463,6 +1482,83 @@ impl Vm {
                     }
                 }
             };
+        }
+    }
+
+    /// The current value of the prelude's `%handlers` parameter, or `Null`
+    /// before the prelude has defined it.
+    fn current_handlers(&self) -> Value {
+        match self.param_slot("%handlers") {
+            Some(slot) => self.param_values[slot],
+            None => Value::Null,
+        }
+    }
+
+    /// S28: hand a condition to the innermost `with-exception-handler`
+    /// handler, at the raise point, before anything unwinds. `Ok(step)` calls
+    /// the prelude's `%call-handler` on the condition; `Err(e)` gives the
+    /// error back untouched when there is no handler to call.
+    ///
+    /// Every catchable condition comes through here, which is the point:
+    /// `error` and a primitive's refusal used to unwind straight past every
+    /// handler to the nearest `%try`, because only the prelude's `raise`
+    /// consulted the handler stack. `raise` is now just `%raise`, and the
+    /// handler call is made here for all of them alike.
+    ///
+    /// - **Interrupt, fuel and the heap cap are not conditions** and never
+    ///   reach a handler, for the reason `unwind_to_catch` gives.
+    /// - **A Rust refusal becomes an error object** of kind `Machine`, so a
+    ///   handler can ask it for its message, and re-raising it gives back
+    ///   the original `VmError::Error` (see `raise_prim`).
+    /// - **`%call-handler` never returns normally**: the handler either
+    ///   escapes, or returns and the condition is raised again with the
+    ///   next handler out in force (R7RS: non-continuable). That is why the
+    ///   frame the failure happened in can be left as it is.
+    /// - **Only handlers installed in this evaluation segment** -- see
+    ///   `segment_handlers`. With none, the error leaves as it always did.
+    fn dispatch_to_handler(&mut self, e: VmError) -> Result<Step, VmError> {
+        if !matches!(e, VmError::Error(_) | VmError::Raised(..)) {
+            return Err(e);
+        }
+        let hs = self.current_handlers();
+        if !matches!(hs, Value::Obj(_)) {
+            return Err(e);
+        }
+        // Outside this segment: `hs` is the segment's own list or a tail
+        // of it (a handler running pops itself off).
+        let mut tail = self.segment_handlers;
+        loop {
+            if tail == hs {
+                return Err(e);
+            }
+            match tail {
+                Value::Obj(r) => match self.engine.obj(r) {
+                    Obj::Pair(_, cdr) => tail = *cdr,
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        let Some(call) = self
+            .engine
+            .interner
+            .lookup("%call-handler")
+            .and_then(|sym| self.global(sym))
+        else {
+            return Err(e);
+        };
+        let condition = match e {
+            VmError::Raised(v, _) => v,
+            VmError::Error(ref text) => {
+                let message = self.engine.string(text);
+                self.engine
+                    .error_obj(message, Value::Null, crate::heap::ErrorKind::Machine)
+            }
+            _ => unreachable!("guarded above"),
+        };
+        match self.apply(call, vec![condition]) {
+            Ok(step) => Ok(step),
+            Err(_) => Err(e),
         }
     }
 
@@ -1694,10 +1790,19 @@ impl Vm {
         }
     }
 
+    /// Escape to the `ContMark` at `at`, running the afters crossed.
+    ///
+    /// **The mark stays on the stack while the afters run** (S28), and the
+    /// chain returns `v` into it. The afters are still inside the
+    /// continuation's extent, so the continuation is still live: an after
+    /// that raises, under a `guard`, reaches the guard's handler, which
+    /// escapes to this same mark again -- and must find it. With the mark
+    /// cut first, that second escape reported "escaped its extent".
     fn unwind_to(&mut self, at: usize, v: Value, restore_to: usize) -> Step {
         self.drop_operands_above(at);
         let afters = self.pending_afters(at);
-        self.stack.truncate(at);
+        let keep = if afters.is_empty() { at } else { at + 1 };
+        self.stack.truncate(keep);
         self.wind_chain(afters, v, Some(restore_to))
     }
 
@@ -1852,6 +1957,8 @@ impl Vm {
         roots.extend(self.param_values.iter().copied());
         mark(&mut groups, "a parameter's saved value", &roots);
         roots.extend(self.param_bindings.iter().map(|(_, v)| *v));
+        mark(&mut groups, "the segment's handler list", &roots);
+        roots.push(self.segment_handlers);
         mark(&mut groups, "a library", &roots);
         self.library_roots(&mut roots);
         mark(&mut groups, "a break's frame view", &roots);
@@ -2513,7 +2620,10 @@ impl Vm {
         // evaluation that fails halfway -- the stacks come back to here.
         let (base, vbase, pbase) = (self.stack.len(), self.vstack.len(), self.param_bindings.len());
         let call = self.current_call;
+        let segment = self.segment_handlers;
+        self.segment_handlers = self.current_handlers();
         let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, args)));
+        self.segment_handlers = segment;
         self.restore_params(pbase);
         self.stack.truncate(base);
         self.vstack.truncate(vbase);

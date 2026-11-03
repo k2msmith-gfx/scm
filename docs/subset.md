@@ -71,6 +71,35 @@ object, same backtrace. Where R7RS is silent, scm decides:
   with every frame still live, and the afters run only when the break is
   aborted; a break that returns a value resumes as if nothing had failed.
 
+### Conditions and handlers
+
+**Every condition reaches `with-exception-handler`**: a `raise`, an
+`error`, and a refusal from Rust alike -- `(car 5)`, an unbound variable, a
+host function's `Err`. The handler runs at the raise point, before anything
+unwinds, with the next handler out in force. A refusal from Rust arrives as
+an error object whose message is the refusal's text and whose irritants are
+`()`. `raise`, `error` and a refusal are non-continuable: **if the handler
+returns, the same object is raised again to the next handler out**, and with
+none left it reaches the host exactly as it would have with no handler --
+`(car 5)` still as `Error::Script` with its own message, `(error "boom" 1)`
+as `Error::Raised` with the text `boom 1`.
+
+**A host function's nested evaluation is its own segment.** A condition in a
+callback goes only to handlers installed inside the callback; otherwise it
+leaves the callback as the host function's `Err`, and the handlers outside
+see it when the host function returns it.
+
+**`guard` runs its clauses in the dynamic environment of the `guard`**: every
+`dynamic-wind` after in the body has run, and a `parameterize` in the body is
+no longer in force. When no clause matches, the condition is re-raised with
+`raise` **from the guard's dynamic environment**, not, as R7RS says, with
+`raise-continuable` from the original raise's: that needs the raise point's
+continuation re-entered after the guard's has been taken, and continuations
+here are escape-only. The handlers that see it are the same ones; what
+differs is that the body's afters have already run, and that an outer
+handler which returns raises again rather than resuming a
+`raise-continuable` through the guard.
+
 ### The sign of zero
 
 Inexact arithmetic is IEEE 754 and keeps the sign of zero. **`(- x)` is

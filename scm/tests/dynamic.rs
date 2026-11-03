@@ -5,7 +5,8 @@
 //! RNG-behind-a-parameter is why a `:seed` replays -- `grow-branches` is only
 //! reproducible because ray threads `:ray-rng` through it (survey §4).
 
-use scm::{Vm, write_str};
+use scm::embed::Error;
+use scm::{Interp, Tier, Val, Vm, write_str};
 
 #[track_caller]
 fn eval(src: &str) -> String {
@@ -413,4 +414,329 @@ fn guard_survives_gc_stress() {
         )
         .expect("guard under gc stress");
     assert_eq!(write_str(&vm.engine, v), "30");
+}
+
+// ---- S28: every condition reaches the handler; guard clauses after unwind --
+//
+// Two R7RS bugs, both tiers. T2's agreement is in `scm-llvm/tests/t2.rs`.
+//
+// 1. `error`, and every refusal from Rust (`(car 5)`, a host function's
+//    `Err`), unwound straight past `with-exception-handler`: only the
+//    prelude's `raise` consulted the handler stack. Now the VM calls the
+//    handler at the raise point for all of them.
+// 2. `guard` ran its clauses AT THE RAISE POINT (inside its handler) for a
+//    `raise`, so a `dynamic-wind` after in the body ran after the clause and
+//    a `parameterize` in the body was visible to it. R7RS 4.2.7: the clauses
+//    run in the dynamic environment of the `guard`.
+
+const TIERS: [Tier; 2] = [Tier::T0, Tier::T1];
+
+fn interp(tier: Tier) -> Interp {
+    let mut it = Interp::new().unwrap();
+    it.vm_mut().set_tier(tier);
+    it
+}
+
+#[track_caller]
+fn show(it: &mut Interp, src: &str) -> String {
+    let r = it.eval(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+    it.write(&r).unwrap()
+}
+
+#[test]
+fn error_reaches_with_exception_handler() {
+    for tier in TIERS {
+        let mut it = interp(tier);
+        assert_eq!(
+            show(
+                &mut it,
+                "(call/cc (lambda (k)
+                   (with-exception-handler
+                     (lambda (e) (k (list (error-object? e) (error-object-message e) (error-object-irritants e))))
+                     (lambda () (+ 1 (error \"boom\" 1 'two))))))"
+            ),
+            "(#t \"boom\" (1 two))",
+            "{tier:?}"
+        );
+        // It runs at the raise point: a parameterize and a dynamic-wind
+        // around the `error` are both still in force.
+        assert_eq!(
+            show(
+                &mut it,
+                "(define p (make-parameter 'outer)) (define log '())
+                 (call/cc (lambda (k)
+                   (with-exception-handler
+                     (lambda (e) (k (list (p) log)))
+                     (lambda ()
+                       (parameterize ([p 'inner])
+                         (dynamic-wind (lambda () #f)
+                                       (lambda () (error \"x\"))
+                                       (lambda () (set! log (cons 'after log)))))))))"
+            ),
+            "(inner ())",
+            "{tier:?}"
+        );
+        assert_eq!(show(&mut it, "log"), "(after)", "{tier:?}");
+    }
+}
+
+#[test]
+fn a_rust_refusal_reaches_with_exception_handler_too() {
+    for tier in TIERS {
+        let mut it = interp(tier);
+        assert_eq!(
+            show(
+                &mut it,
+                "(call/cc (lambda (k)
+                   (with-exception-handler
+                     (lambda (e) (k (list (error-object? e) (error-object-message e) (error-object-irritants e))))
+                     (lambda () (car 5)))))"
+            ),
+            "(#t \"car: not a pair: 5\" ())",
+            "{tier:?}"
+        );
+        // A host function's refusal, likewise.
+        it.define_fn("refuse", |_| Err("refused: no".into())).unwrap();
+        assert_eq!(
+            show(
+                &mut it,
+                "(call/cc (lambda (k)
+                   (with-exception-handler
+                     (lambda (e) (k (error-object-message e)))
+                     (lambda () (refuse)))))"
+            ),
+            "\"refuse: refused: no\"",
+            "{tier:?}"
+        );
+    }
+}
+
+#[test]
+fn a_handler_that_returns_from_error_leaves_the_error_as_it_was() {
+    // `error` is non-continuable: the handler runs, returns, and the error
+    // goes on outward. The host sees what it would have seen with no
+    // handler -- same variant, same text.
+    for tier in TIERS {
+        let mut it = interp(tier);
+        show(&mut it, "(define seen '())");
+        let e = it
+            .eval("(with-exception-handler (lambda (e) (set! seen (cons 'h seen)) 0) (lambda () (+ 1 (error \"boom\" 1))))")
+            .unwrap_err();
+        assert!(matches!(&e, Error::Raised { text, .. } if text == "boom 1"), "{tier:?}: {e:?}");
+        let e = it
+            .eval("(with-exception-handler (lambda (e) (set! seen (cons 'h seen)) 0) (lambda () (car 5)))")
+            .unwrap_err();
+        assert_eq!(e, Error::Script("car: not a pair: 5".into()), "{tier:?}");
+        assert_eq!(show(&mut it, "seen"), "(h h)", "{tier:?}");
+    }
+}
+
+#[test]
+fn the_secondary_raise_reaches_the_next_handler_out() {
+    // R7RS: when a `raise` handler returns, "a secondary exception is raised
+    // in the same dynamic environment as the handler" -- the next one out.
+    for tier in TIERS {
+        let mut it = interp(tier);
+        for raiser in ["(raise 'x)", "(error \"x\")"] {
+            let src = format!(
+                "(call/cc (lambda (k)
+                   (with-exception-handler
+                     (lambda (e) (k 'outer))
+                     (lambda ()
+                       (with-exception-handler (lambda (e) 'inner-returned) (lambda () {raiser}))))))"
+            );
+            assert_eq!(show(&mut it, &src), "outer", "{tier:?} {raiser}");
+            // And a guard outside catches it.
+            let src = format!(
+                "(guard (e (#t 'guarded))
+                   (with-exception-handler (lambda (e) 'inner-returned) (lambda () {raiser})))"
+            );
+            assert_eq!(show(&mut it, &src), "guarded", "{tier:?} {raiser}");
+        }
+        // raise-continuable is unchanged.
+        assert_eq!(
+            show(&mut it, "(with-exception-handler (lambda (c) 42) (lambda () (+ 1 (raise-continuable 'c))))"),
+            "43",
+            "{tier:?}"
+        );
+    }
+}
+
+#[test]
+fn guard_clauses_run_after_the_body_has_unwound() {
+    for tier in TIERS {
+        let mut it = interp(tier);
+        show(&mut it, "(define log '()) (define (note x) (set! log (cons x log)))");
+        // The after runs BEFORE the clause, for every way in.
+        for raiser in ["(raise 'x)", "(error \"x\")", "(car 5)", "(raise-continuable 'x)"] {
+            let src = format!(
+                "(set! log '())
+                 (guard (e (#t (note 'clause)))
+                   (dynamic-wind (lambda () #f) (lambda () {raiser}) (lambda () (note 'after))))
+                 (reverse log)"
+            );
+            assert_eq!(show(&mut it, &src), "(after clause)", "{tier:?} {raiser}");
+        }
+        // A parameterize in the body is not visible to the clauses.
+        assert_eq!(
+            show(
+                &mut it,
+                "(define p (make-parameter 'outer))
+                 (list (guard (e (#t (p))) (parameterize ([p 'inner]) (raise 'x)))
+                       (guard (e (#t (p))) (parameterize ([p 'inner]) (error \"x\"))))"
+            ),
+            "(outer outer)",
+            "{tier:?}"
+        );
+        // A clause that raises reaches the handler outside the guard, not
+        // the guard's own.
+        assert_eq!(
+            show(
+                &mut it,
+                "(guard (e (#t (list 'outer e)))
+                   (guard (e (#t (raise (list 'again e)))) (raise 'x)))"
+            ),
+            "(outer (again x))",
+            "{tier:?}"
+        );
+    }
+}
+
+#[test]
+fn guard_still_returns_every_value_and_re_raises_what_it_does_not_match() {
+    for tier in TIERS {
+        let mut it = interp(tier);
+        assert_eq!(
+            show(&mut it, "(call-with-values (lambda () (guard (e (#t 0)) (values 1 2 3))) list)"),
+            "(1 2 3)",
+            "{tier:?}"
+        );
+        // No clause matches: re-raised from the guard's dynamic
+        // environment, so the inner after has run once and an outer guard
+        // sees the same object.
+        show(&mut it, "(define log '())");
+        assert_eq!(
+            show(
+                &mut it,
+                "(guard (e (#t (list 'outer e log)))
+                   (guard (e ((string? e) 'inner))
+                     (dynamic-wind (lambda () #f) (lambda () (raise 7)) (lambda () (set! log (cons 'after log))))))"
+            ),
+            "(outer 7 (after))",
+            "{tier:?}"
+        );
+        // A refusal that no clause matches reaches the host as itself.
+        let e = it.eval("(guard (e ((string? e) 'no)) (car 5))").unwrap_err();
+        assert_eq!(e, Error::Script("car: not a pair: 5".into()), "{tier:?}");
+        let e = it.eval("(guard (e ((string? e) 'no)) (error \"boom\" 1))").unwrap_err();
+        assert!(matches!(&e, Error::Raised { text, .. } if text == "boom 1"), "{tier:?}: {e:?}");
+        // SRFI-34 example 5: a guard inside a handler wins.
+        assert_eq!(
+            show(
+                &mut it,
+                "(with-exception-handler (lambda (c) 'handler)
+                   (lambda () (guard (e (#t 'guard)) (raise 'x))))"
+            ),
+            "guard",
+            "{tier:?}"
+        );
+    }
+}
+
+#[test]
+fn a_handler_outside_a_host_call_is_not_called_inside_it() {
+    // A host function's nested evaluation is its own segment: a condition in
+    // a callback goes to handlers installed inside the callback, and
+    // otherwise leaves as an `Err` for the host -- which returns it, and only
+    // then does the handler outside see it. An outer handler that escaped
+    // from inside would unwind past the host's Rust frame.
+    for tier in TIERS {
+        let mut it = interp(tier);
+        it.define_fn_with("call-it", |host, args| {
+            let [Val::Proc(f)] = args else { return Err("expects a procedure".into()) };
+            host.call(f, &[])
+        })
+        .unwrap();
+        assert_eq!(
+            show(
+                &mut it,
+                "(guard (e (#t (list 'caught (error-object-message e))))
+                   (call-it (lambda () (error \"boom\"))))"
+            ),
+            "(caught \"call-it: boom\")",
+            "{tier:?}"
+        );
+        assert_eq!(
+            show(
+                &mut it,
+                "(call-it (lambda () (guard (e (#t (list 'inside e))) (raise 'x))))"
+            ),
+            "(inside x)",
+            "{tier:?}"
+        );
+        // An inner handler that returns: the error leaves the callback.
+        assert_eq!(
+            show(
+                &mut it,
+                "(define hits '())
+                 (guard (e (#t (list 'outer (error-object-message e) hits)))
+                   (call-it (lambda ()
+                     (with-exception-handler (lambda (e) (set! hits (cons 'inner hits)) 0)
+                                             (lambda () (car 5))))))"
+            ),
+            "(outer \"call-it: car: not a pair: 5\" (inner))",
+            "{tier:?}"
+        );
+        assert_eq!(show(&mut it, "(+ 1 2)"), "3", "{tier:?}");
+    }
+}
+
+#[test]
+fn an_after_that_raises_under_a_guard_is_caught_by_it() {
+    // The guard's escape is in progress when the after raises; the guard's
+    // continuation must still be live for its handler to escape to again.
+    for tier in TIERS {
+        let mut it = interp(tier);
+        assert_eq!(
+            show(
+                &mut it,
+                "(define log '())
+                 (list (guard (e (#t (list 'caught e)))
+                         (dynamic-wind (lambda () #f)
+                           (lambda ()
+                             (dynamic-wind (lambda () #f)
+                                           (lambda () (raise 'first))
+                                           (lambda () (set! log (cons 'a log)) (raise 'second))))
+                           (lambda () (set! log (cons 'b log)))))
+                       (reverse log))"
+            ),
+            "((caught second) (a b))",
+            "{tier:?}"
+        );
+    }
+}
+
+#[test]
+fn guard_and_handlers_survive_gc_stress() {
+    for tier in TIERS {
+        let mut it = interp(tier);
+        it.vm_mut().engine.set_gc_stress(true);
+        assert_eq!(
+            show(
+                &mut it,
+                "(let loop ((i 0) (acc '()))
+                   (if (= i 20)
+                       (list (length acc) (car acc))
+                       (loop (+ i 1)
+                             (cons (call/cc (lambda (k)
+                                     (with-exception-handler
+                                       (lambda (e) (k (guard (e2 (#t (error-object-message e2)))
+                                                        (error (format \"n ~a\" i)))))
+                                       (lambda () (car i)))))
+                                   acc))))"
+            ),
+            "(20 \"n 19\")",
+            "{tier:?}"
+        );
+    }
 }

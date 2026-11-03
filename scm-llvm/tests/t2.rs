@@ -47,6 +47,11 @@ const PROGRAMS: &[&str] = &[
     "(define (neg x) (- x)) (let loop ([i 0] [acc '()]) (if (= i 50) (list (car acc) (/ 1 (neg 0.0)) (neg 0) (eqv? (neg 0.0) -0.0)) (loop (+ i 1) (cons (neg 0.0) acc))))",
     // A caught error leaving nested winds runs both afters, innermost first.
     "(define n '()) (define (f x) (dynamic-wind (lambda () #f) (lambda () (dynamic-wind (lambda () #f) (lambda () (if (odd? x) (car '()) x)) (lambda () (set! n (cons 'in n))))) (lambda () (set! n (cons 'out n))))) (let loop ([i 0] [s 0]) (if (= i 40) (list s (length n) (list-tail n 76)) (loop (+ i 1) (+ s (guard (e (#t 0)) (f i)))))))",
+    // S28: `error` and a machine refusal reach with-exception-handler, and a
+    // returning handler's secondary raise reaches the next one out.
+    "(define (f i) (call/cc (lambda (k) (with-exception-handler (lambda (e) (k (if (error-object? e) (length (error-object-irritants e)) e))) (lambda () (cond ((= (modulo i 3) 0) (error \"boom\" i i)) ((= (modulo i 3) 1) (car i)) (else (with-exception-handler (lambda (e) 'ret) (lambda () (raise 'x)))))))))) (let loop ([i 0] [acc '()]) (if (= i 60) (list (length acc) (list-tail acc 55)) (loop (+ i 1) (cons (f i) acc))))",
+    // S28: guard clauses run after the body's afters, outside its parameterize.
+    "(define p (make-parameter 'out)) (define log '()) (define (g i) (guard (e (#t (set! log (cons (list 'clause (p)) log)) i)) (parameterize ([p 'in]) (dynamic-wind (lambda () #f) (lambda () (if (odd? i) (raise i) (error \"e\" i))) (lambda () (set! log (cons 'after log))))))) (let loop ([i 0] [s 0]) (if (= i 50) (list s (length log) (list-tail log 96)) (loop (+ i 1) (+ s (g i)))))",
 ];
 
 #[test]
