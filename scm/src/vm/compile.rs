@@ -149,6 +149,11 @@ struct Cx<'a> {
     blocks: Vec<Rc<Code>>,
     calls: Vec<(u32, u32, u32)>,
     defines: Rc<Vec<SymId>>,
+    /// While a body is scanned for its defines: every head the scan
+    /// expanded through, so `scan_body` can tell whether the expansion is
+    /// still good once the body's own names are in scope.
+    scanning: u32,
+    heads: Vec<SymId>,
 }
 
 impl Vm {
@@ -282,6 +287,8 @@ impl<'a> Cx<'a> {
             blocks: Vec::new(),
             calls: Vec::new(),
             defines: Rc::new(Vec::new()),
+            scanning: 0,
+            heads: Vec::new(),
         }
     }
 
@@ -344,7 +351,7 @@ impl<'a> Cx<'a> {
             return decline("an empty body");
         }
         let mut defs = Vec::new();
-        self.scan_defines(body, &mut defs)?;
+        let body = &self.scan_body(body, &frame, &mut defs)?;
         self.defs_from.push(frame.len());
         frame.extend(defs.iter().copied());
         let (id, flat) = self.open_scope(plain);
@@ -541,6 +548,9 @@ impl<'a> Cx<'a> {
             let Obj::Pair(Value::Symbol(head), _) = *self.vm.engine.obj(r) else {
                 return Ok(expr);
             };
+            if self.scanning > 0 {
+                self.heads.push(head);
+            }
             match self.resolve(head)? {
                 Var::Macro { rules, scoped } => {
                     let out = if scoped {
@@ -895,7 +905,7 @@ impl<'a> Cx<'a> {
         match name {
             None => {
                 let mut defs = Vec::new();
-                self.scan_defines(body, &mut defs)?;
+                let body = &self.scan_body(body, &vars, &mut defs)?;
                 self.let_scope(vars, defs, body, tail, None)
             }
             Some(n) => {
@@ -1096,7 +1106,9 @@ impl<'a> Cx<'a> {
     /// before the define is "unbound" on each iteration, as on T0.
     fn loop_form(&mut self, name: SymId, lid: usize, vid: usize, vars: Vec<SymId>, body: &[Value], tail: bool) -> R<()> {
         let mut defs = Vec::new();
-        self.scan_defines(body, &mut defs)?;
+        let mut binds = vars.clone();
+        binds.push(name);
+        let body = &self.scan_body(body, &binds, &mut defs)?;
         let mut slots = Vec::with_capacity(vars.len());
         for _ in &vars {
             slots.push(self.new_slot()?);
@@ -1348,6 +1360,36 @@ impl<'a> Cx<'a> {
     /// The names a body's internal defines bind, looking through `begin`
     /// and the branches of `if` as T0's dynamic `bind` would reach them,
     /// but not into forms that open frames of their own.
+    /// Scan a body for its defines, and answer the forms the body should
+    /// compile: the scan's own expansions, unless a head they went through
+    /// is one of `binds` or the defines -- the names the body's scope is
+    /// about to bind, which the scan ran without, so a second expansion
+    /// could differ. Then the forms as written. Expanding every body form
+    /// twice, once here and once to compile it, was 43% of all expansion.
+    fn scan_body(&mut self, forms: &[Value], binds: &[SymId], out: &mut Vec<SymId>) -> R<Vec<Value>> {
+        let mark = self.heads.len();
+        self.scanning += 1;
+        let scanned = self.scan_expanded(forms, out);
+        self.scanning -= 1;
+        let expanded = scanned?;
+        let clash = self.heads[mark..].iter().any(|&h| {
+            let r = self.vm.engine.resolve(h);
+            [h, r].iter().any(|n| binds.contains(n) || out.contains(n))
+        });
+        self.heads.truncate(mark);
+        Ok(if clash { forms.to_vec() } else { expanded })
+    }
+
+    fn scan_expanded(&mut self, forms: &[Value], out: &mut Vec<SymId>) -> R<Vec<Value>> {
+        let mut expanded = Vec::with_capacity(forms.len());
+        for &f in forms {
+            let e = self.expand(f)?;
+            self.scan_defines(&[e], out)?;
+            expanded.push(e);
+        }
+        Ok(expanded)
+    }
+
     fn scan_defines(&mut self, forms: &[Value], out: &mut Vec<SymId>) -> R<()> {
         for &f in forms {
             let f = self.expand(f)?;
