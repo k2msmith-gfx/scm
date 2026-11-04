@@ -230,6 +230,8 @@ impl SyntaxRules {
     }
 
     fn expand_with(&self, e: &mut Engine, form: Value, alias: AliasEnv) -> SynResult<Value> {
+        // The form is flattened once, not once per rule tried.
+        let flat = as_list(e, form);
         for (pat, tmpl) in self.rules.iter() {
             let mut b = Bindings::default();
             // The pattern's own head is ignored -- it names the macro, and
@@ -238,16 +240,11 @@ impl SyntaxRules {
                 Some(x) => x,
                 None => continue,
             };
-            let (form_items, form_tail) = match as_list(e, form) {
-                Some(x) => x,
-                None => continue,
-            };
+            let Some((form_items, form_tail)) = &flat else { continue };
             if pat_items.is_empty() || form_items.is_empty() {
                 continue;
             }
-            let pat_rest = (pat_items[1..].to_vec(), pat_tail);
-            let form_rest = (form_items[1..].to_vec(), form_tail);
-            if self.match_seq(e, &pat_rest.0, pat_rest.1, &form_rest.0, form_rest.1, &mut b) {
+            if self.match_seq(e, &pat_items[1..], pat_tail, &form_items[1..], *form_tail, &mut b) {
                 let mut renames = Renames { map: HashMap::default(), alias };
                 return self.instantiate(e, *tmpl, &b, &mut renames);
             }
