@@ -16,7 +16,7 @@
 //!
 //! The roots live in the `Vm`, so it gathers them and calls [`Engine::collect`].
 
-use std::collections::HashMap;
+use crate::fx::HashMap;
 use std::rc::Rc;
 
 use crate::value::{KwId, ObjRef, SymId, Value};
@@ -757,10 +757,10 @@ impl Engine {
             env_pool: Vec::new(),
             collections: 0,
             handles: Vec::new(),
-            locs: HashMap::new(),
+            locs: HashMap::default(),
             sink: None,
             stream_port: None,
-            aliases: HashMap::new(),
+            aliases: HashMap::default(),
             interner: Interner::default(),
             prim_names: Vec::new(),
         }
@@ -1399,7 +1399,7 @@ impl Engine {
     fn equal_walk(&self, a: Value, b: Value, budget: Option<usize>) -> Option<bool> {
         let mut work = vec![(a, b)];
         let mut left = budget;
-        let mut parent: HashMap<u32, u32> = HashMap::new();
+        let mut parent: HashMap<u32, u32> = HashMap::default();
         fn find(parent: &mut HashMap<u32, u32>, mut x: u32) -> u32 {
             while let Some(&p) = parent.get(&x) {
                 if p == x {

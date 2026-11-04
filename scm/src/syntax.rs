@@ -34,7 +34,7 @@
 //! paren-ish, which is exactly the distinction the reader's `bracket` flag
 //! already records.
 
-use std::collections::HashMap;
+use crate::fx::HashMap;
 use std::rc::Rc;
 
 use crate::heap::{AliasEnv, Engine, Obj};
@@ -231,7 +231,7 @@ impl SyntaxRules {
 
     fn expand_with(&self, e: &mut Engine, form: Value, alias: AliasEnv) -> SynResult<Value> {
         for (pat, tmpl) in self.rules.iter() {
-            let mut b = Bindings::new();
+            let mut b = Bindings::default();
             // The pattern's own head is ignored -- it names the macro, and
             // R7RS says it is not a pattern variable.
             let (pat_items, pat_tail) = match as_list(e, *pat) {
@@ -248,7 +248,7 @@ impl SyntaxRules {
             let pat_rest = (pat_items[1..].to_vec(), pat_tail);
             let form_rest = (form_items[1..].to_vec(), form_tail);
             if self.match_seq(e, &pat_rest.0, pat_rest.1, &form_rest.0, form_rest.1, &mut b) {
-                let mut renames = Renames { map: HashMap::new(), alias };
+                let mut renames = Renames { map: HashMap::default(), alias };
                 return self.instantiate(e, *tmpl, &b, &mut renames);
             }
         }
@@ -381,7 +381,7 @@ impl SyntaxRules {
                 let mid_end = inputs.len() - tail.len();
                 let mut collected: Vec<Bindings> = Vec::new();
                 for i in &inputs[head.len()..mid_end] {
-                    let mut sub = Bindings::new();
+                    let mut sub = Bindings::default();
                     if !self.match_one(e, repeat, *i, &mut sub) {
                         return false;
                     }

@@ -21,7 +21,7 @@
 //! tested against, so it is written for clarity over speed.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use crate::fx::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -827,7 +827,7 @@ impl Vm {
             macro_gen: 0,
             fallbacks: 0,
             interp_forms: 0,
-            lambda_cache: HashMap::new(),
+            lambda_cache: HashMap::default(),
             last_decline: None,
             native_compiler: None,
             native_units: 0,
@@ -835,7 +835,7 @@ impl Vm {
             break_handler: None,
             break_base: 0,
             segment_handlers: Value::Null,
-            libraries: HashMap::new(),
+            libraries: HashMap::default(),
             loading: Vec::new(),
             source_dir: None,
             library_path: Vec::new(),
@@ -844,18 +844,18 @@ impl Vm {
             prims: Vec::new(),
             vm_prims: Vec::new(),
             plain: Vec::new(),
-            macros: MacroTable::new(),
+            macros: MacroTable::default(),
             stack: Vec::new(),
             high_water: 0,
             expansions: 0,
-            expansion_cache: HashMap::new(),
-            local_expansions: HashMap::new(),
-            local_rules: HashMap::new(),
+            expansion_cache: HashMap::default(),
+            local_expansions: HashMap::default(),
+            local_rules: HashMap::default(),
             next_origin: 0,
             host_fns: Vec::new(),
             ticks: 0,
             view_envs: Vec::new(),
-            docs: HashMap::new(),
+            docs: HashMap::default(),
             current_call: Value::Unspecified,
             last_backtrace: Vec::new(),
             eval_count: 0,
@@ -870,8 +870,8 @@ impl Vm {
             callcc_prim: None,
             dynamic_wind_prim: None,
             next_cont_id: 1,
-            given_flags: HashMap::new(),
-            given_syms: HashSet::new(),
+            given_flags: HashMap::default(),
+            given_syms: HashSet::default(),
         };
         crate::prim::install(&mut vm);
         {

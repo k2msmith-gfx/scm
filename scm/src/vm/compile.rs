@@ -15,7 +15,7 @@
 //! chain it captured, so the two engines can nest in either order.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use crate::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{Formals, Vm};
@@ -240,7 +240,7 @@ impl Outer {
 fn unit(vm: &mut Vm, outer: &Outer, build: impl Fn(&mut Cx) -> R<()>) -> R<Rc<Code>> {
     let id = outer.cap.next_unit.get();
     outer.cap.next_unit.set(id + 1);
-    let mut force: HashSet<usize> = HashSet::new();
+    let mut force: HashSet<usize> = HashSet::default();
     loop {
         let mut cx = Cx::new(vm, outer, id, Rc::new(force.clone()));
         build(&mut cx)?;
@@ -280,7 +280,7 @@ impl<'a> Cx<'a> {
             ops: Vec::new(),
             consts: Vec::new(),
             globals: Vec::new(),
-            global_index: HashMap::new(),
+            global_index: HashMap::default(),
             lambdas: Vec::new(),
             names: Vec::new(),
             forms: Vec::new(),

@@ -94,6 +94,7 @@
 pub mod bigint;
 pub mod code;
 pub mod embed;
+mod fx;
 pub mod heap;
 pub mod prim;
 pub mod reader;
