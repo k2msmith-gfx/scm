@@ -1104,8 +1104,9 @@ fn write_string(vm: &mut Vm, a: &[Value]) -> PResult {
         Some(v) => *v,
         None => return Err(err("write-string: expects a string")),
     };
-    let cs = chars_of("write-string", &vm.engine, v)?;
+    str_chars("write-string", &vm.engine, v)?;
     let port = out_port(vm, a, 1)?;
+    let cs = str_chars("write-string", &vm.engine, v)?;
     let (start, end) = range_of("write-string", a, 2, cs.len())?;
     let text: String = cs[start..end].iter().collect();
     emit(&mut vm.engine, port, &text)?;
@@ -1326,23 +1327,32 @@ fn str_ref(who: &str, e: &Engine, v: Value) -> Result<crate::value::ObjRef, VmEr
     }
 }
 
-fn chars_of(who: &str, e: &Engine, v: Value) -> Result<Vec<char>, VmError> {
+/// A string's characters, borrowed. Everything that only reads a string
+/// goes through this: `chars_of` copies, and a copy per `string-ref` made
+/// indexing through a string quadratic.
+fn str_chars<'e>(who: &str, e: &'e Engine, v: Value) -> Result<&'e [char], VmError> {
     let r = str_ref(who, e, v)?;
     let Obj::Str(cs) = e.obj(r) else {
         unreachable!("checked")
     };
-    Ok(cs.clone())
+    Ok(cs)
+}
+
+/// A string's characters, copied: for a caller that goes on to allocate,
+/// which needs the engine mutably.
+fn chars_of(who: &str, e: &Engine, v: Value) -> Result<Vec<char>, VmError> {
+    str_chars(who, e, v).map(<[char]>::to_vec)
 }
 
 fn string_length(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("string-length", a)?;
-    Ok(Value::Fixnum(chars_of("string-length", e, v)?.len() as i64))
+    Ok(Value::Fixnum(str_chars("string-length", e, v)?.len() as i64))
 }
 
 fn string_ref(e: &mut Engine, a: &[Value]) -> PResult {
     match a {
         [v, Value::Fixnum(i)] => {
-            let cs = chars_of("string-ref", e, *v)?;
+            let cs = str_chars("string-ref", e, *v)?;
             cs.get(*i as usize)
                 .copied()
                 .map(Value::Char)
@@ -1406,7 +1416,7 @@ fn string_from_chars(e: &mut Engine, a: &[Value]) -> PResult {
 fn string_append(e: &mut Engine, a: &[Value]) -> PResult {
     let mut out = Vec::new();
     for &v in a {
-        out.extend(chars_of("string-append", e, v)?);
+        out.extend_from_slice(str_chars("string-append", e, v)?);
     }
     Ok(e.alloc(Obj::Str(out)))
 }
@@ -1417,7 +1427,7 @@ fn substring(e: &mut Engine, a: &[Value]) -> PResult {
         [v, Value::Fixnum(s), Value::Fixnum(x)] => (*v, *s, Some(*x)),
         _ => return Err(err("substring: expects a string, a start and an optional end")),
     };
-    let cs = chars_of("substring", e, v)?;
+    let cs = str_chars("substring", e, v)?;
     let end = end.unwrap_or(cs.len() as i64);
     if start < 0 || end > cs.len() as i64 || start > end {
         return Err(err(format!(
@@ -1425,7 +1435,8 @@ fn substring(e: &mut Engine, a: &[Value]) -> PResult {
             cs.len()
         )));
     }
-    Ok(e.alloc(Obj::Str(cs[start as usize..end as usize].to_vec())))
+    let part = cs[start as usize..end as usize].to_vec();
+    Ok(e.alloc(Obj::Str(part)))
 }
 
 fn string_to_list(e: &mut Engine, a: &[Value]) -> PResult {
@@ -1433,7 +1444,7 @@ fn string_to_list(e: &mut Engine, a: &[Value]) -> PResult {
         Some(v) => *v,
         None => return Err(err("string->list: expects a string")),
     };
-    let cs = chars_of("string->list", e, v)?;
+    let cs = str_chars("string->list", e, v)?;
     let (start, end) = range_of("string->list", a, 1, cs.len())?;
     let items: Vec<Value> = cs[start..end].iter().copied().map(Value::Char).collect();
     Ok(e.list(&items))
@@ -1469,16 +1480,19 @@ fn string_compare(
     if a.len() < 2 {
         return Err(err(format!("{who}: needs at least two strings")));
     }
-    let mut prev = chars_of(who, e, a[0])?;
-    if fold {
-        prev = prev.iter().flat_map(|c| c.to_lowercase()).collect();
-    }
+    // Folding has to build the folded text; a plain comparison borrows.
+    let text = |v| -> Result<std::borrow::Cow<[char]>, VmError> {
+        let cs = str_chars(who, e, v)?;
+        Ok(if fold {
+            std::borrow::Cow::Owned(cs.iter().flat_map(|c| c.to_lowercase()).collect())
+        } else {
+            std::borrow::Cow::Borrowed(cs)
+        })
+    };
+    let mut prev = text(a[0])?;
     for &v in &a[1..] {
-        let mut next = chars_of(who, e, v)?;
-        if fold {
-            next = next.iter().flat_map(|c| c.to_lowercase()).collect();
-        }
-        if !ok(prev.cmp(&next)) {
+        let next = text(v)?;
+        if !ok(prev.as_ref().cmp(next.as_ref())) {
             return Ok(Value::Bool(false));
         }
         prev = next;
@@ -1501,7 +1515,7 @@ fn string_ci_eq(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn string_upcase(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("string-upcase", a)?;
-    let cs: Vec<char> = chars_of("string-upcase", e, v)?
+    let cs: Vec<char> = str_chars("string-upcase", e, v)?
         .iter()
         .flat_map(|c| c.to_uppercase())
         .collect();
@@ -1510,7 +1524,7 @@ fn string_upcase(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn string_downcase(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("string-downcase", a)?;
-    let cs: Vec<char> = chars_of("string-downcase", e, v)?
+    let cs: Vec<char> = str_chars("string-downcase", e, v)?
         .iter()
         .flat_map(|c| c.to_lowercase())
         .collect();
@@ -1527,9 +1541,10 @@ fn string_copy(e: &mut Engine, a: &[Value]) -> PResult {
     let Some(&v) = a.first() else {
         return Err(err("string-copy: expects a string and an optional range"));
     };
-    let cs = chars_of("string-copy", e, v)?;
+    let cs = str_chars("string-copy", e, v)?;
     let (start, end) = range_of("string-copy", a, 1, cs.len())?;
-    Ok(e.alloc(Obj::Str(cs[start..end].to_vec())))
+    let part = cs[start..end].to_vec();
+    Ok(e.alloc(Obj::Str(part)))
 }
 
 fn is_string(e: &mut Engine, a: &[Value]) -> PResult {
@@ -1543,7 +1558,7 @@ fn is_string(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn string_to_symbol(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("string->symbol", a)?;
-    let s: String = chars_of("string->symbol", e, v)?.into_iter().collect();
+    let s: String = str_chars("string->symbol", e, v)?.iter().collect();
     Ok(e.sym(&s))
 }
 
@@ -1564,7 +1579,7 @@ fn symbol_to_string(e: &mut Engine, a: &[Value]) -> PResult {
 /// gets at Janet's `(keyword …)` -- 101 uses in the corpus.
 fn string_to_keyword(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("string->keyword", a)?;
-    let s: String = chars_of("string->keyword", e, v)?.into_iter().collect();
+    let s: String = str_chars("string->keyword", e, v)?.iter().collect();
     Ok(e.kw(&s))
 }
 
@@ -1588,7 +1603,7 @@ fn string_to_number(e: &mut Engine, a: &[Value]) -> PResult {
         Some(v) => *v,
         None => return Err(err("string->number: expects a string")),
     };
-    let text: String = chars_of("string->number", e, v)?.into_iter().collect();
+    let text: String = str_chars("string->number", e, v)?.iter().collect();
     let s = match a.get(1) {
         Some(Value::Fixnum(2)) => format!("#b{text}"),
         Some(Value::Fixnum(8)) => format!("#o{text}"),
@@ -2837,9 +2852,9 @@ fn p_eqv_hash(_e: &mut Engine, a: &[Value]) -> PResult {
 
 fn p_string_hash(e: &mut Engine, a: &[Value]) -> PResult {
     let v = *a.first().ok_or_else(|| err("string-hash: expects a string"))?;
-    let cs = chars_of("string-hash", e, v)?;
+    let cs = str_chars("string-hash", e, v)?;
     let mut h = mix(13, cs.len() as u64);
-    for c in cs {
+    for &c in cs {
         h = mix(h, c as u64);
     }
     bounded(a, 1, h)
@@ -2847,7 +2862,7 @@ fn p_string_hash(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn p_string_ci_hash(e: &mut Engine, a: &[Value]) -> PResult {
     let v = *a.first().ok_or_else(|| err("string-ci-hash: expects a string"))?;
-    let cs = chars_of("string-ci-hash", e, v)?;
+    let cs = str_chars("string-ci-hash", e, v)?;
     let folded: String = cs.iter().collect::<String>().to_lowercase();
     let mut h = mix(13, folded.chars().count() as u64);
     for c in folded.chars() {
@@ -4306,7 +4321,7 @@ fn string_ci_ge(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn string_foldcase(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("string-foldcase", a)?;
-    let cs: Vec<char> = chars_of("string-foldcase", e, v)?
+    let cs: Vec<char> = str_chars("string-foldcase", e, v)?
         .iter()
         .flat_map(|c| c.to_lowercase())
         .collect();
@@ -4346,7 +4361,7 @@ fn string_to_vector(e: &mut Engine, a: &[Value]) -> PResult {
     let Some(&v) = a.first() else {
         return Err(err("string->vector: expects a string and an optional range"));
     };
-    let cs = chars_of("string->vector", e, v)?;
+    let cs = str_chars("string->vector", e, v)?;
     let (start, end) = range_of("string->vector", a, 1, cs.len())?;
     let items: Vec<Value> = cs[start..end].iter().copied().map(Value::Char).collect();
     Ok(e.vector(items, true))
@@ -4624,7 +4639,7 @@ fn string_to_utf8(e: &mut Engine, a: &[Value]) -> PResult {
         Some(v) => *v,
         None => return Err(err("string->utf8: expects a string")),
     };
-    let cs = chars_of("string->utf8", e, v)?;
+    let cs = str_chars("string->utf8", e, v)?;
     // The range is in CHARACTERS, and the result in bytes.
     let (start, end) = range_of("string->utf8", a, 1, cs.len())?;
     let text: String = cs[start..end].iter().collect();
@@ -4676,7 +4691,7 @@ fn p_features(e: &mut Engine, _a: &[Value]) -> PResult {
 
 fn p_get_env(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("get-environment-variable", a)?;
-    let name: String = chars_of("get-environment-variable", e, v)?.into_iter().collect();
+    let name: String = str_chars("get-environment-variable", e, v)?.iter().collect();
     match std::env::var(&name) {
         Ok(val) => Ok(e.string(&val)),
         Err(_) => Ok(Value::Bool(false)),
@@ -4747,13 +4762,13 @@ fn file_err(e: &mut Engine, msg: &str) -> VmError {
 
 fn p_file_exists(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("file-exists?", a)?;
-    let path: String = chars_of("file-exists?", e, v)?.into_iter().collect();
+    let path: String = str_chars("file-exists?", e, v)?.iter().collect();
     Ok(Value::Bool(std::path::Path::new(&path).exists()))
 }
 
 fn p_delete_file(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("delete-file", a)?;
-    let path: String = chars_of("delete-file", e, v)?.into_iter().collect();
+    let path: String = str_chars("delete-file", e, v)?.iter().collect();
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(Value::Unspecified),
         Err(err_io) => Err(file_err(e, &format!("delete-file: {path}: {err_io}"))),
@@ -4762,7 +4777,7 @@ fn p_delete_file(e: &mut Engine, a: &[Value]) -> PResult {
 
 fn p_open_input_file(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("open-input-file", a)?;
-    let path: String = chars_of("open-input-file", e, v)?.into_iter().collect();
+    let path: String = str_chars("open-input-file", e, v)?.iter().collect();
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(e.port(PortKind::StringIn {
             chars: text.chars().collect(),
@@ -4777,7 +4792,7 @@ fn p_open_input_file(e: &mut Engine, a: &[Value]) -> PResult {
 /// and close.
 fn p_open_output_file(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("open-output-file", a)?;
-    let path: String = chars_of("open-output-file", e, v)?.into_iter().collect();
+    let path: String = str_chars("open-output-file", e, v)?.iter().collect();
     match std::fs::File::create(&path) {
         Ok(_) => Ok(e.port(PortKind::FileOut { path, buf: String::new() })),
         Err(err_io) => Err(file_err(e, &format!("open-output-file: {path}: {err_io}"))),
@@ -4789,7 +4804,7 @@ fn p_open_output_file(e: &mut Engine, a: &[Value]) -> PResult {
 /// explicit stack is what makes it so.
 fn load_prim(vm: &mut Vm, a: &[Value]) -> PResult {
     let v = one("load", a)?;
-    let path: String = chars_of("load", &vm.engine, v)?.into_iter().collect();
+    let path: String = str_chars("load", &vm.engine, v)?.iter().collect();
     let text = std::fs::read_to_string(&path)
         .map_err(|io| file_err(&mut vm.engine, &format!("load: {path}: {io}")))?;
     vm.eval_str_named(&text, &path)
