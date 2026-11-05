@@ -18,7 +18,7 @@ specially -- `let` and named `let`, closures created in loops and called
 after, internal defines, `set!`, `call/cc`, `guard` and `raise`,
 `parameterize`, `dynamic-wind`, `do`, `case`, `cond` with `=>`,
 `let-values`, records, string ports, vectors, top-level and local macros,
-mutual and bounded self-recursion, and fourteen kinds of deliberate error
+a body that rebinds a macro's name and calls it, mutual and bounded self-recursion, and fourteen kinds of deliberate error
 under `guard` -- and runs each under T0, T1 and, with `--t2`, T2. Any
 difference in value, output or error message is a mismatch; the program is
 written to `target/fuzz/<seed>-<index>.scm` for replay with `scm` and

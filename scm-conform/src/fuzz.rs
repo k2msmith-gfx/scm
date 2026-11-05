@@ -401,7 +401,7 @@ impl Gen {
         for p in &params {
             self.env.push((p.clone(), Ty::Int));
         }
-        let body = match self.rng.below(4) {
+        let body = match self.rng.below(5) {
             0 => {
                 // Internal defines, which T1 pre-scans into slots.
                 let h = self.fresh("h");
@@ -414,6 +414,22 @@ impl Gen {
                 // A local macro: T1 hands the form to T0.
                 let b = self.expr(Ty::Int, 2);
                 format!("(let-syntax ((dbl (syntax-rules () ((_ e) (* 2 e))))) (dbl {b}))")
+            }
+            2 => {
+                // A body that rebinds a macro's name and calls it. T1 scans
+                // a body's forms before its scope opens, so the scan sees
+                // the macro; it must notice and compile the forms again
+                // under the body's own binding, which T0 always sees.
+                let m = self.fresh("m");
+                let _ = writeln!(self.out, "(define-syntax {m} (syntax-rules () ((_ e) (+ e e))))");
+                let (k, b) = (self.expr(Ty::Int, 2), self.expr(Ty::Int, 2));
+                let f = format!("(lambda (q) (- q {k}))");
+                match self.rng.below(4) {
+                    0 => format!("((lambda ({m}) ({m} {b})) {f})"),
+                    1 => format!("(let (({m} {f})) ({m} {b}))"),
+                    2 => format!("(define ({m} q) (- q {k})) ({m} {b})"),
+                    _ => format!("(begin (define {m} {f})) (+ ({m} {b}) 1)"),
+                }
             }
             _ => self.expr(Ty::Int, 3),
         };
