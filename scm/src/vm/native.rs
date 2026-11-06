@@ -18,6 +18,7 @@
 
 use std::rc::Rc;
 
+use super::run::Called;
 use super::{Frame, Step, VResult, Vm, VmError};
 use crate::code::{Code, CodeState};
 use crate::heap::Obj;
@@ -98,6 +99,7 @@ impl Vm {
 
     /// Decide whether this code runs natively: already compiled, or hot
     /// enough to compile now.
+    #[inline]
     pub(super) fn native_for(&mut self, code: &Rc<Code>) -> Option<NativeFn> {
         if let Some(f) = code.native.get() {
             return Some(f);
@@ -176,8 +178,14 @@ impl Vm {
                 }
                 CALL => {
                     match self.do_call(&code, pc, env, base, st.argc, st.form, st.tail != 0) {
-                        Ok(Some(step)) => return Ok(step),
-                        Ok(None) => continue,
+                        Ok(Called::Step(step)) => return Ok(step),
+                        Ok(Called::Enter { code: callee, env: cenv, at, suspend }) => {
+                            if suspend {
+                                self.push(Frame::Code { code, pc, env, base });
+                            }
+                            return Ok(self.enter_code_at(callee, cenv, at));
+                        }
+                        Ok(Called::Done) => continue,
                         Err(e) => {
                             self.stack.push(Frame::Code { code, pc, env, base });
                             return Err(e);

@@ -10,6 +10,20 @@ use crate::code::{CodeState, Op};
 use crate::heap::Obj;
 use crate::value::{ObjRef, Value};
 
+/// S31: what `do_call` did with a call.
+pub(super) enum Called {
+    /// A plain primitive: its result is on the value stack, carry on.
+    Done,
+    /// Take this step; the caller's frame is already pushed, or discarded
+    /// for a tail call.
+    Step(Step),
+    /// Enter compiled `code` with its frame at `at`. With `suspend` the
+    /// caller pushes its own frame first -- moving its `Rc<Code>` into it
+    /// rather than cloning one for `do_call` to push, since the caller's
+    /// loop is leaving anyway. A tail call has no frame to keep.
+    Enter { code: Rc<crate::code::Code>, env: Option<ObjRef>, at: usize, suspend: bool },
+}
+
 impl Vm {
     /// Push a frame for `code` and ask the loop to run it.
     pub(super) fn enter_code(&mut self, code: Rc<crate::code::Code>, env: Option<ObjRef>) -> Step {
@@ -101,10 +115,11 @@ impl Vm {
     }
 
     /// A call whose callee and `argc` arguments are on top of the value
-    /// stack. `Ok(None)` means it was a plain primitive and its result is
-    /// on the stack: carry on in this frame. `Ok(Some)` is the step to take
-    /// instead, with this frame already pushed if the call was not a tail
-    /// call. Shared by T1 and T2.
+    /// stack. `Called::Done` means it was a plain primitive and its result
+    /// is on the stack: carry on in this frame. `Called::Enter` is a
+    /// compiled flat-parameter procedure to enter, the caller pushing its
+    /// own frame; `Called::Step` is any other step, with this frame already
+    /// pushed if the call was not a tail call. Shared by T1 and T2.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn do_call(
         &mut self,
@@ -115,7 +130,7 @@ impl Vm {
         argc: u32,
         form: u32,
         tail: bool,
-    ) -> VResult<Option<Step>> {
+    ) -> VResult<Called> {
         let start = self.vstack.len() - argc as usize - 1;
         let callee = self.vstack[start];
         self.current_call = code.forms[form as usize];
@@ -129,16 +144,36 @@ impl Vm {
             self.current_call = Value::Unspecified;
             if tail {
                 self.vstack.truncate(base);
-                return Ok(Some(Step::Return(v)));
+                return Ok(Called::Step(Step::Return(v)));
             }
             self.vstack.push(v);
-            return Ok(None);
+            return Ok(Called::Done);
         }
-        // A compiled closure with a plain lambda list: the frame is built
-        // straight from the operand stack, no argument vector in between.
-        // Everything else -- T0 closures, optional and named parameters,
-        // arity errors, the special primitives -- goes through the one
-        // `apply`, which also compiles on first call.
+        if let Value::Obj(r) = callee
+            && let Obj::Closure { params, env: cenv, code: CodeState::Compiled(c), .. } = self.engine.obj(r)
+        {
+            // S14: a flat-parameter procedure takes its arguments where they
+            // are. The callee becomes slot 0 and the arguments slots 1..;
+            // nothing is allocated. A tail call slides them down over this
+            // frame first. `flat_params` already means a plain lambda list
+            // (`body_unit`), so arity and the macro generation are all
+            // there is to check.
+            if c.flat_params && params.len() == argc as usize && c.macro_gen == self.macro_gen {
+                let (cenv, c) = (*cenv, Rc::clone(c));
+                let at = if tail {
+                    self.vstack.drain(base..start);
+                    base
+                } else {
+                    start
+                };
+                return Ok(Called::Enter { code: c, env: cenv, at, suspend: !tail });
+            }
+        }
+        // A compiled closure with a plain lambda list but a heap frame: the
+        // frame is built straight from the operand stack, no argument
+        // vector in between. Everything else -- T0 closures, optional and
+        // named parameters, arity errors, the special primitives -- goes
+        // through the one `apply`, which also compiles on first call.
         if let Value::Obj(r) = callee
             && let Obj::Closure { params, opt, named, keys, rest, env: cenv, code: CodeState::Compiled(c), .. } =
                 self.engine.obj(r)
@@ -149,21 +184,6 @@ impl Vm {
             && params.len() == argc as usize
             && c.macro_gen == self.macro_gen
         {
-            // S14: a flat-parameter procedure takes its arguments where they
-            // are. The callee becomes slot 0 and the arguments slots 1..;
-            // nothing is allocated. A tail call slides them down over this
-            // frame first.
-            if c.flat_params {
-                let (cenv, c) = (*cenv, Rc::clone(c));
-                let at = if tail {
-                    self.vstack.drain(base..start);
-                    base
-                } else {
-                    self.push(Frame::Code { code: Rc::clone(code), pc, env, base });
-                    start
-                };
-                return Ok(Some(self.enter_code_at(c, cenv, at)));
-            }
             let (params, cenv, c) = (Rc::clone(params), *cenv, Rc::clone(c));
             let mut slots: Vec<(crate::value::SymId, Value)> = self.engine.slots(params.len() + c.defines.len());
             slots.extend(params.iter().copied().zip(self.vstack[start + 1..].iter().copied()));
@@ -175,7 +195,7 @@ impl Vm {
                 self.push(Frame::Code { code: Rc::clone(code), pc, env, base });
             }
             let new_env = self.engine.env(cenv, slots);
-            return Ok(Some(self.enter_code(c, Some(new_env))));
+            return Ok(Called::Step(self.enter_code(c, Some(new_env))));
         }
         let args = self.vstack.split_off(start + 1);
         if tail {
@@ -184,20 +204,24 @@ impl Vm {
             self.vstack.truncate(start);
             self.push(Frame::Code { code: Rc::clone(code), pc, env, base });
         }
-        self.apply(callee, args).map(Some)
+        self.apply(callee, args).map(Called::Step)
     }
 
     pub(super) fn run_code(
         &mut self,
-        code: Rc<crate::code::Code>,
+        mut code: Rc<crate::code::Code>,
         mut pc: usize,
         mut env: Option<ObjRef>,
-        base: usize,
+        mut base: usize,
     ) -> VResult<Step> {
         // T2, if this code has it or has earned it.
         if let Some(f) = self.native_for(&code) {
             return self.run_native(code, f, pc, env, base);
         }
+        // S31: frames above this are callers this loop suspended itself, so
+        // a `Return` can pop one and carry on here without going back to
+        // the trampoline.
+        let floor = self.stack.len();
         // On any failure the frame goes back on the stack with `pc` just
         // past the op in progress, so the backtrace can name the calls
         // pending in it -- and so the collector, on a safepoint, sees it.
@@ -207,6 +231,35 @@ impl Vm {
                 self.stack.push(Frame::Code { code, pc, env, base });
                 return Err(e);
             }};
+        }
+        // A call: carry on after a plain primitive, enter a compiled
+        // flat-parameter procedure with this frame suspended under it (its
+        // `code` moved into the frame, not cloned), or take any other step.
+        macro_rules! call {
+            ($argc:expr, $form:expr, $tail:expr) => {
+                match self.do_call(&code, pc, env, base, $argc, $form, $tail) {
+                    Ok(Called::Done) => {}
+                    Ok(Called::Step(step)) => return Ok(step),
+                    Ok(Called::Enter { code: callee, env: cenv, at, suspend }) => {
+                        // S31: enter the callee here. A flat unit never has
+                        // native code (`native_for` declines them), so this
+                        // is always the loop that would have run it.
+                        if suspend {
+                            self.push(Frame::Code { code, pc, env, base });
+                        }
+                        let want = at + callee.nslots as usize;
+                        if self.vstack.len() < want {
+                            self.vstack.resize(want, Value::Undefined);
+                        }
+                        code = callee;
+                        pc = 0;
+                        env = cenv;
+                        base = at;
+                        continue;
+                    }
+                    Err(e) => fail!(e),
+                }
+            };
         }
         loop {
             self.ticks += 1;
@@ -337,11 +390,7 @@ impl Vm {
                     // Not a case the fast path answers, or not the
                     // primitive any more: an ordinary call, which for the
                     // primitive is `do_call`'s plain path.
-                    match self.do_call(&code, pc, env, base, (n - 1) as u32, form, false) {
-                        Ok(None) => {}
-                        Ok(Some(step)) => return Ok(step),
-                        Err(e) => fail!(e),
-                    }
+                    call!((n - 1) as u32, form, false);
                 }
                 Op::ArithSrc(i) => {
                     let s = code.ariths[i as usize];
@@ -402,11 +451,7 @@ impl Vm {
                     if !unary {
                         self.vstack.push(b);
                     }
-                    match self.do_call(&code, pc, env, base, if unary { 1 } else { 2 }, s.form, false) {
-                        Ok(None) => {}
-                        Ok(Some(step)) => return Ok(step),
-                        Err(e) => fail!(e),
-                    }
+                    call!(if unary { 1 } else { 2 }, s.form, false);
                 }
                 Op::Jump(t) => pc = t as usize,
                 Op::JumpCall { target, form } => {
@@ -420,16 +465,28 @@ impl Vm {
                     }
                 }
                 Op::Call { argc, form } | Op::TailCall { argc, form } => {
-                    let tail = matches!(op, Op::TailCall { .. });
-                    match self.do_call(&code, pc, env, base, argc, form, tail) {
-                        Ok(None) => {}
-                        Ok(Some(step)) => return Ok(step),
-                        Err(e) => fail!(e),
-                    }
+                    call!(argc, form, matches!(op, Op::TailCall { .. }));
                 }
                 Op::Return => {
                     let v = self.vstack.pop().expect("a value to return");
                     self.vstack.truncate(base);
+                    // S31: back into a compiled caller this loop suspended,
+                    // unless that caller runs natively -- the trampoline
+                    // resumes those.
+                    if self.stack.len() > floor
+                        && let Some(Frame::Code { code: c, .. }) = self.stack.last()
+                        && c.native.get().is_none()
+                    {
+                        let Some(Frame::Code { code: c, pc: p, env: e, base: b }) = self.stack.pop() else { unreachable!() };
+                        self.expansions = 0;
+                        self.current_call = Value::Unspecified;
+                        self.vstack.push(v);
+                        code = c;
+                        pc = p;
+                        env = e;
+                        base = b;
+                        continue;
+                    }
                     return Ok(Step::Return(v));
                 }
                 Op::MakeClosure(i) => {

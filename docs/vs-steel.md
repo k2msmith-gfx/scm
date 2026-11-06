@@ -258,3 +258,32 @@ Loops and arithmetic moved 4–8%; nothing else did, and nothing regressed.
 Fewer dispatches were worth less than S14's "what next" hoped, because a
 call still costs ~57 ns and every program here is calls: see the S30
 record for the reading.
+
+## After S31, 2026-11-05
+
+Same machine, same Steel 0.8.2, scm with S31 (calls and returns between
+compiled procedures stay inside `run_code` --
+[s31-calls-in-the-loop.md](s31-calls-in-the-loop.md)), T1 only, both
+binaries back to back on a quiet machine (load average ~3, falling). The
+"before S30" column is the same evening's run of the commit before S30
+(the table above), so the last column is what S30 and S31 together bought.
+
+| program | Steel | T1 before S30 | T1 at S30 | T1 at S31 | S30+S31 speedup | Steel / T1 |
+|---|---|---|---|---|---|---|
+| `startup` | 56 ms | 4 ms | 4 ms | 3 ms | — | 17× |
+| `fib` 30 | 201 ms | 151 ms | 143 ms | 96 ms | 1.57× | 2.1× |
+| `tak` 24 16 8 | 180 ms | 150 ms | 150 ms | 110 ms | 1.36× | 1.6× |
+| `loop`, 5M with `modulo` | 401 ms | 251 ms | 232 ms | 235 ms | 1.07× | 1.7× |
+| `vec`, fill and sum 1M | 220 ms | 89 ms | 87 ms | 85 ms | 1.05× | 2.6× |
+| `strings` | 87 ms | 50 ms | 55 ms | 54 ms | 0.93× | 1.6× |
+| `closures`, 1M | 181 ms | 149 ms | 155 ms | 141 ms | 1.06× | 1.3× |
+| `lists` | 1879 ms | 1792 ms | 1841 ms | 1639 ms | 1.09× | 1.1× |
+| `fbm`, 128² | 148 ms | 79 ms | 78 ms | 66 ms | 1.20× | 2.2× |
+| `callcc` | 214 ms | 93 ms | 86 ms | 85 ms | 1.09× | 2.5× |
+| **geometric mean, excluding startup** | | **1.55×** | **1.59×** | **1.81×** | **1.15×** | |
+
+T1 is now ahead of Steel on every program, `lists` included. From the
+first measurement (2026-10-13, 0.91×): S14 took it to 1.40×, two
+interpreter-map and string commits to 1.55×, S30 to 1.59×, S31 to 1.81×.
+`strings` at 0.93× is a 4 ms difference between runs of a program S30 and
+S31 do not touch (string primitives), within the noise of this harness.

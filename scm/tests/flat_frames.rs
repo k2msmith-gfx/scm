@@ -349,3 +349,76 @@ fn a_folded_callee_that_is_unbound_fails_as_a_global_read() {
     assert!(format!("{e}").contains("42") || format!("{e}").contains("not a procedure"), "{e}");
     assert_eq!(eval(&mut vm, "(u 1 2)"), "3");
 }
+
+// ---- S31: calls and returns inside the loop ------------------------------
+
+/// S31: a call of a compiled flat procedure and its return stay inside
+/// `run_code`; the frames are the same ones, so everything that reads the
+/// frame stack -- a backtrace, a fuel stop, an escape, deep recursion --
+/// sees what it saw.
+#[test]
+fn in_place_calls_leave_the_frames_as_they_were() {
+    let mut vm = Vm::new();
+    let mut ev = |s: &str| eval(&mut vm, s);
+    // non-tail recursion 100,000 deep: frames go on the VM's stack, not Rust's
+    ev("(define (depth n) (if (= n 0) 0 (+ 1 (depth (- n 1)))))");
+    assert_eq!(ev("(depth 100000)"), "100000");
+    // a return into an interpreted (T0) caller still goes through the trampoline
+    ev("(define (t0-caller n) (let-syntax ((m (syntax-rules () ((_ x) (depth x))))) (+ 1 (m n))))");
+    assert_eq!(ev("(t0-caller 10)"), "11");
+    // an escape from deep inside in-place calls lands at the mark
+    ev("(define (find k) (call/cc (lambda (ret) (let loop ((i 0)) (if (= (depth i) k) (ret i) (loop (+ i 1)))))))");
+    assert_eq!(ev("(find 7)"), "7");
+    // a guard around in-place calls catches what they raise, with the
+    // stack back where it was
+    assert_eq!(ev("(guard (e (#t 'caught)) (depth 'x))"), "caught");
+    assert_eq!(ev("(depth 10)"), "10");
+}
+
+/// A fuel stop inside in-place calls is the same stop, and the session
+/// is usable after it.
+#[test]
+fn a_fuel_stop_inside_in_place_calls_unwinds() {
+    let mut vm = Vm::new();
+    eval(&mut vm, "(define (spin n) (if (= n 0) 0 (+ 1 (spin (- n 1)))))");
+    vm.set_fuel(Some(2_000));
+    let e = vm.eval_str("(spin 1000000)").expect_err("out of fuel");
+    assert!(format!("{e}").to_lowercase().contains("fuel"), "{e}");
+    vm.set_fuel(None);
+    assert_eq!(eval(&mut vm, "(spin 100)"), "100");
+}
+
+/// A host function called from compiled code re-enters the VM: a return
+/// inside that nested evaluation must stop at its floor and come back to
+/// the host, not pop the outer caller's frame.
+#[test]
+fn a_return_never_crosses_a_host_re_entry() {
+    use scm::{Interp, Val};
+    let mut i = Interp::new().unwrap();
+    i.define_fn_with("via-host", |host, args| {
+        let [Val::Proc(f), x] = args else { return Err("expects a procedure and a value".into()) };
+        host.call(f, std::slice::from_ref(x))
+    })
+    .unwrap();
+    i.eval("(define (sq n) (* n n))").unwrap();
+    i.eval("(define (outer n) (+ 1 (via-host sq n) (via-host (lambda (k) (+ (sq k) (via-host sq k))) n)))").unwrap();
+    let v = i.eval("(outer 3)").unwrap();
+    assert_eq!(i.value(&v).unwrap(), Val::Int(1 + 9 + 18));
+    let v = i.eval("(let loop ((i 0) (acc 0)) (if (= i 1000) acc (loop (+ i 1) (+ acc (outer i)))))").unwrap();
+    assert!(matches!(i.value(&v).unwrap(), Val::Int(_)));
+}
+
+/// The backtrace through in-place calls names every pending call, as the
+/// trampoline's did.
+#[test]
+fn a_backtrace_through_in_place_calls_names_every_frame() {
+    use scm::{Op, Outcome, Request, Session};
+    let mut s = Session::new().unwrap();
+    let r = s.handle(Request { id: 1, op: Op::Eval { code: "(define (inner v) (+ 0 (vector-ref v 99)))\n(define (middle v) (* 1 (inner v)))\n(define (outer) (- 0 (middle (vector 1 2 3))))\n(outer)".into(), source: Some("<t>".into()) } });
+    let Outcome::Failed { message, backtrace, .. } = r.outcome else { panic!("expected a failure") };
+    assert!(message.contains("out of range"), "{message}");
+    assert!(backtrace[0].starts_with("(vector-ref v 99)"), "{backtrace:?}");
+    assert!(backtrace[1].starts_with("(+ 0 (vector-ref v 99))"), "{backtrace:?}");
+    assert!(backtrace[2].starts_with("(* 1 (inner v))"), "{backtrace:?}");
+    assert!(backtrace[3].starts_with("(- 0 (middle (vector 1 2 3)))"), "{backtrace:?}");
+}

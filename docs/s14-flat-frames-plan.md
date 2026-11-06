@@ -330,7 +330,11 @@ Next, in this order, each measured alone as S14's stages were:
 2. **The call path**: the per-call `Rc` traffic, the size of the
    `Frame::Code` pushed per call, the trampoline round-trip. S14d showed
    leaving `run_code` is not itself the cost, so this is about shrinking
-   what a call does.
+   what a call does. **Done as S31 (2026-11-05,
+   [s31-calls-in-the-loop.md](s31-calls-in-the-loop.md)), and S14d's
+   verdict did not survive it**: with the trampoline taken out of BOTH
+   directions (the return as well as the call) and the caller's clone
+   gone, a call is 1.3× and `fib` 1.5×. S14d had measured a half of it.
 3. **Only then, a register VM** if dispatch still dominates: ~2-3x S14's
    work (the compiler targets registers; ~25 three-operand ops; T2 ported or
    declining), for an expected 1.3-1.5x -- published stack-vs-register
