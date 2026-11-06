@@ -157,6 +157,11 @@ before trusting it.
   dictionary. Note the trap — **`(cons :k v)` where `v` is a list IS a
   proper list**, so an alist entry reaches a host as a `List` as often as
   a `Pair`, and an entry's value is its cdr either way.
+- **Every write to a heap object goes through `Engine::obj_mut`.** It is
+  the generational collector's write barrier (S32): an old object written
+  any other way can point at a young object the next minor collection
+  frees. `alloc` and the sweep are the only other writers of a slot and
+  neither stores a reference into an existing object. Do not add a third.
 - Check a `.sld` for paren balance before building: an imbalance reports
   only as `read error: incomplete datum`, **with no line number**. A short
   scanner that tracks depth (skipping strings, `;` comments and `#\`

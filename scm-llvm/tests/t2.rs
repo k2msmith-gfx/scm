@@ -179,3 +179,30 @@ fn t2_runs_after_thunks_on_an_uncaught_error() {
         }
     }
 }
+
+/// S32: native code stores into the two innermost frames' slots directly,
+/// past `obj_mut` and so past the write barrier. The frames are
+/// remembered when the slot pointers are fetched -- at entry, and again
+/// after every safepoint, since a collection there empties the remembered
+/// set while the function goes on storing young values into what is now
+/// an old frame. TODAY THAT PATH CANNOT RUN: native code takes a
+/// safepoint only at a backward jump, and since S14 every loop is a
+/// `JumpCall` over flat slots, which T2 declines -- so this test is T2
+/// agreeing under gc stress with `set!` of captured variables, and the
+/// re-fetch in `rt_safepoint` is what keeps S14f (T2 learning the loop
+/// ops) from reopening the hole.
+#[test]
+fn a_young_value_stored_natively_into_an_old_frame_survives() {
+    let mut vm = t2();
+    vm.engine.set_gc_stress(true);
+    let src = "(define (run n) (let ((keep '()) (count 0)) \
+                 (let loop ((i 0)) \
+                   (when (< i n) \
+                     (set! keep (list i (* i i) (cons i i))) \
+                     (set! count (+ count 1)) \
+                     (loop (+ i 1)))) \
+                 (list count keep))) \
+               (run 5000)";
+    assert_eq!(show(&mut vm, src), "(5000 (4999 24990001 (4999 . 4999)))");
+    assert!(vm.native_units() > 0, "nothing was compiled, so T2 was not tested");
+}

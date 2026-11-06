@@ -287,3 +287,16 @@ first measurement (2026-10-13, 0.91×): S14 took it to 1.40×, two
 interpreter-map and string commits to 1.55×, S30 to 1.59×, S31 to 1.81×.
 `strings` at 0.93× is a 4 ms difference between runs of a program S30 and
 S31 do not touch (string primitives), within the noise of this harness.
+
+## After S32, 2026-11-05
+
+The generational collector
+([s32-generational-gc.md](s32-generational-gc.md)), main (S31) against the
+branch, back to back, load average ~3.4: `fib` 96 → 90 ms, `strings` 55 →
+58, `callcc` 84 → 90, the rest within 4 ms; **geometric mean 1.81× →
+1.80×, unchanged.** Expected: no program here keeps a large live set under
+allocation churn, which is the one shape a generational collector changes.
+The workload that does (a 500k-object scene plus point-making, in the S32
+record) went 2.36 → 1.72 s, 1.37×. `lists` is unchanged because its time is
+calls, not collection -- the "third in the collector" reading above
+predates S14.

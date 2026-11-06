@@ -514,6 +514,14 @@ pub unsafe extern "C" fn rt_safepoint(st: *mut NativeState, pc: u32) -> u32 {
         vm.stack.push(Frame::Code { code, pc: pc as usize, env: env_of((*st).env), base: (*st).base });
         let r = vm.safepoint(&Step::Run);
         vm.stack.pop();
+        // S32: a collection may have run, which empties the remembered
+        // set -- and this native function keeps STORING straight into the
+        // two frames' slot buffers. Re-fetching them goes through
+        // `obj_mut`, the write barrier, so the frames are remembered again
+        // (and remembered for the first time if the collection made them
+        // old). Without this a young value stored after a safepoint is
+        // freed by the next minor collection.
+        refresh(&mut *st);
         match r {
             Ok(()) => 0,
             Err(e) => fail(st, e),

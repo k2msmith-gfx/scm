@@ -624,7 +624,28 @@ pub enum AliasEnv {
 #[derive(Debug)]
 pub struct Engine {
     slots: Vec<Slot>,
+    /// S32: STICKY. A mark survives the collection that set it, so
+    /// `marks[i]` means "slot i holds an object that has lived through a
+    /// collection" -- an OLD object. A minor collection marks only from
+    /// the roots and the remembered set and stops at anything already
+    /// marked; a full collection clears every mark first and is the
+    /// collector as it always was.
     marks: Vec<bool>,
+    /// S32: every slot allocated since the last collection, in order: the
+    /// young generation, and all a minor collection sweeps.
+    young: Vec<u32>,
+    /// S32: old objects written to since the last collection (`obj_mut`
+    /// is the barrier), each once; a minor collection scans their
+    /// children, which is how an old object's reference to a young one is
+    /// found without marking the old generation.
+    remembered: Vec<u32>,
+    remembered_bits: Vec<bool>,
+    /// Live objects after the last collection -- the old generation's
+    /// size -- and the size at which the next collection is a full one.
+    old: usize,
+    full_threshold: usize,
+    full_collections: u64,
+    full_only: bool,
     free_head: Option<u32>,
     used: usize,
     /// Objects ever allocated (`allocations`).
@@ -747,6 +768,13 @@ impl Engine {
         Engine {
             slots: Vec::new(),
             marks: Vec::new(),
+            young: Vec::new(),
+            remembered: Vec::new(),
+            remembered_bits: Vec::new(),
+            old: 0,
+            full_threshold: 4096,
+            full_collections: 0,
+            full_only: std::env::var_os("SCM_GC_FULL_ONLY").is_some_and(|v| v == "1"),
             free_head: None,
             used: 0,
             allocations: 0,
@@ -779,12 +807,15 @@ impl Engine {
                 };
                 self.free_head = next;
                 self.slots[i as usize] = Slot::Used(obj);
+                self.young.push(i);
                 Value::Obj(ObjRef(i))
             }
             None => {
                 let i = self.slots.len() as u32;
                 self.slots.push(Slot::Used(obj));
                 self.marks.push(false);
+                self.remembered_bits.push(false);
+                self.young.push(i);
                 Value::Obj(ObjRef(i))
             }
         }
@@ -797,8 +828,19 @@ impl Engine {
         }
     }
 
+    /// The one way to change an object, and so the write barrier (S32):
+    /// an old object about to be written is remembered, once, so the next
+    /// minor collection looks inside it for young objects. Every write
+    /// counts, whether or not it stores a reference -- a port's buffer, a
+    /// string's characters -- because telling them apart would cost more
+    /// than the scan.
     pub fn obj_mut(&mut self, r: ObjRef) -> &mut Obj {
-        match &mut self.slots[r.0 as usize] {
+        let i = r.0 as usize;
+        if self.marks[i] && !self.remembered_bits[i] {
+            self.remembered_bits[i] = true;
+            self.remembered.push(r.0);
+        }
+        match &mut self.slots[i] {
             Slot::Used(o) => o,
             Slot::Free { .. } => panic!("dangling ObjRef {}: that slot is free", r.0),
         }
@@ -869,10 +911,39 @@ impl Engine {
     /// overflow the C stack on a long list -- the same trap the interpreter
     /// avoids by not recursing (§5), with the same requirement-8 consequence:
     /// the host must survive whatever the script allocated.
+    /// S32: minor unless the old generation has doubled since the last
+    /// full collection (or the stress counter says full), in which case
+    /// the whole heap. A minor collection that leaves the heap over its
+    /// cap is followed by a full one before the cap is reported, so a
+    /// heap one full collection would empty is never `OutOfMemory`.
     pub fn collect(&mut self, roots: &[Value]) -> GcStats {
-        self.marks.clear();
-        self.marks.resize(self.slots.len(), false);
+        // `SCM_GC_FULL_ONLY=1` makes every collection a full one: the
+        // collector as it was before S32, for an A/B in one binary and for
+        // ruling the minor collector out of a suspected collector bug.
+        let full = self.full_only || self.old >= self.full_threshold || (self.stress && self.collections % 8 == 7);
+        let stats = self.collect_with(roots, full);
+        if !full && self.heap_cap.is_some_and(|cap| self.used > cap) {
+            return self.collect_with(roots, true);
+        }
+        stats
+    }
 
+    /// A full collection: every mark cleared, everything reachable marked,
+    /// the whole arena swept. What a host or a test asking "collect now"
+    /// means.
+    pub fn collect_full(&mut self, roots: &[Value]) -> GcStats {
+        self.collect_with(roots, true)
+    }
+
+    pub fn full_collections(&self) -> u64 {
+        self.full_collections
+    }
+
+    fn collect_with(&mut self, roots: &[Value], full: bool) -> GcStats {
+        if full {
+            self.marks.clear();
+            self.marks.resize(self.slots.len(), false);
+        }
         // Only a heap reference can mark anything, so nothing else goes on
         // the worklist: a million-element vector of fixnums used to cost a
         // million pushes and pops per collection. `visited` counts what
@@ -891,6 +962,19 @@ impl Engine {
             AliasEnv::Frame(r) => Some(Value::Obj(r)),
             AliasEnv::Global | AliasEnv::Scope { .. } => None,
         }));
+        // S32: a minor collection does not look inside old objects, except
+        // the ones written since the last collection -- their children go
+        // on the worklist as if they were roots.
+        let remembered = std::mem::take(&mut self.remembered);
+        for &i in &remembered {
+            self.remembered_bits[i as usize] = false;
+            if !full {
+                visited += 1;
+                self.push_children(i as usize, &mut work, &mut visited);
+            }
+        }
+        self.remembered = remembered;
+        self.remembered.clear();
 
         while let Some(v) = work.pop() {
             let Value::Obj(r) = v else { continue };
@@ -899,6 +983,16 @@ impl Engine {
                 continue;
             }
             self.marks[i] = true;
+            self.push_children(i, &mut work, &mut visited);
+        }
+
+        self.sweep(full, visited)
+    }
+
+    /// Put everything `slots[i]` refers to on the worklist.
+    fn push_children(&self, i: usize, work: &mut Vec<Value>, visited: &mut usize) {
+        let is_obj = |v: &Value| matches!(v, Value::Obj(_));
+        {
             match &self.slots[i] {
                 // A root pointing at a free slot is a rooting bug, and it is
                 // far better to hear about it here than to watch a reused slot
@@ -912,19 +1006,17 @@ impl Engine {
                 // modeler-port-plan §2o defect) a day went into guessing.
                 Slot::Free { .. } => panic!(
                     "gc: a {} points at free slot {i}",
-                    if roots.contains(&v) {
-                        "vm root"
-                    } else if self.handles.iter().flatten().any(|&h| h == v) {
+                    if self.handles.iter().flatten().any(|&h| h == Value::Obj(ObjRef(i as u32))) {
                         "host handle"
-                    } else if self.aliases.values().any(|&(_, e)| matches!(e, AliasEnv::Frame(r) if Value::Obj(r) == v)) {
+                    } else if self.aliases.values().any(|&(_, e)| matches!(e, AliasEnv::Frame(r) if r.0 as usize == i)) {
                         "macro environment"
                     } else {
-                        "reference reached from a root"
+                        "vm root, remembered object, or a reference reached from one"
                     }
                 ),
                 Slot::Used(obj) => match obj {
                     Obj::Pair(a, d) => {
-                        visited += 2;
+                        *visited += 2;
                         if is_obj(a) {
                             work.push(*a);
                         }
@@ -933,11 +1025,11 @@ impl Engine {
                         }
                     }
                     Obj::Vector { items, .. } => {
-                        visited += items.len();
+                        *visited += items.len();
                         work.extend(items.iter().copied().filter(is_obj));
                     }
                     Obj::Env { parent, slots } => {
-                        visited += slots.len();
+                        *visited += slots.len();
                         if let Some(p) = parent {
                             work.push(Value::Obj(*p));
                         }
@@ -959,7 +1051,7 @@ impl Engine {
                         work.extend(opt.iter().filter_map(|p| p.default));
                         work.extend(named.iter().filter_map(|p| p.default));
                         if let crate::code::CodeState::Compiled(c) = code {
-                            c.trace(&mut work);
+                            c.trace(work);
                         }
                         if let Some(p) = env {
                             work.push(Value::Obj(*p));
@@ -975,13 +1067,13 @@ impl Engine {
                     Obj::Port { .. } => {}
                     Obj::Values(vs) => work.extend(vs.iter().copied()),
                     Obj::Array { store, .. } => {
-                        visited += 1;
+                        *visited += 1;
                         if is_obj(store) {
                             work.push(*store);
                         }
                     }
                     Obj::Record { rtype, fields } => {
-                        visited += fields.len() + 1;
+                        *visited += fields.len() + 1;
                         if is_obj(rtype) {
                             work.push(*rtype);
                         }
@@ -994,7 +1086,7 @@ impl Engine {
                     // A macro's patterns and templates are heap data, so
                     // they must be traced -- this is the `macro_roots` bug
                     // again, and gc stress is what caught it the first time.
-                    Obj::Macro(m) => m.trace(&mut work),
+                    Obj::Macro(m) => m.trace(work),
                     // A continuation holds an id, not a value, so it marks
                     // nothing.
                     Obj::Str(_)
@@ -1005,13 +1097,23 @@ impl Engine {
                 },
             }
         }
+    }
 
+    /// Free every unmarked slot -- all of them after a full collection,
+    /// the young ones after a minor -- and set the thresholds.
+    #[allow(clippy::needless_range_loop)]
+    fn sweep(&mut self, full: bool, visited: usize) -> GcStats {
         // Sweep. Overwriting a slot drops its `Obj`, which runs the `Drop` of
         // anything Rust-owned inside -- so a foreign object's resources are
         // released without a separate finalizer mechanism. A *Scheme-visible*
         // finalizer is absent because nothing needs one yet.
         let mut freed = 0;
-        for i in 0..self.slots.len() {
+        let young = std::mem::take(&mut self.young);
+        let mut freed_slots: Vec<u32> = Vec::new();
+        let n = if full { self.slots.len() } else { young.len() };
+        for k in 0..n {
+            // Which slots: all of them, or the young ones by index.
+            let i = if full { k } else { young[k] as usize };
             if self.marks[i] || matches!(self.slots[i], Slot::Free { .. }) {
                 continue;
             }
@@ -1029,17 +1131,35 @@ impl Engine {
             };
             self.free_head = Some(i as u32);
             freed += 1;
+            if !full && !self.locs.is_empty() {
+                freed_slots.push(i as u32);
+            }
         }
+        self.young = young;
+        self.young.clear();
         // A freed slot's location must go with it: the slot will be reused,
         // and reporting where its previous occupant was written is worse than
         // reporting nothing. Cheap because the table is program-sized.
-        if freed > 0 {
-            let marks = &self.marks;
-            self.locs
-                .retain(|r, _| marks.get(r.0 as usize).copied().unwrap_or(false));
+        if freed > 0 && !self.locs.is_empty() {
+            if full || freed_slots.len() >= self.locs.len() {
+                let marks = &self.marks;
+                self.locs
+                    .retain(|r, _| marks.get(r.0 as usize).copied().unwrap_or(false));
+            } else {
+                for i in freed_slots {
+                    self.locs.remove(&ObjRef(i));
+                }
+            }
         }
         self.used -= freed;
         self.collections += 1;
+        // S32: everything that survived is old now. A full collection
+        // sets the point at which the old generation has doubled.
+        self.old = self.used;
+        if full {
+            self.full_collections += 1;
+            self.full_threshold = self.min_heap.max(self.used.saturating_mul(2));
+        }
 
         // The live set decides the next threshold, but **not alone**.
         //

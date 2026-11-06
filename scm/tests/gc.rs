@@ -418,3 +418,78 @@ fn many_short_calls_from_the_host_still_collect() {
         vm.engine.obj_count()
     );
 }
+
+// ---- S32: the generational collector --------------------------------------
+
+/// The write barrier: a young object stored into an OLD one is reachable
+/// only through that old object, which a minor collection does not mark
+/// from. `obj_mut` remembers the old object, so the minor collection looks
+/// inside it. Under stress every safepoint is a minor collection and every
+/// eighth a full one, so a missed barrier frees the young object and the
+/// read finds a free slot.
+#[test]
+fn a_young_object_stored_into_an_old_one_survives_a_minor_collection() {
+    let mut vm = Vm::new();
+    // The vector and the pair become old: a full collection marks them.
+    vm.eval_str("(define v (make-vector 4 0)) (define p (cons 0 0)) (define (f x) (* x x))").unwrap();
+    vm.collect_now();
+    vm.engine.set_gc_stress(true);
+    // Young objects stored through vector-set!, set-car!, set-cdr! and a
+    // closure's captured variable, then enough allocation for many minor
+    // collections, then read back.
+    let v = vm
+        .eval_str(
+            "(vector-set! v 1 (list 1 2 3)) (set-car! p (list 'a 'b)) (set-cdr! p (vector 9 8)) \
+             (define counter (let ((n (list 0))) (lambda () (set-car! n (+ (car n) 1)) (car n)))) \
+             (counter) \
+             (define (churn i acc) (if (= i 0) acc (churn (- i 1) (cons (list i i) '())))) \
+             (churn 20000 '()) (counter) \
+             (list (vector-ref v 1) (car p) (cdr p) (counter))",
+        )
+        .unwrap();
+    assert_eq!(write_str(&vm.engine, v), "((1 2 3) (a b) #(9 8) 3)");
+}
+
+/// A minor collection frees young garbage and leaves the old generation
+/// alone; `collect_now` is a full collection and frees an old cycle.
+#[test]
+fn minor_collections_free_the_young_and_a_full_one_frees_the_old() {
+    let mut vm = Vm::new();
+    vm.engine.set_min_heap(1024);
+    vm.eval_str("(define keep (let loop ((i 0) (acc '())) (if (= i 2000) acc (loop (+ i 1) (cons i acc)))))").unwrap();
+    vm.collect_now();
+    let live = vm.engine.obj_count();
+    let fulls = vm.engine.full_collections();
+    // Garbage only: minor collections keep the heap near the old set.
+    vm.eval_str("(let loop ((i 0)) (if (= i 100000) 'done (begin (cons i i) (loop (+ i 1)))))").unwrap();
+    assert!(vm.engine.collections() > fulls + 2, "no minor collections ran");
+    assert_eq!(vm.engine.full_collections(), fulls, "a full collection ran for young garbage alone");
+    assert!(vm.engine.obj_count() < live * 3, "young garbage was not reclaimed: {} live", vm.engine.obj_count());
+    // An old cycle is garbage that only a full collection sees.
+    vm.eval_str("(define c (cons 1 2)) (set-cdr! c c)").unwrap();
+    vm.collect_now();
+    vm.eval_str("(set! c #f)").unwrap();
+    let before = vm.engine.obj_count();
+    vm.collect_now();
+    assert!(vm.engine.obj_count() < before, "the old cycle was not freed by a full collection");
+}
+
+/// Old objects accumulate until the old generation has doubled; then a
+/// full collection runs on its own and reclaims what died old.
+#[test]
+fn a_full_collection_runs_when_the_old_generation_has_doubled() {
+    let mut vm = Vm::new();
+    vm.engine.set_min_heap(1024);
+    let fulls = vm.engine.full_collections();
+    // Each round keeps a list alive across collections (it becomes old)
+    // and then drops it: old garbage, which only a full collection frees.
+    vm.eval_str(
+        "(define (build n) (let loop ((i 0) (acc '())) (if (= i n) acc (loop (+ i 1) (cons i acc))))) \
+         (define (rounds k) (if (= k 0) 'done (let ((x (build 5000))) (length x) (rounds (- k 1))))) \
+         (rounds 200)",
+    )
+    .unwrap();
+    assert!(vm.engine.full_collections() > fulls, "no full collection ran as old garbage accumulated");
+    vm.collect_now();
+    assert!(vm.engine.obj_count() < 20_000, "{} live after everything was dropped", vm.engine.obj_count());
+}

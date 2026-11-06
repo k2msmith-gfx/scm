@@ -2037,7 +2037,7 @@ impl Vm {
         self.macro_roots(&mut roots);
         self.param_roots(&mut roots);
         self.library_roots(&mut roots);
-        self.engine.collect(&roots)
+        self.engine.collect_full(&roots)
     }
 
     fn push(&mut self, frame: Frame) {
