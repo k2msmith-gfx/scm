@@ -49,7 +49,7 @@ Profiles (`sample`) of the Fallingwater load: `polygons::flips`,
 `flips`'s `HashMap<(usize,usize),Vec<usize>>` about a fifth of the whole
 load. scm's interpreter is 4% and its compiler absent.
 
-## 3. Follow-ups — both in ray, neither started
+## 3. Follow-ups — both in ray
 
 1. **Build ray with `jit` for texel scenes.** Every `make-texture` lambda
    runs per texel through the interpreter at ~2.4 µs a texel; that is all of
@@ -65,6 +65,12 @@ load. scm's interpreter is 4% and its compiler absent.
    construction. ray may not depend on a hasher crate yet; an inline
    FxHasher is ~15 lines if adding one is unwelcome. Measure before/after
    with the per-form script, Fallingwater massing is the test case.
+
+   **Done the same day**, ray main 094235ae: `rustc-hash` 2 (already in the
+   lock file through another crate) on the one map; the flip queue is
+   sorted, so the hasher cannot change which flips happen. Wall clock of a
+   script that includes only `massing.scm`, six runs each: 0.29–0.30 s
+   before, 0.25 s after. ray's `cargo test` 1477 passed.
 
 Neither needs anything from scm. The earlier idea of compiling derived
 forms directly in scm (to speed the prelude) is withdrawn: the prelude it
