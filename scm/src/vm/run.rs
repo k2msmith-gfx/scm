@@ -343,6 +343,71 @@ impl Vm {
                         Err(e) => fail!(e),
                     }
                 }
+                Op::ArithSrc(i) => {
+                    let s = code.ariths[i as usize];
+                    let unary = s.op == crate::code::ArithOp::Neg;
+                    // How many of callee, a, b are on the stack, callee lowest.
+                    let on_stack = s.global.is_none() as usize
+                        + (s.a == crate::code::Src::Stack) as usize
+                        + (!unary && s.b == crate::code::Src::Stack) as usize;
+                    let at = self.vstack.len() - on_stack;
+                    let mut next = at;
+                    let callee = match s.global {
+                        None => {
+                            next += 1;
+                            self.vstack[at]
+                        }
+                        Some(g) => {
+                            let (sym, resolved) = code.globals[g as usize];
+                            match self.global(sym).or_else(|| if resolved != sym { self.global(resolved) } else { None }) {
+                                Some(v) => v,
+                                None => fail!(self.err(format!("unbound variable: {}", self.engine.interner.sym_name(sym)))),
+                            }
+                        }
+                    };
+                    let mut read = |src: crate::code::Src| match src {
+                        crate::code::Src::Stack => {
+                            let v = self.vstack[next];
+                            next += 1;
+                            v
+                        }
+                        crate::code::Src::Arg(i) => self.vstack[base + i as usize],
+                        crate::code::Src::Const(c) => code.consts[c as usize],
+                    };
+                    let a = read(s.a);
+                    let b = if unary { Value::Unspecified } else { read(s.b) };
+                    if callee == Value::Primitive(crate::value::PrimId(s.prim))
+                        && let Some(v) = arith_fast(s.op, a, b)
+                    {
+                        self.vstack.truncate(at);
+                        self.current_call = Value::Unspecified;
+                        match s.branch {
+                            Some(t) => {
+                                if v.is_truthy() {
+                                    pc += 1;
+                                } else {
+                                    pc = t as usize;
+                                }
+                            }
+                            None => self.vstack.push(v),
+                        }
+                        continue;
+                    }
+                    // The primitive's own path, or another callee: lay the
+                    // call out as `Arith` has it and make the call. With a
+                    // branch, the `JumpIfFalse` at `pc` tests the result.
+                    self.vstack.truncate(at);
+                    self.vstack.push(callee);
+                    self.vstack.push(a);
+                    if !unary {
+                        self.vstack.push(b);
+                    }
+                    match self.do_call(&code, pc, env, base, if unary { 1 } else { 2 }, s.form, false) {
+                        Ok(None) => {}
+                        Ok(Some(step)) => return Ok(step),
+                        Err(e) => fail!(e),
+                    }
+                }
                 Op::Jump(t) => pc = t as usize,
                 Op::JumpCall { target, form } => {
                     self.current_call = code.forms[form as usize];

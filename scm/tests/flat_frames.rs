@@ -235,3 +235,117 @@ fn a_redefined_operator_is_honoured_in_order() {
     assert_eq!(eval(&mut vm, "(add 2 3)"), "5");
     assert_eq!(eval(&mut vm, "(define (f) (+ (begin (set! + -) 10) 1)) (let ((r (f))) (set! + saved) r)"), "11");
 }
+
+// ---- S30: superinstructions ----------------------------------------------
+
+/// S30: an operation whose operands are flat slots or constants is one op
+/// with the callee's read folded in; the result and every error are still
+/// the primitive's, and a redefined operator is still seen.
+#[test]
+fn fused_arithmetic_is_the_primitive_in_every_case() {
+    let mut vm = Vm::new();
+    let mut ev = |s: &str| eval(&mut vm, s);
+    ev("(define (f a b) (list (+ a b) (- a b) (* a b) (< a b) (= a b) (- a) (* a 2.5) (+ 1 b)))");
+    assert_eq!(ev("(f 3 4)"), "(7 -1 12 #t #f -3 7.5 5)");
+    // overflow, a bignum, a mixed exact comparison: the slow path
+    assert_eq!(ev("(f 9223372036854775807 1)"), "(9223372036854775808 9223372036854775806 9223372036854775807 #f #f -9223372036854775807 23058430092136940000.0 2)");
+    // the same through `apply`, which is the primitive with nothing fused
+    ev("(define (ref a b) (list (apply + (list a b)) (apply - (list a b)) (apply * (list a b)) (apply < (list a b)) (apply = (list a b)) (apply - (list a)) (apply * (list a 2.5)) (apply + (list 1 b))))");
+    for args in ["9223372036854775807 1", "9007199254740993 9007199254740992.0", "-9223372036854775808 -1", "2.5 0.5", "7 0.0", "3 4"] {
+        assert_eq!(ev(&format!("(f {args})")), ev(&format!("(ref {args})")), "{args}");
+    }
+    let e = vm.eval_str("(f 1 \"x\")").expect_err("not a number");
+    let direct = vm.eval_str("(apply + (list 1 \"x\"))").expect_err("not a number");
+    assert_eq!(format!("{e}"), format!("{direct}"));
+    // the folded callee is read at the op, so a redefinition is seen
+    eval(&mut vm, "(define saved +)");
+    eval(&mut vm, "(set! + (lambda (a b) (* a b)))");
+    assert_eq!(eval(&mut vm, "(car (f 3 4))"), "12");
+    eval(&mut vm, "(set! + saved)");
+    assert_eq!(eval(&mut vm, "(car (f 3 4))"), "7");
+}
+
+/// A comparison that is an `if`'s test takes the branch itself; when the
+/// fast path declines (a mixed pair, a non-number) the branch after it
+/// still runs on the primitive's answer -- or the primitive's error.
+#[test]
+fn a_fused_comparison_branches_on_the_primitives_answer() {
+    let mut vm = Vm::new();
+    let mut ev = |s: &str| eval(&mut vm, s);
+    ev("(define (g a b) (if (< a b) 'lt (if (= a b) 'eq 'gt)))");
+    assert_eq!(ev("(list (g 1 2) (g 2 2) (g 3 2) (g 1.0 2.0) (g 2.5 2.5))"), "(lt eq gt lt eq)");
+    // mixed exact: 2^53 + 1 against 2^53.0 is gt, not eq
+    assert_eq!(ev("(g 9007199254740993 9007199254740992.0)"), "gt");
+    assert_eq!(ev("(g 9007199254740992 9007199254740992.0)"), "eq");
+    // the operands on the stack, both and one
+    ev("(define (h a b) (if (< (* a 1) (* b 1)) 'lt 'ge))");
+    assert_eq!(ev("(list (h 1 2) (h 2 1))"), "(lt ge)");
+    ev("(define (k a b) (if (< a (* b 1)) 'lt 'ge))");
+    assert_eq!(ev("(list (k 1 2) (k 2 1))"), "(lt ge)");
+    // a redefined comparison is honoured
+    ev("(define saved <)");
+    ev("(set! < (lambda (a b) (> a b)))");
+    assert_eq!(ev("(g 1 2)"), "gt");
+    ev("(set! < saved)");
+    assert_eq!(ev("(g 1 2)"), "lt");
+    let e = vm.eval_str("(g 'a 1)").expect_err("not a number");
+    let direct = vm.eval_str("(apply < (list 'a 1))").expect_err("not a number");
+    assert_eq!(format!("{e}"), format!("{direct}"));
+}
+
+/// Reading a slot can move later than written only when nothing in between
+/// writes it: a `set!` of the slot in the second operand keeps the read
+/// where it was, and a jump inside the second operand is relocated.
+#[test]
+fn a_folded_read_keeps_its_order() {
+    let mut vm = Vm::new();
+    let mut ev = |s: &str| eval(&mut vm, s);
+    ev("(define (s1 a) (+ a (begin (set! a 5) 1)))");
+    assert_eq!(ev("(s1 3)"), "4");
+    ev("(define (s2 a) (- a (begin (set! a 0) 1)))");
+    assert_eq!(ev("(s2 3)"), "2");
+    // the second operand holds an `if` (two jumps past the deleted read)
+    ev("(define (j a) (+ a (if (> a 2) (* a 10) (- a))))");
+    assert_eq!(ev("(list (j 3) (j 1))"), "(33 0)");
+    // and a loop (not folded: a loop jump writes slots)
+    ev("(define (l a) (+ a (let lp ((i 0)) (if (= i a) i (lp (+ i 1))))))");
+    assert_eq!(ev("(l 4)"), "8");
+    // an inner `if` whose end is the outer test's jump: the comparison's
+    // branch fires only when the comparison itself ran
+    ev("(define (t a c) (if (if c #t (< a 0)) 'yes 'no))");
+    assert_eq!(ev("(list (t 1 #t) (t 1 #f) (t -1 #f))"), "(yes no yes)");
+}
+
+/// The pending-call ranges survive the deletions: a backtrace from inside
+/// the second operand still names the fused call as pending, and one from
+/// the fused op itself does not (its range is empty, as `Arith`'s was).
+#[test]
+fn a_backtrace_through_a_fused_op_names_the_pending_call() {
+    use scm::{Op, Outcome, Request, Session};
+    let mut s = Session::new().unwrap();
+    let r = s.handle(Request { id: 1, op: Op::Eval { code: "(define (bt a) (+ a (car a))) (bt 1)".into(), source: Some("<t>".into()) } });
+    let Outcome::Failed { message, backtrace, .. } = r.outcome else { panic!("expected a failure") };
+    assert!(message.contains("not a pair"), "{message}");
+    assert!(backtrace[0].starts_with("(car a)"), "{:?}", backtrace);
+    assert!(backtrace[1].starts_with("(+ a (car a))"), "{:?}", backtrace);
+    let r = s.handle(Request { id: 2, op: Op::Eval { code: "(define (bu a) (+ a 'x)) (bu 1)".into(), source: Some("<t>".into()) } });
+    let Outcome::Failed { message, backtrace, .. } = r.outcome else { panic!("expected a failure") };
+    assert!(message.contains("number"), "{message}");
+    assert!(backtrace[0].starts_with("(+ a 'x)"), "{:?}", backtrace);
+}
+
+/// The folded callee is looked up when the op runs, with `Global`'s error.
+#[test]
+fn a_folded_callee_that_is_unbound_fails_as_a_global_read() {
+    let mut vm = Vm::new();
+    eval(&mut vm, "(define (u a b) (+ a b))");
+    eval(&mut vm, "(define saved +)");
+    // `+` removed from the globals is not something Scheme can do, so
+    // redefine it as a non-procedure: the fused op must hand it to the
+    // ordinary call path, whose error names the value.
+    eval(&mut vm, "(set! + 42)");
+    let e = vm.eval_str("(u 1 2)").expect_err("not a procedure");
+    eval(&mut vm, "(set! + saved)");
+    assert!(format!("{e}").contains("42") || format!("{e}").contains("not a procedure"), "{e}");
+    assert_eq!(eval(&mut vm, "(u 1 2)"), "3");
+}

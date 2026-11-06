@@ -30,6 +30,40 @@ pub enum ArithOp {
     Ge,
 }
 
+/// S30: where an `ArithSrc` operand comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Src {
+    /// Evaluated already, on the value stack.
+    Stack,
+    /// Flat slot `i` of this frame, read when the op runs.
+    Arg(u16),
+    /// `consts[i]`.
+    Const(u32),
+}
+
+/// S30: one `Op::ArithSrc` -- an `Arith` with its operands, its callee and
+/// the branch after it folded in, so `(< i n)` as an `if`'s test is one
+/// dispatch where it was five.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArithSite {
+    pub op: ArithOp,
+    pub prim: u32,
+    pub form: u32,
+    /// `Some(g)`: the callee is `globals[g]`, read by this op. Only when
+    /// neither operand is on the stack: nothing ran between where the
+    /// callee would have been read and this op, so reading it here is
+    /// T0's order. `None`: the callee is on the stack beneath the stack
+    /// operands, where a `Global` op put it.
+    pub global: Option<u32>,
+    pub a: Src,
+    /// Ignored for `Neg`.
+    pub b: Src,
+    /// `Some(t)`: a `JumpIfFalse(t)` follows this op and the op is a
+    /// comparison. The fast path takes the branch itself and skips that
+    /// op; the slow path leaves its value and falls through to it.
+    pub branch: Option<u32>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     /// Push `consts[i]`.
@@ -84,6 +118,9 @@ pub enum Op {
     /// the primitive's. Any other callee is called like any procedure.
     /// `form` is the call form, for the backtrace and the error.
     Arith { op: ArithOp, prim: u32, form: u32 },
+    /// S30: `ariths[i]`, an `Arith` whose operands (flat slots or
+    /// constants), callee and following branch are folded into one op.
+    ArithSrc(u32),
     /// Pop; branch if false.
     JumpIfFalse(u32),
     /// The callee and `argc` arguments are on the stack, callee lowest.
@@ -145,6 +182,8 @@ pub struct Code {
     /// The call forms, for `current_call` and the backtrace.
     pub forms: Vec<Value>,
     pub blocks: Vec<Rc<Code>>,
+    /// S30: the `ArithSrc` sites.
+    pub ariths: Vec<ArithSite>,
     /// For each call op: the pc where its callee's evaluation began, the pc
     /// of the op itself, and its form. Sorted by start. A backtrace asks
     /// which calls are *pending* at a pc -- the ones whose range contains

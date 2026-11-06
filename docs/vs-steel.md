@@ -229,3 +229,32 @@ S14f teaches it them, and every one of these programs uses them, so T2 runs
 almost nothing natively. Before S14 the jit tier was the faster one (1.06×
 against T1's 0.91×); now plain T1 is faster than old T2 was. S14f -- T2
 compiling the new ops -- is where a jit column would separate again.
+
+## After S30, 2026-11-05
+
+Same machine, same Steel 0.8.2, scm with S30 (`ArithSrc`: an arithmetic op
+with its operands, callee and branch folded in --
+[s30-superinstructions.md](s30-superinstructions.md)), T1 only, one run of
+the harness for each binary back to back, load average ~2.5. The "before"
+column is the commit before S30, not the 10-24 figures: the intervening
+commits (FxHash for the interpreter's maps, strings read in place) had
+already moved the set from 1.40× to 1.55×.
+
+| program | Steel | T1 before | T1 after | Steel / T1 |
+|---|---|---|---|---|
+| `startup` | 54 ms | 4 ms | 5 ms | 11× |
+| `fib` 30 | 196 ms | 151 ms | 140 ms | 1.4× |
+| `tak` 24 16 8 | 175 ms | 150 ms | 147 ms | 1.2× |
+| `loop`, 5M with `modulo` | 399 ms | 251 ms | 230 ms | 1.7× |
+| `vec`, fill and sum 1M | 215 ms | 89 ms | 85 ms | 2.5× |
+| `strings` | 84 ms | 50 ms | 51 ms | 1.6× |
+| `closures`, 1M | 179 ms | 149 ms | 152 ms | 1.2× |
+| `lists` | 1845 ms | 1792 ms | 1814 ms | 1.0× |
+| `fbm`, 128² | 145 ms | 79 ms | 76 ms | 1.9× |
+| `callcc` | 210 ms | 93 ms | 84 ms | 2.5× |
+| **geometric mean, excluding startup** | | **1.55×** | **1.60×** | |
+
+Loops and arithmetic moved 4–8%; nothing else did, and nothing regressed.
+Fewer dispatches were worth less than S14's "what next" hoped, because a
+call still costs ~57 ns and every program here is calls: see the S30
+record for the reading.

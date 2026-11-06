@@ -544,12 +544,13 @@ impl Gen {
 
     fn int(&mut self, depth: u32) -> String {
         let d = depth - 1;
-        // 57, not 50: arms 46, 47 and 48 were added for bignum growth,
+        // 58, not 50: arms 46, 47 and 48 were added for bignum growth,
         // the copy-at-import check and calls through an import; 50-56 for
-        // S14's flat frames, loops and inline arithmetic; and the `_` arm (49) is a real case
+        // S14's flat frames, loops and inline arithmetic; 57 for S30's
+        // fused arithmetic; and the `_` arm (49) is a real case
         // (`raise-continuable`) rather than a filler -- leaving the bound
         // alone silently drops whatever sits last.
-        match self.rng.below(57) {
+        match self.rng.below(58) {
             0..=3 => {
                 let op = *self.rng.pick(&["+", "-", "*"]);
                 let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d));
@@ -660,6 +661,13 @@ impl Gen {
             // S14e: inline arithmetic on flonums, mixed pairs and unary minus,
             // with comparisons, brought back to an exact integer.
             56 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let* ((x (* {a} 0.5)) (y (- {b})) (z (/ x (if (= y 0) 3 y)))) (+ (if (< x z) 1 2) (if (>= (- z) x) 4 8) (exact (round (* 4 (+ x (- y) z))))))") }
+            // S30: every fused arithmetic shape -- slot/slot, slot/constant,
+            // constant/slot with the callee folded in; a slot folded past a
+            // second operand that is a call, an `if` (jumps to relocate) or
+            // a `set!` of that slot (must not fold); unary minus; and a
+            // comparison folded into its `if`, with a mixed pair that
+            // leaves the fast path.
+            57 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let ((p {a}) (q {b})) (define (h k) (* k 2)) (+ (if (< p q) (- p q) (+ q 1)) (* 3 p) (- p (h q)) (+ p (if (> q 0) (* q 2) (- q))) (+ p (begin (set! p (+ p 1)) q)) (- q (begin (set! q 0) 1)) (if (= p (* 0.5 (+ q q))) 10 20) (if (>= (- p) q) 100 200)))") }
             _ => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(with-exception-handler (lambda (e) {a}) (lambda () (+ {b} (raise-continuable 'c))))") }
         }
     }

@@ -19,7 +19,7 @@ use crate::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{Formals, Vm};
-use crate::code::{ArithOp, Code, Lambda, Op};
+use crate::code::{ArithOp, ArithSite, Code, Lambda, Op, Src};
 use crate::heap::{AliasEnv, Obj};
 use crate::syntax::SyntaxRules;
 use crate::value::{ObjRef, SymId, Value};
@@ -147,6 +147,7 @@ struct Cx<'a> {
     names: Vec<Rc<Vec<SymId>>>,
     forms: Vec<Value>,
     blocks: Vec<Rc<Code>>,
+    ariths: Vec<ArithSite>,
     calls: Vec<(u32, u32, u32)>,
     defines: Rc<Vec<SymId>>,
     /// While a body is scanned for its defines: every head the scan
@@ -285,6 +286,7 @@ impl<'a> Cx<'a> {
             names: Vec::new(),
             forms: Vec::new(),
             blocks: Vec::new(),
+            ariths: Vec::new(),
             calls: Vec::new(),
             defines: Rc::new(Vec::new()),
             scanning: 0,
@@ -327,6 +329,7 @@ impl<'a> Cx<'a> {
             names: self.names,
             forms: self.forms,
             blocks: self.blocks,
+            ariths: self.ariths,
             calls: self.calls,
             defines: self.defines,
             macro_gen: self.vm.macro_gen,
@@ -608,6 +611,136 @@ impl<'a> Cx<'a> {
         };
     }
 
+    /// S30: the `Arith` for `(op a b)` just compiled -- the callee's ops at
+    /// `start..callee_end`, each operand's at its entry of `bounds` -- as
+    /// one `ArithSrc` where an operand is a single flat-slot read or a
+    /// constant, and as a plain `Arith` otherwise.
+    ///
+    /// Reading a slot or a constant has no effect and cannot fail, so it
+    /// can move later than it was written, with two guards. The callee's
+    /// read folds in only when NO operand stays on the stack, since an
+    /// operand's evaluation could redefine the operator and T0 read it
+    /// first. A first operand folds in past a second that stays on the
+    /// stack only when the second's ops cannot write that slot -- a `set!`
+    /// of it, or a loop jump, which reassigns the loop's slots.
+    fn fuse_arith(&mut self, op: ArithOp, prim: u32, form: u32, start: u32, callee_end: u32, bounds: &[(u32, u32)]) {
+        let src = |s: &Self, (from, to): (u32, u32)| -> Src {
+            if to != from + 1 {
+                return Src::Stack;
+            }
+            match s.ops[from as usize] {
+                Op::Arg(i) => Src::Arg(i),
+                Op::Const(c) => Src::Const(c),
+                _ => Src::Stack,
+            }
+        };
+        let a = src(self, bounds[0]);
+        let b = bounds.get(1).map_or(Src::Const(0), |&r| src(self, r));
+        let unary = bounds.len() == 1;
+        let callee_single = callee_end == start + 1 && matches!(self.ops[start as usize], Op::Global(_));
+        let writes_a = |s: &Self, (from, to): (u32, u32)| -> bool {
+            s.ops[from as usize..to as usize].iter().any(|o| match (a, o) {
+                (Src::Arg(i), Op::SetArg(j) | Op::SetArgDef { slot: j, .. }) => i == *j,
+                (_, Op::JumpCall { .. }) => true,
+                _ => false,
+            })
+        };
+        // Which reads fold: a plain `Arith` if none does.
+        let fold_b = !unary && b != Src::Stack;
+        let fold_a = a != Src::Stack && (unary || fold_b || !writes_a(self, bounds[1]));
+        if !fold_a && !fold_b {
+            let at = self.here();
+            self.ops.push(Op::Arith { op, prim, form });
+            self.calls.push((start, at, form));
+            return;
+        }
+        let fold_callee = callee_single && fold_a && (unary || fold_b);
+        let global = match (fold_callee, self.ops[start as usize]) {
+            (true, Op::Global(g)) => Some(g),
+            _ => None,
+        };
+        // Delete from the back so earlier pcs stay valid.
+        if fold_b {
+            self.delete_op(bounds[1].0 as usize);
+        }
+        if fold_a {
+            self.delete_op(bounds[0].0 as usize);
+        }
+        if global.is_some() {
+            self.delete_op(start as usize);
+        }
+        let at = self.here();
+        let site = self.ariths.len() as u32;
+        self.ariths.push(ArithSite {
+            op,
+            prim,
+            form,
+            global,
+            a: if fold_a { a } else { Src::Stack },
+            b: if fold_b { b } else { Src::Stack },
+            branch: None,
+        });
+        self.ops.push(Op::ArithSrc(site));
+        self.calls.push((if global.is_some() { at } else { start }, at, form));
+    }
+
+    /// S30: the expression just compiled is an `if`'s test; if its last op
+    /// is a comparison, make it an `ArithSrc` (if it is not one already) so
+    /// the `JumpIfFalse` about to follow can be folded into it. Returns the
+    /// site to give the branch target to.
+    fn fuse_branch(&mut self) -> Option<usize> {
+        let last = self.ops.len().checked_sub(1)?;
+        let is_cmp = |op: ArithOp| matches!(op, ArithOp::Eq | ArithOp::Lt | ArithOp::Gt | ArithOp::Le | ArithOp::Ge);
+        match self.ops[last] {
+            Op::ArithSrc(i) if is_cmp(self.ariths[i as usize].op) => Some(i as usize),
+            Op::Arith { op, prim, form } if is_cmp(op) => {
+                let site = self.ariths.len();
+                self.ariths.push(ArithSite { op, prim, form, global: None, a: Src::Stack, b: Src::Stack, branch: None });
+                self.ops[last] = Op::ArithSrc(site as u32);
+                Some(site)
+            }
+            _ => None,
+        }
+    }
+
+    /// S30: remove `ops[at]`, moving every pc after it down by one: jump
+    /// targets, the pending-call ranges, the slot-name ranges, the branch
+    /// targets of fused comparisons and the tops of the loops still open.
+    /// A forward jump not yet patched holds 0, which no deletion moves.
+    fn delete_op(&mut self, at: usize) {
+        self.ops.remove(at);
+        let at = at as u32;
+        let fix = |t: &mut u32| {
+            if *t > at {
+                *t -= 1;
+            }
+        };
+        for op in &mut self.ops {
+            match op {
+                Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpCall { target: t, .. } => fix(t),
+                _ => {}
+            }
+        }
+        for (s, c, _) in &mut self.calls {
+            fix(s);
+            fix(c);
+        }
+        for (_, _, lo, hi) in &mut self.slot_names {
+            fix(lo);
+            if *hi != u32::MAX {
+                fix(hi);
+            }
+        }
+        for site in &mut self.ariths {
+            if let Some(t) = &mut site.branch {
+                fix(t);
+            }
+        }
+        for l in &mut self.loops {
+            fix(&mut l.top);
+        }
+    }
+
     // ---- forms -------------------------------------------------------------
 
     /// A sequence: every value but the last is dropped.
@@ -827,14 +960,17 @@ impl<'a> Cx<'a> {
             && self.vm.plain_prim(pid)
         {
             let start = self.here();
-            for p in &parts {
+            self.expr(parts[0], false)?;
+            let callee_end = self.here();
+            let mut bounds = Vec::with_capacity(2);
+            for p in &parts[1..] {
+                let from = self.here();
                 self.expr(*p, false)?;
+                bounds.push((from, self.here()));
             }
             let form = self.forms.len() as u32;
             self.forms.push(expr);
-            let at = self.here();
-            self.ops.push(Op::Arith { op, prim: pid.0, form });
-            self.calls.push((start, at, form));
+            self.fuse_arith(op, pid.0, form, start, callee_end, &bounds);
             return Ok(());
         }
         // An application. The callee is evaluated first, then the
@@ -859,6 +995,7 @@ impl<'a> Cx<'a> {
             _ => return decline("if"),
         };
         self.expr(test, false)?;
+        let fused = self.fuse_branch();
         let jf = self.ops.len();
         self.ops.push(Op::JumpIfFalse(0));
         self.expr_lt(then_e, tail)?;
@@ -866,6 +1003,9 @@ impl<'a> Cx<'a> {
         self.ops.push(Op::Jump(0));
         let else_at = self.here();
         self.patch(jf, else_at);
+        if let Some(site) = fused {
+            self.ariths[site].branch = Some(else_at);
+        }
         match else_e {
             Some(e) => self.expr_lt(e, tail)?,
             None => self.ops.push(Op::Unspecified),

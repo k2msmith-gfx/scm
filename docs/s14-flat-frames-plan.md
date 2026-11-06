@@ -323,7 +323,10 @@ Next, in this order, each measured alone as S14's stages were:
 
 1. **Superinstructions** for the commonest sequences (`Arg Arg Arith`,
    `Arg Const Arith`, compare-and-branch): most of a register VM's cut in
-   dispatches without changing the compiler's shape.
+   dispatches without changing the compiler's shape. **Done as S30
+   (2026-11-05, [s30-superinstructions.md](s30-superinstructions.md))**:
+   the empty loop 1.3×, a call 1.16×, `fbm` 1.03× -- the dispatches were
+   never the big share; the call is.
 2. **The call path**: the per-call `Rc` traffic, the size of the
    `Frame::Code` pushed per call, the trampoline round-trip. S14d showed
    leaving `run_code` is not itself the cost, so this is about shrinking
