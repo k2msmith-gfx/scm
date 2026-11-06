@@ -690,10 +690,9 @@ impl<'a> Cx<'a> {
     /// site to give the branch target to.
     fn fuse_branch(&mut self) -> Option<usize> {
         let last = self.ops.len().checked_sub(1)?;
-        let is_cmp = |op: ArithOp| matches!(op, ArithOp::Eq | ArithOp::Lt | ArithOp::Gt | ArithOp::Le | ArithOp::Ge);
         match self.ops[last] {
-            Op::ArithSrc(i) if is_cmp(self.ariths[i as usize].op) => Some(i as usize),
-            Op::Arith { op, prim, form } if is_cmp(op) => {
+            Op::ArithSrc(i) if self.ariths[i as usize].op.yields_bool() => Some(i as usize),
+            Op::Arith { op, prim, form } if op.yields_bool() => {
                 let site = self.ariths.len();
                 self.ariths.push(ArithSite { op, prim, form, global: None, a: Src::Stack, b: Src::Stack, branch: None });
                 self.ops[last] = Op::ArithSrc(site as u32);
@@ -1597,6 +1596,8 @@ impl<'a> Cx<'a> {
 }
 
 /// S14e: which `ArithOp` a call of NAME with ARGC operands is, if any.
+/// S34 added the list, equivalence and indexing primitives: only the
+/// arities here fold, so `(char=? a b c)` stays a call.
 fn arith_op(name: &str, argc: usize) -> Option<ArithOp> {
     Some(match (name, argc) {
         ("+", 2) => ArithOp::Add,
@@ -1609,6 +1610,19 @@ fn arith_op(name: &str, argc: usize) -> Option<ArithOp> {
         (">", 2) => ArithOp::Gt,
         ("<=", 2) => ArithOp::Le,
         (">=", 2) => ArithOp::Ge,
+        // S34
+        ("car", 1) => ArithOp::Car,
+        ("cdr", 1) => ArithOp::Cdr,
+        ("null?", 1) => ArithOp::NullP,
+        ("pair?", 1) => ArithOp::PairP,
+        ("not", 1) => ArithOp::Not,
+        ("zero?", 1) => ArithOp::ZeroP,
+        ("eq?", 2) => ArithOp::EqP,
+        ("eqv?", 2) => ArithOp::EqvP,
+        ("cons", 2) => ArithOp::Cons,
+        ("vector-ref", 2) => ArithOp::VectorRef,
+        ("string-ref", 2) => ArithOp::StringRef,
+        ("char=?", 2) => ArithOp::CharEq,
         _ => return None,
     })
 }

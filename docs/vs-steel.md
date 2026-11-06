@@ -325,3 +325,35 @@ The day, 2026-11-05, from the commit before S30: 1.55× → 1.99× Steel's
 speed. S30 superinstructions 1.03×, S31 calls in the loop 1.14×, S32 the
 collector 1.00× here (1.37× on the scene-shaped workload it is for), S33
 primitives in the loop 1.09×.
+
+## After S34, and the day, 2026-11-05
+
+The list, pair, equivalence and indexing primitives folded into S30's op,
+and the tick moved from every op to calls and backward jumps
+([s34-list-primitives.md](s34-list-primitives.md)): **1.00× on the set,
+`lists` 1.12×**; the per-op cost of the loop is now the floor, and the
+next multiple is a different dispatch, which is a separate decision.
+
+The commit before S30 against S34, Steel beside both, interleaved,
+load average ~8:
+
+| program | Steel | before S30 | S34 | S34 / before | Steel / before | Steel / S34 |
+|---|---|---|---|---|---|---|
+| `startup` | 55 ms | 3 ms | 3 ms | 1.01× | 16.53× | 16.73× |
+| `fib` | 198 ms | 152 ms | 89 ms | 1.70× | 1.30× | 2.22× |
+| `tak` | 178 ms | 151 ms | 99 ms | 1.52× | 1.18× | 1.79× |
+| `loop` | 400 ms | 253 ms | 212 ms | 1.19× | 1.58× | 1.89× |
+| `vec` | 216 ms | 89 ms | 79 ms | 1.13× | 2.43× | 2.74× |
+| `strings` | 86 ms | 50 ms | 52 ms | 0.97× | 1.73× | 1.67× |
+| `closures` | 180 ms | 149 ms | 129 ms | 1.16× | 1.21× | 1.40× |
+| `lists` | 1866 ms | 2287 ms | 1189 ms | 1.92× | 0.82× | 1.57× |
+| `fbm` | 147 ms | 79 ms | 61 ms | 1.28× | 1.87× | 2.40× |
+| `callcc` | 212 ms | 82 ms | 78 ms | 1.05× | 2.57× | 2.71× |
+| **geometric mean, excluding startup** | | | | **1.29×** | **1.54×** | **1.99×** |
+
+**The day: 1.29× on itself, 1.54× → 1.99× Steel's speed.** S30 1.03×,
+S31 1.14×, S32 1.00× here (1.37× on the scene-shaped workload), S33
+1.09×, S34 1.00×. Where it moved: the call-shaped programs (`fib` 1.70×,
+`tak` 1.52×, `lists` 1.92× and from behind Steel to 1.57× ahead). Where
+it did not: `strings` and `callcc`, which live inside a few large
+primitives, as every section above predicted.

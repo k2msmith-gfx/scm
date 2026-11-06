@@ -265,6 +265,48 @@ fn fused_arithmetic_is_the_primitive_in_every_case() {
     assert_eq!(eval(&mut vm, "(car (f 3 4))"), "7");
 }
 
+/// S34: the list, pair, equivalence and indexing primitives take S30's
+/// path too. Every answer and every error is the primitive's; the cases
+/// the fast path declines -- the wrong type, an index out of range, two
+/// bignums under `eqv?` -- reach it; a redefined `car` is honoured.
+#[test]
+fn fused_list_primitives_are_the_primitive_in_every_case() {
+    let mut vm = Vm::new();
+    let mut ev = |s: &str| eval(&mut vm, s);
+    ev("(define (f p v s i) (list (car p) (cdr p) (null? p) (pair? p) (not p) (eq? (car p) 1) (eqv? (car p) 1.0) (cons (car p) (cdr p)) (vector-ref v i) (string-ref s i) (char=? (string-ref s 0) #\\a) (zero? (cdr p))))");
+    assert_eq!(ev("(f (cons 1 0) (vector 5 6) \"ab\" 1)"), "(1 0 #f #t #f #t #f (1 . 0) 6 #\\b #t #t)");
+    assert_eq!(ev("(f (cons 1.0 0.0) (vector 5 6) \"ab\" 0)"), "(1.0 0.0 #f #t #f #f #t (1.0 . 0.0) 5 #\\a #t #t)");
+    // the slow path, which is the primitive: a bignum is eqv? by value
+    ev("(define (g a b) (if (eqv? a b) 'same 'other))");
+    assert_eq!(ev("(g (expt 2 70) (* (expt 2 69) 2))"), "same");
+    assert_eq!(ev("(g (expt 2 70) (expt 2 71))"), "other");
+    assert_eq!(ev("(g 'a 'a)"), "same");
+    // every error is the primitive's, word for word
+    for (fused, direct) in [
+        ("(f 5 (vector) \"\" 0)", "(apply car (list 5))"),
+        ("(f (cons 1 0) (vector 5 6) \"ab\" 2)", "(apply vector-ref (list (vector 5 6) 2))"),
+        ("(f (cons 1 0) (vector 5 6) \"ab\" -1)", "(apply vector-ref (list (vector 5 6) -1))"),
+        ("(f (cons 1 0) (vector 5 6 7) \"ab\" 2)", "(apply string-ref (list \"ab\" 2))"),
+        ("(f (cons 1 'x) (vector 5 6) \"ab\" 1)", "(apply zero? (list 'x))"),
+    ] {
+        let e = vm.eval_str(fused).expect_err("an error");
+        let d = vm.eval_str(direct).expect_err("an error");
+        assert_eq!(format!("{e}"), format!("{d}"), "{fused}");
+    }
+    // a folded predicate branches its `if`; a redefined one is honoured
+    eval(&mut vm, "(define (h l) (if (null? l) 'empty (if (pair? l) 'pair 'atom)))");
+    assert_eq!(eval(&mut vm, "(list (h '()) (h '(1)) (h 2))"), "(empty pair atom)");
+    eval(&mut vm, "(define saved car)");
+    eval(&mut vm, "(set! car (lambda (p) 'mine))");
+    assert_eq!(eval(&mut vm, "(car (f (cons 1 0) (vector 5 6) \"ab\" 1))"), "mine");
+    eval(&mut vm, "(set! car saved)");
+    assert_eq!(eval(&mut vm, "(car (f (cons 1 0) (vector 5 6) \"ab\" 1))"), "1");
+    // a loop of nothing but folded ops and a jump still stops on fuel
+    vm.set_fuel(Some(50));
+    assert!(vm.eval_str("(let loop ((l '(1))) (if (null? l) 0 (loop l)))").is_err());
+    vm.set_fuel(None);
+}
+
 /// A comparison that is an `if`'s test takes the branch itself; when the
 /// fast path declines (a mixed pair, a non-number) the branch after it
 /// still runs on the primitive's answer -- or the primitive's error.
@@ -381,7 +423,9 @@ fn in_place_calls_leave_the_frames_as_they_were() {
 fn a_fuel_stop_inside_in_place_calls_unwinds() {
     let mut vm = Vm::new();
     eval(&mut vm, "(define (spin n) (if (= n 0) 0 (+ 1 (spin (- n 1)))))");
-    vm.set_fuel(Some(2_000));
+    // S34: a tick is a call or a backward jump, not an op, so a million
+    // calls need fewer than a thousand safepoints' worth of fuel to stop.
+    vm.set_fuel(Some(500));
     let e = vm.eval_str("(spin 1000000)").expect_err("out of fuel");
     assert!(format!("{e}").to_lowercase().contains("fuel"), "{e}");
     vm.set_fuel(None);

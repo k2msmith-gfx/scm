@@ -14,7 +14,9 @@ use std::rc::Rc;
 use crate::heap::{NamedParam, Param};
 use crate::value::{SymId, Value};
 
-/// S14e: the arithmetic and comparisons `Op::Arith` stands in for.
+/// S14e: the arithmetic and comparisons `Op::Arith` stands in for; S34
+/// adds the list, pair, equivalence and indexing primitives, which every
+/// list walk calls far more often than it adds. The name is historical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArithOp {
     Add,
@@ -28,6 +30,51 @@ pub enum ArithOp {
     Gt,
     Le,
     Ge,
+    // S34: one argument.
+    Car,
+    Cdr,
+    NullP,
+    PairP,
+    Not,
+    ZeroP,
+    // S34: two arguments.
+    EqP,
+    EqvP,
+    Cons,
+    VectorRef,
+    StringRef,
+    CharEq,
+}
+
+impl ArithOp {
+    /// How many operands the op takes: 1 or 2.
+    #[inline(always)]
+    pub fn arity(self) -> usize {
+        match self {
+            ArithOp::Neg | ArithOp::Car | ArithOp::Cdr | ArithOp::NullP | ArithOp::PairP | ArithOp::Not | ArithOp::ZeroP => 1,
+            _ => 2,
+        }
+    }
+
+    /// Whether the primitive always answers a boolean, so a `JumpIfFalse`
+    /// after the op can be folded into it.
+    pub fn yields_bool(self) -> bool {
+        matches!(
+            self,
+            ArithOp::Eq
+                | ArithOp::Lt
+                | ArithOp::Gt
+                | ArithOp::Le
+                | ArithOp::Ge
+                | ArithOp::NullP
+                | ArithOp::PairP
+                | ArithOp::Not
+                | ArithOp::ZeroP
+                | ArithOp::EqP
+                | ArithOp::EqvP
+                | ArithOp::CharEq
+        )
+    }
 }
 
 /// S30: where an `ArithSrc` operand comes from.
@@ -56,7 +103,7 @@ pub struct ArithSite {
     /// operands, where a `Global` op put it.
     pub global: Option<u32>,
     pub a: Src,
-    /// Ignored for `Neg`.
+    /// Ignored for a unary op.
     pub b: Src,
     /// `Some(t)`: a `JumpIfFalse(t)` follows this op and the op is a
     /// comparison. The fast path takes the branch itself and skips that

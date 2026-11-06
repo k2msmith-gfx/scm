@@ -547,10 +547,11 @@ impl Gen {
         // 58, not 50: arms 46, 47 and 48 were added for bignum growth,
         // the copy-at-import check and calls through an import; 50-56 for
         // S14's flat frames, loops and inline arithmetic; 57 for S30's
-        // fused arithmetic; and the `_` arm (49) is a real case
+        // fused arithmetic; 58 for S34's fused list, equivalence and
+        // indexing primitives; and the `_` arm (49) is a real case
         // (`raise-continuable`) rather than a filler -- leaving the bound
         // alone silently drops whatever sits last.
-        match self.rng.below(58) {
+        match self.rng.below(59) {
             0..=3 => {
                 let op = *self.rng.pick(&["+", "-", "*"]);
                 let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d));
@@ -668,6 +669,14 @@ impl Gen {
             // comparison folded into its `if`, with a mixed pair that
             // leaves the fast path.
             57 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let ((p {a}) (q {b})) (define (h k) (* k 2)) (+ (if (< p q) (- p q) (+ q 1)) (* 3 p) (- p (h q)) (+ p (if (> q 0) (* q 2) (- q))) (+ p (begin (set! p (+ p 1)) q)) (- q (begin (set! q 0) 1)) (if (= p (* 0.5 (+ q q))) 10 20) (if (>= (- p) q) 100 200)))") }
+            // S34: every fused list, pair, equivalence and indexing shape --
+            // `car`/`cdr` on slots and on the stack, `null?`/`pair?`/`not`/
+            // `zero?`/`eq?`/`eqv?`/`char=?` folded into their `if`, `cons`
+            // allocating in the loop, `vector-ref` and `string-ref` with an
+            // index that may leave the fast path (out of range, so the
+            // primitive's error, caught), and `eqv?` on two bignums (equal by
+            // value, which only the primitive knows).
+            58 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let* ((p {a}) (q {b}) (l (list p q 3)) (v (vector p 7)) (s \"ab\") (big (* p 4611686018427387904))) (+ (car l) (car (cdr l)) (if (null? (cdr (cdr (cdr l)))) 1 2) (if (pair? l) 3 4) (if (eq? (car l) p) 5 6) (if (eqv? (* q 1) q) 7 8) (if (not (null? l)) 9 10) (if (zero? (- p p)) 11 12) (if (char=? (string-ref s 0) #\\a) 13 14) (char->integer (string-ref s 1)) (vector-ref v 1) (car (cons q l)) (cdr (cons q p)) (if (eqv? (* big 2) (+ big big)) 15 16) (guard (e (#t 17)) (vector-ref v (modulo (abs q) 3))) (guard (e (#t 18)) (car (if (= p 0) '() l)))))") }
             _ => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(with-exception-handler (lambda (e) {a}) (lambda () (+ {b} (raise-continuable 'c))))") }
         }
     }

@@ -293,6 +293,7 @@ impl Vm {
                         }
                     }
                 } else {
+                tick!();
                 match self.do_call(&code, pc, env, base, $argc, $form, $tail) {
                     Ok(Called::Done) => {}
                     Ok(Called::Step(step)) => return Ok(step),
@@ -318,17 +319,25 @@ impl Vm {
                 }
             };
         }
-        loop {
-            self.ticks += 1;
-            if self.ticks >= 1024 {
-                self.ticks = 0;
-                self.stack.push(Frame::Code { code: Rc::clone(&code), pc, env, base });
-                let r = self.safepoint(&Step::Run);
-                self.stack.pop();
-                if let Err(e) = r {
-                    fail!(e);
+        // S34: the tick is paid at a call and a backward jump, not at every
+        // op. Every loop passes through one of those, so a runaway is still
+        // stopped and a safepoint still comes round; the increment, compare
+        // and branch were a measurable share of a straight-line op.
+        macro_rules! tick {
+            () => {
+                self.ticks += 1;
+                if self.ticks >= 1024 {
+                    self.ticks = 0;
+                    self.stack.push(Frame::Code { code: Rc::clone(&code), pc, env, base });
+                    let r = self.safepoint(&Step::Run);
+                    self.stack.pop();
+                    if let Err(e) = r {
+                        fail!(e);
+                    }
                 }
-            }
+            };
+        }
+        loop {
             let op = code.ops[pc];
             pc += 1;
             match op {
@@ -430,14 +439,14 @@ impl Vm {
                     }
                 }
                 Op::Arith { op, prim, form } => {
-                    let unary = op == crate::code::ArithOp::Neg;
+                    let unary = op.arity() == 1;
                     let n = if unary { 2 } else { 3 };
                     let at = self.vstack.len() - n;
                     let (callee, a) = (self.vstack[at], self.vstack[at + 1]);
                     let b = if unary { Value::Unspecified } else { self.vstack[at + 2] };
                     let pid = crate::value::PrimId(prim);
-                    if callee == Value::Primitive(pid) {
-                        if let Some(v) = arith_fast(op, a, b) {
+                    if matches!(callee, Value::Primitive(p) if p == pid) {
+                        if let Some(v) = prim_fast(&mut self.engine, op, a, b) {
                             self.vstack.truncate(at);
                             self.current_call = Value::Unspecified;
                             self.vstack.push(v);
@@ -451,7 +460,7 @@ impl Vm {
                 }
                 Op::ArithSrc(i) => {
                     let s = code.ariths[i as usize];
-                    let unary = s.op == crate::code::ArithOp::Neg;
+                    let unary = s.op.arity() == 1;
                     // How many of callee, a, b are on the stack, callee lowest.
                     let on_stack = s.global.is_none() as usize
                         + (s.a == crate::code::Src::Stack) as usize
@@ -482,8 +491,8 @@ impl Vm {
                     };
                     let a = read(s.a);
                     let b = if unary { Value::Unspecified } else { read(s.b) };
-                    if callee == Value::Primitive(crate::value::PrimId(s.prim))
-                        && let Some(v) = arith_fast(s.op, a, b)
+                    if matches!(callee, Value::Primitive(p) if p.0 == s.prim)
+                        && let Some(v) = prim_fast(&mut self.engine, s.op, a, b)
                     {
                         self.vstack.truncate(at);
                         self.current_call = Value::Unspecified;
@@ -510,8 +519,14 @@ impl Vm {
                     }
                     call!(if unary { 1 } else { 2 }, s.form, false);
                 }
-                Op::Jump(t) => pc = t as usize,
+                Op::Jump(t) => {
+                    if (t as usize) < pc {
+                        tick!();
+                    }
+                    pc = t as usize;
+                }
                 Op::JumpCall { target, form } => {
+                    tick!();
                     self.current_call = code.forms[form as usize];
                     pc = target as usize;
                 }
@@ -595,6 +610,67 @@ impl Vm {
     }
 }
 
+/// S34: the cases `Op::Arith` computes in place for the list, pair,
+/// equivalence and indexing primitives, each exactly as the primitive
+/// would; `None` for every other case -- the wrong type, an index out of
+/// range, two heap objects under `eqv?` (bignums compare by value) -- which
+/// then goes to the primitive for its answer or its error. The arithmetic
+/// is `arith_fast`'s.
+///
+/// `cons` allocates here. That is safe because `alloc` never collects: a
+/// collection happens only at a safepoint, which pushes this frame first.
+#[inline(always)]
+fn prim_fast(e: &mut crate::heap::Engine, op: crate::code::ArithOp, a: Value, b: Value) -> Option<Value> {
+    use crate::code::ArithOp as A;
+    match op {
+        A::Car | A::Cdr => match a {
+            Value::Obj(r) => match e.obj(r) {
+                Obj::Pair(x, y) => Some(if op == A::Car { *x } else { *y }),
+                _ => None,
+            },
+            _ => None,
+        },
+        A::NullP => Some(Value::Bool(a == Value::Null)),
+        A::PairP => Some(Value::Bool(matches!(a, Value::Obj(r) if matches!(e.obj(r), Obj::Pair(..))))),
+        A::Not => Some(Value::Bool(!a.is_truthy())),
+        A::ZeroP => match a {
+            Value::Fixnum(x) => Some(Value::Bool(x == 0)),
+            Value::Flonum(x) => Some(Value::Bool(x == 0.0)),
+            _ => None,
+        },
+        A::EqP => Some(Value::Bool(a == b)),
+        A::EqvP => {
+            if a == b {
+                Some(Value::Bool(true))
+            } else if let (Value::Obj(_), Value::Obj(_)) = (a, b) {
+                None
+            } else {
+                Some(Value::Bool(false))
+            }
+        }
+        A::Cons => Some(e.cons(a, b)),
+        A::VectorRef => match (a, b) {
+            (Value::Obj(r), Value::Fixnum(i)) => match e.obj(r) {
+                Obj::Vector { items, .. } => usize::try_from(i).ok().and_then(|i| items.get(i).copied()),
+                _ => None,
+            },
+            _ => None,
+        },
+        A::StringRef => match (a, b) {
+            (Value::Obj(r), Value::Fixnum(i)) => match e.obj(r) {
+                Obj::Str(cs) => usize::try_from(i).ok().and_then(|i| cs.get(i).copied()).map(Value::Char),
+                _ => None,
+            },
+            _ => None,
+        },
+        A::CharEq => match (a, b) {
+            (Value::Char(x), Value::Char(y)) => Some(Value::Bool(x == y)),
+            _ => None,
+        },
+        _ => arith_fast(op, a, b),
+    }
+}
+
 /// S14e: the cases `Op::Arith` computes in place, each exactly as the
 /// primitive would (prim.rs `arith`, `div`, `compare`): `None` for every
 /// other case, which then goes to the primitive.
@@ -626,6 +702,7 @@ fn arith_fast(op: crate::code::ArithOp, a: Value, b: Value) -> Option<Value> {
             A::Gt => Some(Value::Bool(x > y)),
             A::Le => Some(Value::Bool(x <= y)),
             A::Ge => Some(Value::Bool(x >= y)),
+            _ => unreachable!("S34 ops are prim_fast's"),
         };
     }
     let fl = |v: Value| match v {
@@ -680,5 +757,6 @@ fn arith_fast(op: crate::code::ArithOp, a: Value, b: Value) -> Option<Value> {
             };
             Some(Value::Bool(ord.is_some_and(holds)))
         }
+        _ => unreachable!("S34 ops are prim_fast's"),
     }
 }
