@@ -1195,6 +1195,12 @@ embedding benchmark suite as the performance baseline — on benchmarks that
 reflect the real workload, a procedural generator loop and a **field
 evaluation**, *not* scene loading, which is not interpreter-bound.
 
+Measured on 2026-11-06, after S34, in `docs/scene-load-profile.md`: the
+modeler prelude is 71 ms, scm's compiler is in no profile, and what scene
+loads do cost is interpreted `make-texture` texels (a `jit` build fixes it)
+and a SipHash map in ray's `polygons::flips`. Both follow-ups are ray-side
+and are listed there for whoever is in ray.
+
 And a rule inherited from scm's side, because it has already paid for itself
 there: **a gate that passes suspiciously fast is not passing.** Check a gate's
 inputs exist before trusting it.
