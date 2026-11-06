@@ -300,3 +300,28 @@ The workload that does (a 500k-object scene plus point-making, in the S32
 record) went 2.36 → 1.72 s, 1.37×. `lists` is unchanged because its time is
 calls, not collection -- the "third in the collector" reading above
 predates S14.
+
+## After S33, 2026-11-05
+
+A plain primitive called from `run_code` itself instead of through
+`do_call` ([s33-primitive-calls.md](s33-primitive-calls.md)); the S32
+binary against S33, back to back, under a load average of 26 from another
+session's gates (read the ratios):
+
+| program | Steel | T1 at S32 | T1 at S33 | S33 / S32 | Steel / T1 |
+|---|---|---|---|---|---|
+| `fib` 30 | 201 ms | 95 ms | 87 ms | 1.09× | 2.3× |
+| `tak` 24 16 8 | 180 ms | 110 ms | 102 ms | 1.07× | 1.8× |
+| `loop`, 5M with `modulo` | 409 ms | 233 ms | 210 ms | 1.11× | 1.9× |
+| `vec`, fill and sum 1M | 218 ms | 85 ms | 77 ms | 1.10× | 2.8× |
+| `strings` | 87 ms | 51 ms | 52 ms | 0.98× | 1.7× |
+| `closures`, 1M | 181 ms | 139 ms | 128 ms | 1.09× | 1.4× |
+| `lists` | 1870 ms | 1629 ms | 1337 ms | 1.22× | 1.4× |
+| `fbm`, 128² | 149 ms | 66 ms | 61 ms | 1.08× | 2.5× |
+| `callcc` | 213 ms | 84 ms | 79 ms | 1.06× | 2.7× |
+| **geometric mean, excluding startup** | | **1.83×** | **1.99×** | **1.09×** | |
+
+The day, 2026-11-05, from the commit before S30: 1.55× → 1.99× Steel's
+speed. S30 superinstructions 1.03×, S31 calls in the loop 1.14×, S32 the
+collector 1.00× here (1.37× on the scene-shaped workload it is for), S33
+primitives in the loop 1.09×.

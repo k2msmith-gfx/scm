@@ -133,15 +133,22 @@ impl Vm {
     ) -> VResult<Called> {
         let start = self.vstack.len() - argc as usize - 1;
         let callee = self.vstack[start];
-        self.current_call = code.forms[form as usize];
         if let Value::Primitive(id) = callee
             && self.plain_prim(id)
         {
             let f = self.prims[id.0 as usize];
             let r = f(&mut self.engine, &self.vstack[start + 1..]);
             self.vstack.truncate(start);
-            let v = r?;
-            self.current_call = Value::Unspecified;
+            // S33: the call in progress is named only when the primitive
+            // fails -- a plain primitive cannot look at it, and the two
+            // stores per call were a measurable share of a call.
+            let v = match r {
+                Ok(v) => v,
+                Err(e) => {
+                    self.current_call = code.forms[form as usize];
+                    return Err(e);
+                }
+            };
             if tail {
                 self.vstack.truncate(base);
                 return Ok(Called::Step(Step::Return(v)));
@@ -149,6 +156,7 @@ impl Vm {
             self.vstack.push(v);
             return Ok(Called::Done);
         }
+        self.current_call = code.forms[form as usize];
         if let Value::Obj(r) = callee
             && let Obj::Closure { params, env: cenv, code: CodeState::Compiled(c), .. } = self.engine.obj(r)
         {
@@ -232,11 +240,59 @@ impl Vm {
                 return Err(e);
             }};
         }
+        // S31: leave this frame with `v`. Back into a compiled caller this
+        // loop suspended, unless that caller runs natively -- the
+        // trampoline resumes those -- or there is none above the floor.
+        macro_rules! ret {
+            ($v:expr) => {{
+                let v = $v;
+                self.vstack.truncate(base);
+                if self.stack.len() > floor
+                    && let Some(Frame::Code { code: c, .. }) = self.stack.last()
+                    && c.native.get().is_none()
+                {
+                    let Some(Frame::Code { code: c, pc: p, env: e, base: b }) = self.stack.pop() else { unreachable!() };
+                    self.expansions = 0;
+                    self.current_call = Value::Unspecified;
+                    self.vstack.push(v);
+                    code = c;
+                    pc = p;
+                    env = e;
+                    base = b;
+                    continue;
+                }
+                return Ok(Step::Return(v));
+            }};
+        }
         // A call: carry on after a plain primitive, enter a compiled
         // flat-parameter procedure with this frame suspended under it (its
         // `code` moved into the frame, not cloned), or take any other step.
         macro_rules! call {
             ($argc:expr, $form:expr, $tail:expr) => {
+                // S33: a plain primitive is called from here, without
+                // entering `do_call` -- its frame and prologue were most of
+                // what a primitive call cost. The body is `do_call`'s
+                // first branch, verbatim.
+                let start = self.vstack.len() - $argc as usize - 1;
+                if let Value::Primitive(id) = self.vstack[start]
+                    && self.plain_prim(id)
+                {
+                    let f = self.prims[id.0 as usize];
+                    let r = f(&mut self.engine, &self.vstack[start + 1..]);
+                    self.vstack.truncate(start);
+                    match r {
+                        Ok(v) => {
+                            if $tail {
+                                ret!(v);
+                            }
+                            self.vstack.push(v);
+                        }
+                        Err(e) => {
+                            self.current_call = code.forms[$form as usize];
+                            fail!(e);
+                        }
+                    }
+                } else {
                 match self.do_call(&code, pc, env, base, $argc, $form, $tail) {
                     Ok(Called::Done) => {}
                     Ok(Called::Step(step)) => return Ok(step),
@@ -258,6 +314,7 @@ impl Vm {
                         continue;
                     }
                     Err(e) => fail!(e),
+                }
                 }
             };
         }
@@ -469,25 +526,7 @@ impl Vm {
                 }
                 Op::Return => {
                     let v = self.vstack.pop().expect("a value to return");
-                    self.vstack.truncate(base);
-                    // S31: back into a compiled caller this loop suspended,
-                    // unless that caller runs natively -- the trampoline
-                    // resumes those.
-                    if self.stack.len() > floor
-                        && let Some(Frame::Code { code: c, .. }) = self.stack.last()
-                        && c.native.get().is_none()
-                    {
-                        let Some(Frame::Code { code: c, pc: p, env: e, base: b }) = self.stack.pop() else { unreachable!() };
-                        self.expansions = 0;
-                        self.current_call = Value::Unspecified;
-                        self.vstack.push(v);
-                        code = c;
-                        pc = p;
-                        env = e;
-                        base = b;
-                        continue;
-                    }
-                    return Ok(Step::Return(v));
+                    ret!(v);
                 }
                 Op::MakeClosure(i) => {
                     let l = &code.lambdas[i as usize];
@@ -569,9 +608,26 @@ impl Vm {
 ///   exact-division and exact-zero rules, which are the primitive's.
 /// - comparisons: two fixnums, or two flonums (a NaN compares false); a
 ///   mixed pair is compared EXACTLY by the primitive, not by conversion.
+#[inline(always)]
 fn arith_fast(op: crate::code::ArithOp, a: Value, b: Value) -> Option<Value> {
     use crate::code::ArithOp as A;
     use std::cmp::Ordering;
+    // S33: two fixnums first, as one match, since that is nearly every
+    // call; everything below is the general shape.
+    if let (Value::Fixnum(x), Value::Fixnum(y)) = (a, b) {
+        return match op {
+            A::Add => x.checked_add(y).map(Value::Fixnum),
+            A::Sub => x.checked_sub(y).map(Value::Fixnum),
+            A::Mul => x.checked_mul(y).map(Value::Fixnum),
+            A::Neg => 0i64.checked_sub(x).map(Value::Fixnum),
+            A::Div => None,
+            A::Eq => Some(Value::Bool(x == y)),
+            A::Lt => Some(Value::Bool(x < y)),
+            A::Gt => Some(Value::Bool(x > y)),
+            A::Le => Some(Value::Bool(x <= y)),
+            A::Ge => Some(Value::Bool(x >= y)),
+        };
+    }
     let fl = |v: Value| match v {
         Value::Fixnum(n) => Some(n as f64),
         Value::Flonum(x) => Some(x),
