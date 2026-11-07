@@ -200,12 +200,10 @@ impl Doc {
             }
             match t.kind {
                 Kind::Open => open.push(i),
-                Kind::Close => {
-                    // A `)` at or past the cursor does not close anything
-                    // the cursor is inside.
-                    if t.end <= offset {
-                        open.pop();
-                    }
+                // A `)` at or past the cursor does not close anything the
+                // cursor is inside.
+                Kind::Close if t.end <= offset => {
+                    open.pop();
                 }
                 _ => {}
             }
