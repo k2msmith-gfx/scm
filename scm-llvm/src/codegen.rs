@@ -25,7 +25,7 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use scm::heap::Obj;
 use scm::{SymId, Value, Vm};
 
-use crate::subset::{binding_items, expand, list, literal_sequence_in};
+use crate::subset::{binding_items, defines_as_lets, expand, list, literal_sequence_in};
 use crate::{Shape, Vec3Abi};
 
 type R<T> = Result<T, String>;
@@ -213,6 +213,7 @@ impl<'c> Cg<'c> {
 
     fn function_of(&mut self, vm: &mut Vm, name: &str, parts: Parts) -> R<FunctionValue<'c>> {
         let Parts { params, body, env: env_obj } = parts;
+        let body = defines_as_lets(vm, &body)?;
         let f64t = self.ctx.f64_type();
         let args: Vec<BasicMetadataTypeEnum> = vec![f64t.into(); params.len()];
         let f = self.module.add_function(&format!("leaf_{name}"), f64t.fn_type(&args, false), Some(Linkage::Private));
@@ -250,6 +251,7 @@ impl<'c> Cg<'c> {
     /// A texture-shaped function: three `f64`s out, by the ABI hook.
     fn function3_of(&mut self, vm: &mut Vm, name: &str, parts: Parts) -> R<()> {
         let Parts { params, body, env: env_obj } = parts;
+        let body = defines_as_lets(vm, &body)?;
         let f64t = self.ctx.f64_type();
         let v3 = self.ctx.struct_type(&[f64t.into(), f64t.into(), f64t.into()], false);
         let abi = crate::vec3_abi();
@@ -1336,7 +1338,8 @@ fn as_let(vm: &mut Vm, parts: &[Value]) -> R<Option<Let>> {
             _ => return Err("a `let` binding that is not (variable init)".into()),
         }
     }
-    let body = match body {
+    let body = defines_as_lets(vm, body)?;
+    let body = match body.as_slice() {
         [one] => *one,
         [] => return Err("a `let` with no body".into()),
         many => {
@@ -1362,7 +1365,7 @@ fn as_lambda(vm: &mut Vm, parts: &[Value]) -> R<(Vec<SymId>, Vec<Value>)> {
             _ => Err("a lambda formal that is not a symbol".to_string()),
         })
         .collect::<R<_>>()?;
-    Ok((formals, parts[2..].to_vec()))
+    Ok((formals, defines_as_lets(vm, &parts[2..])?))
 }
 
 /// Does this form produce a boolean? Decided by its head, before expansion,

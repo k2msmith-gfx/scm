@@ -308,3 +308,36 @@ than raising, which is the one place a leaf and T0 deliberately differ --
 a leaf has no way to raise. The other is the index itself: the subset has
 one numeric type, so an index arrives integral-but-inexact where T0 wants
 an exact integer.
+
+## Internal definitions (2026-11-06)
+
+ray's texels are written with internal `define`s: shark45's `concrete`
+defines `n`, `grit`, `joint` and `g` in turn and returns a colour of `g`, and
+its noise helper `h2` defines `s` the same way. The subset refused all of
+them ("use `let`"), so those textures baked interpreted under a `jit` build.
+
+**A run of definitions opening a body is now nested `let`s.**
+`subset::defines_as_lets` rewrites it, and both the analysis and the code
+generator read every body through it -- a procedure's, a `let`'s and a
+`map` lambda's -- so the two cannot disagree about what a body means.
+
+Internal definitions are `letrec*` and nesting is `let*`. They differ only
+where an init reaches its own name or a later one, so that is refused:
+"the internal `define` of `n` refers to itself, which is `letrec`, not
+`let`". The check is by resolved name and **scoped for the binding forms**
+(`lambda`, `let`, named `let`, `let*`, `letrec`), because `concrete` writes
+`(define n (let loop ((n 0) …) …))` and its loop's `n` is another variable;
+a first version blind to scope refused exactly that. Anything else is read
+as if every symbol were a reference, so a mistake is a refusal, never a
+wrong program. Still refused: an internal *procedure* ("define it at top
+level" -- a leaf holds numbers), and a definition after an expression.
+
+`scm-llvm/tests/leaf_defines.rs`: `concrete` verbatim compiles and agrees
+with T0 exactly on 81 texels across its saw-cut joint, definitions open all
+three kinds of body, and the four refusals name the variable.
+
+**In ray** (`--features oidn,jit`): shark45 bakes no texture interpreted
+now. stiletto's five textures all get past the definitions and stop at the
+next thing each does: the wings and `pant` call `any`, which has a rest
+parameter; `fuselage` closes over a procedure; and `stab` reads its chord
+table through `(at S-CT u)`, which is not a plain vector of numbers.

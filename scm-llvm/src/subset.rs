@@ -181,11 +181,16 @@ impl<'a> Analysis<'a> {
         // two closures that both call a variable `k` cannot be confused.
         self.envs.push(env);
         let mut out = Ok(());
-        for form in body.iter() {
-            if let Err(why) = self.walk(*form, &mut locals, &mut acc) {
-                out = Err(self.refuse(why));
-                break;
+        match defines_as_lets(self.vm, &body) {
+            Ok(body) => {
+                for form in body {
+                    if let Err(why) = self.walk(form, &mut locals, &mut acc) {
+                        out = Err(self.refuse(why));
+                        break;
+                    }
+                }
             }
+            Err(why) => out = Err(self.refuse(why)),
         }
         self.envs.pop();
         self.chain.pop();
@@ -411,8 +416,8 @@ impl<'a> Analysis<'a> {
                         locals.push(s);
                     }
                 }
-                for a in &args[1..] {
-                    self.walk(*a, locals, acc)?;
+                for a in defines_as_lets(self.vm, &args[1..])? {
+                    self.walk(a, locals, acc)?;
                 }
                 locals.truncate(depth);
                 Ok(())
@@ -456,13 +461,15 @@ impl<'a> Analysis<'a> {
                 let depth = locals.len();
                 locals.extend(vars);
                 locals.extend(name);
-                for b in body {
-                    self.walk(*b, locals, acc)?;
+                for b in defines_as_lets(self.vm, body)? {
+                    self.walk(b, locals, acc)?;
                 }
                 locals.truncate(depth);
                 Ok(())
             }
-            "define" => Err("an internal `define` is not in the leaf subset; use `let`".into()),
+            // Leading definitions in a body were rewritten to `let`s before
+            // the walk, so a `define` that reaches here is somewhere else.
+            "define" => Err("an internal `define` is a leaf only where it opens a body".into()),
             _ => unreachable!("{head} is in SPECIAL but not handled"),
         }
     }
@@ -545,6 +552,221 @@ pub fn sequence_items(vm: &Vm, v: Value) -> Option<Vec<Value>> {
         }
         _ => None,
     }
+}
+
+/// A body whose leading forms are internal `define`s, as nested `let`s:
+/// `(define a e1) (define b e2) body …` becomes
+/// `((let ((a e1)) (let ((b e2)) body …)))`. A body without them comes back
+/// unchanged. The analysis and the code generator both read bodies through
+/// this, so they agree on what a body means.
+///
+/// Internal definitions are `letrec*`, and `let` nesting is `let*`. The two
+/// differ only where an init reaches its own name or a later one, so that is
+/// refused, conservatively by name. ray's texels define numbers in order
+/// (`a`, then `sf` from it, then `hinge` from both), which is `let*` exactly.
+/// An internal *procedure* stays refused: a leaf holds numbers, not
+/// procedures, so it belongs at top level, where the analysis reaches it as
+/// a helper.
+pub fn defines_as_lets(vm: &mut Vm, body: &[Value]) -> Result<Vec<Value>, String> {
+    let mut defs: Vec<(SymId, Value)> = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        match as_define(vm, body[i])? {
+            Some(d) => defs.push(d),
+            None => break,
+        }
+        i += 1;
+    }
+    if defs.is_empty() {
+        return Ok(body.to_vec());
+    }
+    let rest = &body[i..];
+    for form in rest {
+        if let Some((name, _)) = as_define(vm, *form)? {
+            let name = vm.engine.interner.sym_name(vm.engine.resolve(name)).to_string();
+            return Err(format!("the internal `define` of `{name}` comes after an expression; definitions open a body"));
+        }
+    }
+    if rest.is_empty() {
+        return Err("a body of only definitions has no value".into());
+    }
+    for (k, (name, init)) in defs.iter().enumerate() {
+        for (later, _) in &defs[k..] {
+            if mentions(vm, *init, *later) {
+                let (n, l) = (vm.engine.resolve(*name), vm.engine.resolve(*later));
+                let (n, l) = (vm.engine.interner.sym_name(n).to_string(), vm.engine.interner.sym_name(l).to_string());
+                return Err(if n == l {
+                    format!("the internal `define` of `{n}` refers to itself, which is `letrec`, not `let`")
+                } else {
+                    format!("the internal `define` of `{n}` refers to `{l}`, defined after it, which is `letrec`, not `let`")
+                });
+            }
+        }
+    }
+    let let_sym = vm.engine.sym("let");
+    let mut inner: Vec<Value> = rest.to_vec();
+    for (name, init) in defs.iter().rev() {
+        let binding = vm.engine.list(&[Value::Symbol(*name), *init]);
+        let bindings = vm.engine.list(&[binding]);
+        let mut form = vec![let_sym, bindings];
+        form.extend(inner);
+        inner = vec![vm.engine.list(&form)];
+    }
+    Ok(inner)
+}
+
+/// `(define name init)` as its parts, `None` for any other form. The other
+/// shapes of `define` are refusals that say what to write instead.
+fn as_define(vm: &mut Vm, form: Value) -> Result<Option<(SymId, Value)>, String> {
+    let Value::Obj(r) = form else { return Ok(None) };
+    if !matches!(vm.engine.obj(r), Obj::Pair(..)) {
+        return Ok(None);
+    }
+    let form = expand(vm, form)?;
+    let parts = list(vm, form)?;
+    let Some(&Value::Symbol(h)) = parts.first() else { return Ok(None) };
+    if vm.engine.interner.sym_name(vm.engine.resolve(h)) != "define" {
+        return Ok(None);
+    }
+    match parts.as_slice() {
+        [_, Value::Symbol(name), init] => Ok(Some((*name, *init))),
+        [_, Value::Symbol(name)] => {
+            let name = vm.engine.interner.sym_name(vm.engine.resolve(*name)).to_string();
+            Err(format!("the internal `define` of `{name}` has no value"))
+        }
+        [_, Value::Obj(sig), ..] if matches!(vm.engine.obj(*sig), Obj::Pair(..)) => {
+            let name = match vm.engine.obj(*sig) {
+                Obj::Pair(Value::Symbol(s), _) => vm.engine.interner.sym_name(vm.engine.resolve(*s)).to_string(),
+                _ => "?".into(),
+            };
+            Err(format!(
+                "`{name}` is an internal procedure, and a leaf holds numbers, not procedures; define it at top level"
+            ))
+        }
+        _ => Err("a malformed internal `define`".into()),
+    }
+}
+
+/// Does `expr` refer to the variable `name`? By resolved name. The binding
+/// forms are scoped, because ray writes `(define n (let loop ((n 0) …) …))`
+/// and that inner `n` is not the one being defined. Anything else is read
+/// as if every symbol in it were a reference: a false yes is a refusal,
+/// never a wrong program.
+fn mentions(vm: &Vm, expr: Value, name: SymId) -> bool {
+    let target = vm.engine.resolve(name);
+    refers(vm, expr, target)
+}
+
+fn refers(vm: &Vm, expr: Value, target: SymId) -> bool {
+    let is = |v: &Value| matches!(v, Value::Symbol(s) if vm.engine.resolve(*s) == target);
+    match expr {
+        Value::Symbol(_) => is(&expr),
+        Value::Obj(r) => match vm.engine.obj(r) {
+            Obj::Vector { items, .. } => items.iter().any(|i| refers(vm, *i, target)),
+            Obj::Pair(..) => {
+                let Ok(parts) = list(vm, expr) else { return any_symbol(vm, expr, target) };
+                let head = match parts.first() {
+                    Some(&Value::Symbol(h)) => vm.engine.interner.sym_name(vm.engine.resolve(h)).to_string(),
+                    _ => String::new(),
+                };
+                let binds = |v: Value| binding_names(vm, v).iter().any(is);
+                match (head.as_str(), parts.as_slice()) {
+                    ("quote", _) => false,
+                    ("lambda", [_, formals, body @ ..]) => {
+                        !binds(*formals) && body.iter().any(|b| refers(vm, *b, target))
+                    }
+                    ("let", [_, Value::Symbol(loop_name), spec, body @ ..]) => {
+                        let items = binding_items(vm, *spec).unwrap_or_default();
+                        pairs(vm, &items).iter().any(|(_, init)| refers(vm, *init, target))
+                            || (!is(&Value::Symbol(*loop_name))
+                                && !pairs(vm, &items).iter().any(|(v, _)| is(v))
+                                && body.iter().any(|b| refers(vm, *b, target)))
+                    }
+                    ("let", [_, spec, body @ ..]) => {
+                        let items = binding_items(vm, *spec).unwrap_or_default();
+                        let ps = pairs(vm, &items);
+                        ps.iter().any(|(_, init)| refers(vm, *init, target))
+                            || (!ps.iter().any(|(v, _)| is(v)) && body.iter().any(|b| refers(vm, *b, target)))
+                    }
+                    ("let*", [_, spec, body @ ..]) => {
+                        let items = binding_items(vm, *spec).unwrap_or_default();
+                        for (v, init) in pairs(vm, &items) {
+                            if refers(vm, init, target) {
+                                return true;
+                            }
+                            if is(&v) {
+                                return false;
+                            }
+                        }
+                        body.iter().any(|b| refers(vm, *b, target))
+                    }
+                    ("letrec" | "letrec*", [_, spec, body @ ..]) => {
+                        let items = binding_items(vm, *spec).unwrap_or_default();
+                        let ps = pairs(vm, &items);
+                        !ps.iter().any(|(v, _)| is(v))
+                            && (ps.iter().any(|(_, init)| refers(vm, *init, target))
+                                || body.iter().any(|b| refers(vm, *b, target)))
+                    }
+                    _ => parts.iter().any(|p| refers(vm, *p, target)),
+                }
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// `(variable init)` pairs of a binding list; a malformed one is skipped,
+/// which only ever makes `refers` answer yes more often.
+fn pairs(vm: &Vm, items: &[Value]) -> Vec<(Value, Value)> {
+    items
+        .iter()
+        .filter_map(|p| match binding_items(vm, *p).ok()?.as_slice() {
+            [v, init] => Some((*v, *init)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every symbol in a lambda list, proper, dotted or a lone rest symbol.
+fn binding_names(vm: &Vm, mut formals: Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    loop {
+        match formals {
+            Value::Symbol(_) => {
+                out.push(formals);
+                return out;
+            }
+            Value::Obj(r) => match vm.engine.obj(r) {
+                Obj::Pair(a, d) => {
+                    out.push(*a);
+                    formals = *d;
+                }
+                _ => return out,
+            },
+            _ => return out,
+        }
+    }
+}
+
+/// The blind fallback for structure `list` cannot read.
+fn any_symbol(vm: &Vm, expr: Value, target: SymId) -> bool {
+    let mut stack = vec![expr];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Symbol(s) if vm.engine.resolve(s) == target => return true,
+            Value::Obj(r) => match vm.engine.obj(r) {
+                Obj::Pair(a, d) => {
+                    stack.push(*a);
+                    stack.push(*d);
+                }
+                Obj::Vector { items, .. } => stack.extend(items.iter().copied()),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Drive T0's expander to a fixed point; the cap is requirement 8's.
