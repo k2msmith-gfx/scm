@@ -8,7 +8,7 @@
 //! something else -- so the way to make them deterministic is to collect
 //! constantly and let the reuse happen immediately.
 
-use scm::{Value, Vm, VmError, write_str};
+use scm::{Tier, Value, Vm, VmError, write_str};
 
 fn stressed() -> Vm {
     let mut vm = Vm::new();
@@ -492,4 +492,38 @@ fn a_full_collection_runs_when_the_old_generation_has_doubled() {
     assert!(vm.engine.full_collections() > fulls, "no full collection ran as old garbage accumulated");
     vm.collect_now();
     assert!(vm.engine.obj_count() < 20_000, "{} live after everything was dropped", vm.engine.obj_count());
+}
+
+#[test]
+fn large_objects_trigger_a_collection_by_their_bytes() {
+    // 3000 strings of 10,000 characters: 120 MB of characters in fewer
+    // objects than the 4096-object floor. Counting objects alone, T1 never
+    // collects and the garbage stays resident -- `strings` in the Steel
+    // benchmark peaked at 250 MB for 80 KB live. And the collection has to
+    // come PROMPTLY: with a safepoint only every 1024 ticks, T1 would ask
+    // about three times in the whole loop. An 8 MB budget is ~15.
+    for tier in [Tier::T0, Tier::T1] {
+        let mut vm = Vm::with_tier(tier);
+        vm.eval_str("(define (loop i) (if (= i 0) 'done (begin (make-string 10000 #\\x) (loop (- i 1))))) (loop 3000)")
+            .expect("loop");
+        assert!(vm.engine.collections() >= 12, "{tier:?}: {} collections for 120 MB of strings", vm.engine.collections());
+    }
+}
+
+#[test]
+fn old_large_garbage_triggers_a_full_collection_by_its_bytes() {
+    // Each round keeps a 3 MB vector live across the collection a 10 MB one
+    // forces, so it is promoted, then drops it: old garbage only a full
+    // collection frees, in too few objects for the object rule to notice.
+    for tier in [Tier::T0, Tier::T1] {
+        let mut vm = Vm::with_tier(tier);
+        vm.eval_str(
+            "(define (id x) x) \
+             (define (rounds k) (if (= k 0) 'done \
+               (let ((v (make-vector 200000 0))) (make-vector 600000 0) (vector-length (id v)) (rounds (- k 1))))) \
+             (rounds 50)",
+        )
+        .expect("rounds");
+        assert!(vm.engine.full_collections() > 0, "{tier:?}: 150 MB of old garbage and no full collection");
+    }
 }

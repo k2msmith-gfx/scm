@@ -94,6 +94,11 @@ impl BigInt {
         BigInt { neg: neg && !mag.is_empty(), mag }
     }
 
+    /// The magnitude's length in 32-bit limbs.
+    pub fn limbs(&self) -> usize {
+        self.mag.len()
+    }
+
     /// `Some(n)` when this fits an `i64`. The one place the fixnum/bignum
     /// boundary is decided.
     pub fn to_i64(&self) -> Option<i64> {

@@ -115,6 +115,16 @@ impl NumTag {
         })
     }
 
+    /// Bytes per element.
+    pub fn size(self) -> usize {
+        match self {
+            NumTag::S8 => 1,
+            NumTag::S16 | NumTag::U16 => 2,
+            NumTag::S32 | NumTag::U32 | NumTag::F32 => 4,
+            NumTag::S64 | NumTag::U64 | NumTag::F64 => 8,
+        }
+    }
+
     pub fn is_float(self) -> bool {
         matches!(self, NumTag::F32 | NumTag::F64)
     }
@@ -470,6 +480,26 @@ pub enum Obj {
     },
 }
 
+/// Steps between safepoints in the run loops (`Engine::ticks`).
+pub(crate) const TICKS: u32 = 1024;
+
+impl Obj {
+    /// Bytes held outside the slot, for the collector's byte budget. Only
+    /// the kinds that can grow large count; a pair, a frame or a closure is
+    /// paid for by the object count alone.
+    pub fn payload_bytes(&self) -> usize {
+        match self {
+            Obj::Str(cs) => cs.len() * 4,
+            Obj::Vector { items, .. } | Obj::Values(items) => items.len() * 16,
+            Obj::Record { fields, .. } => fields.len() * 16,
+            Obj::Bytevector(b) => b.len(),
+            Obj::NumVector(v) => v.len() * v.tag().size(),
+            Obj::Bignum(b) => b.limbs() * 4,
+            _ => 0,
+        }
+    }
+}
+
 /// A heap slot. Freed slots form a list through `next`, so allocation is a pop
 /// and nothing is ever relocated.
 #[derive(Debug)]
@@ -655,6 +685,31 @@ pub struct Engine {
     threshold: usize,
     /// A floor, so a small program never collects at all.
     min_heap: usize,
+    /// Steps since the last safepoint, for EVERY entry into the run loops
+    /// together. It was a local of each entry, so a host that calls into
+    /// Scheme many times — ray's `make-texture`, 590,000 texel calls of a
+    /// few hundred steps each — never reached 1024 in any one of them and
+    /// never collected: 17.5 million objects later the arena's high-water
+    /// mark made every later collection a sweep of all of it (2026-10-24).
+    /// Here the cadence holds across entries, and each safepoint is still
+    /// taken inside a run loop, where every root is in view.
+    ///
+    /// It lives here rather than in the `Vm` so `alloc` can bring the next
+    /// safepoint forward when the byte budget runs out: 1024 steps of a
+    /// loop appending to an 80 KB string is 80 MB of garbage before the
+    /// collector is even asked.
+    pub(crate) ticks: u32,
+    /// Payload bytes -- characters, vector elements, limbs -- allocated
+    /// since the last collection, and the count that triggers the next one.
+    /// `used` counts objects, so on its own a loop making 80 KB strings
+    /// piles up thousands of them before it collects: 250 MB resident for
+    /// 80 KB live, half the time in page faults (`docs/vs-steel.md`).
+    bytes_since: usize,
+    byte_threshold: usize,
+    /// Payload bytes surviving in the old generation, and the size at which
+    /// a collection is a full one -- `old` and `full_threshold` in bytes.
+    live_bytes: usize,
+    full_byte_threshold: usize,
     /// The host's limit (plan §3.3). Exceeding it is an ordinary Scheme error
     /// at a safepoint, never an abort.
     heap_cap: Option<usize>,
@@ -780,6 +835,11 @@ impl Engine {
             allocations: 0,
             threshold: 4096,
             min_heap: 4096,
+            ticks: 0,
+            bytes_since: 0,
+            byte_threshold: Self::MIN_BYTES,
+            live_bytes: 0,
+            full_byte_threshold: Self::MIN_BYTES,
             heap_cap: None,
             stress: false,
             env_pool: Vec::new(),
@@ -798,6 +858,13 @@ impl Engine {
 
     pub fn alloc(&mut self, obj: Obj) -> Value {
         self.used += 1;
+        let bytes = obj.payload_bytes();
+        if bytes > 0 {
+            self.bytes_since += bytes;
+            if self.bytes_since >= self.byte_threshold {
+                self.ticks = TICKS;
+            }
+        }
         self.allocations += 1;
         match self.free_head {
             Some(i) => {
@@ -893,8 +960,12 @@ impl Engine {
     /// garbage, which is a memory decision rather than a free one.
     const DECAY: usize = 16;
 
+    /// The byte budget's floor: payload a program may allocate between
+    /// collections however small its live set.
+    const MIN_BYTES: usize = 8 << 20;
+
     pub fn should_collect(&self) -> bool {
-        self.stress || self.used >= self.threshold
+        self.stress || self.used >= self.threshold || self.bytes_since >= self.byte_threshold
     }
 
     pub fn over_heap_cap(&self) -> bool {
@@ -920,7 +991,10 @@ impl Engine {
         // `SCM_GC_FULL_ONLY=1` makes every collection a full one: the
         // collector as it was before S32, for an A/B in one binary and for
         // ruling the minor collector out of a suspected collector bug.
-        let full = self.full_only || self.old >= self.full_threshold || (self.stress && self.collections % 8 == 7);
+        let full = self.full_only
+            || self.old >= self.full_threshold
+            || self.live_bytes >= self.full_byte_threshold
+            || (self.stress && self.collections % 8 == 7);
         let stats = self.collect_with(roots, full);
         if !full && self.heap_cap.is_some_and(|cap| self.used > cap) {
             return self.collect_with(roots, true);
@@ -1108,14 +1182,22 @@ impl Engine {
         // released without a separate finalizer mechanism. A *Scheme-visible*
         // finalizer is absent because nothing needs one yet.
         let mut freed = 0;
+        // Survivors' payload: all of it after a full collection, added to
+        // the old generation's after a minor.
+        let mut kept_bytes = 0;
         let young = std::mem::take(&mut self.young);
         let mut freed_slots: Vec<u32> = Vec::new();
         let n = if full { self.slots.len() } else { young.len() };
         for k in 0..n {
             // Which slots: all of them, or the young ones by index.
             let i = if full { k } else { young[k] as usize };
-            if self.marks[i] || matches!(self.slots[i], Slot::Free { .. }) {
-                continue;
+            match &self.slots[i] {
+                Slot::Free { .. } => continue,
+                Slot::Used(o) if self.marks[i] => {
+                    kept_bytes += o.payload_bytes();
+                    continue;
+                }
+                Slot::Used(_) => {}
             }
             // A dead frame's vector goes back to the pool, bounded so a
             // one-off deep recursion does not pin its memory forever.
@@ -1156,9 +1238,13 @@ impl Engine {
         // S32: everything that survived is old now. A full collection
         // sets the point at which the old generation has doubled.
         self.old = self.used;
+        self.live_bytes = if full { kept_bytes } else { self.live_bytes + kept_bytes };
+        self.bytes_since = 0;
+        self.byte_threshold = Self::MIN_BYTES.max(self.live_bytes);
         if full {
             self.full_collections += 1;
             self.full_threshold = self.min_heap.max(self.used.saturating_mul(2));
+            self.full_byte_threshold = Self::MIN_BYTES.max(self.live_bytes.saturating_mul(2));
         }
 
         // The live set decides the next threshold, but **not alone**.

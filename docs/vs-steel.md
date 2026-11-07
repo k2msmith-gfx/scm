@@ -357,3 +357,63 @@ S31 1.14×, S32 1.00× here (1.37× on the scene-shaped workload), S33
 `tak` 1.52×, `lists` 1.92× and from behind Steel to 1.57× ahead). Where
 it did not: `strings` and `callcc`, which live inside a few large
 primitives, as every section above predicted.
+
+## On Linux, and the collector counting bytes, 2026-11-06
+
+The first run off the Mac: AMD Ryzen 5 PRO 4650U, NixOS, Steel 0.8.2, T1,
+load average ~1. Everything is 2-4× slower in absolute terms than on the
+M3 Pro, and the ratios carried over -- **1.96× Steel's speed** against
+the Mac's 1.99× -- except one. `strings` was **0.6×**, behind Steel, where
+the Mac has it at 1.7× ahead: scm's own time went from 52 ms to 260 ms,
+Steel's only doubled.
+
+Half of it was the kernel: 0.25 s of system time, 68,000 page faults
+against Steel's 717, and **250 MB resident against Steel's 37 MB** for a
+program whose live data is one 80 KB string. Raising glibc's trim and mmap
+thresholds changed nothing, so it was not the allocator returning memory.
+It was the collector, twice over:
+
+- **The trigger counted objects.** A 4096-object floor, and a string is
+  one object whatever its length, so thousands of 80 KB strings were
+  garbage before anything collected. The heap now also counts *payload
+  bytes* -- characters, vector and record elements, bytevectors, numeric
+  vectors, limbs -- and collects once 8 MB (or the old generation's
+  payload, if larger) has been allocated since the last collection. An
+  old generation whose payload has doubled makes the collection full,
+  mirroring the object rule.
+- **The question was asked every 1024 ticks.** Even with a byte trigger,
+  1024 iterations of a loop appending to an 80 KB string is 80 MB before
+  a safepoint comes round: the byte rule alone took the peak only to
+  138 MB. The tick counter moved from `Vm` to `Engine`, so `alloc` can set
+  it due when the byte budget runs out and the next call or backward jump
+  collects.
+
+The Mac never showed it because a page fault there costs far less; the
+memory was being wasted on both. Interleaved, five rounds, the commit
+before against the change, Steel beside both:
+
+| program | Steel | before | after | after / before | Steel / before | Steel / after |
+|---|---|---|---|---|---|---|
+| `fib` | 499 ms | 270 ms | 251 ms | 1.08× | 1.84× | 1.99× |
+| `tak` | 443 ms | 222 ms | 219 ms | 1.01× | 2.00× | 2.03× |
+| `loop` | 1094 ms | 501 ms | 504 ms | 1.00× | 2.18× | 2.17× |
+| `vec` | 589 ms | 201 ms | 200 ms | 1.00× | 2.94× | 2.95× |
+| `strings` | 171 ms | 256 ms | 164 ms | **1.56×** | 0.67× | 1.05× |
+| `closures` | 451 ms | 282 ms | 284 ms | 0.99× | 1.60× | 1.59× |
+| `lists` | 4569 ms | 2624 ms | 2647 ms | 0.99× | 1.74× | 1.73× |
+| `fbm` | 416 ms | 142 ms | 148 ms | 0.96× | 2.93× | 2.81× |
+| `callcc` | 549 ms | 167 ms | 157 ms | 1.07× | 3.29× | 3.51× |
+| **geometric mean** | | | | **1.06×** | **1.96×** | **2.08×** |
+
+`strings` peaks at **27 MB** now (from 251) with 6,400 page faults (from
+68,000), and is ahead of Steel on every program. The rest is within the
+noise of this harness; `fib`'s 1.08× is a first-round artefact.
+
+`tests/gc.rs` pins both halves on T0 and T1: 120 MB of strings in fewer
+objects than the floor must collect at least 12 times (an 8 MB budget is
+~15; asked only every 1024 ticks, T1 collects about three times), and old
+garbage held in a few large vectors must reach a full collection. Both fail
+with the byte rule disabled.
+
+`heap_cap` still counts objects, so a host cannot yet bound a script's
+memory in bytes; that is a separate decision.

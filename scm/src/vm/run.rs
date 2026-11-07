@@ -325,9 +325,9 @@ impl Vm {
         // and branch were a measurable share of a straight-line op.
         macro_rules! tick {
             () => {
-                self.ticks += 1;
-                if self.ticks >= 1024 {
-                    self.ticks = 0;
+                self.engine.ticks += 1;
+                if self.engine.ticks >= crate::heap::TICKS {
+                    self.engine.ticks = 0;
                     self.stack.push(Frame::Code { code: Rc::clone(&code), pc, env, base });
                     let r = self.safepoint(&Step::Run);
                     self.stack.pop();
