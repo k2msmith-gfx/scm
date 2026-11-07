@@ -25,6 +25,7 @@ scm `421cbe4`, render loop only, best of three for ray and raylisp:
 |---|---|---|---|
 | ray (Rust, rayon; `RAYON_NUM_THREADS=1` for one core) | 0.267 s · 3.45 Mpix/s | 0.032 s · 29 Mpix/s | 8.4× |
 | raylisp (SBCL, `(speed 3)`; `sb-thread` row stripes) | 0.866 s · 1.06 Mpix/s | 0.326 s · 2.83 Mpix/s | 2.7× |
+| CPython 3.13 (`raytracer.py`; one process per core) | 15.9 s · 0.058 Mpix/s | 1.88 s · 0.49 Mpix/s | 8.5× |
 | scm (T1; one process per core) | 42.9 s · 0.021 Mpix/s | 5.33 s · 0.17 Mpix/s | 8.1× |
 | scm + leaf compiler (`raytrace_hybrid`, below) | 10.0 s · 0.092 Mpix/s | 1.27 s · 0.72 Mpix/s | 7.9× |
 
@@ -42,13 +43,21 @@ scm `421cbe4`, render loop only, best of three for ray and raylisp:
 
 ### Against CPython
 
-Not yet measured on the tracer. On the loop that chose the representation —
-a million `vec3` adds — CPython 3.13 (bytecode interpreter, no JIT, PGO+LTO)
-takes **65 ms** with a function and 41 ms inline, against scm's 320 ms and
-180 ms. If the tracer follows, CPython would be 3–5× faster than scm per
-core: its specialising interpreter rewrites `BINARY_OP` into
-`BINARY_OP_ADD_FLOAT` in place, and its tuples and floats come off
-freelists.
+`raytracer.py` is the same tracer written for CPython the way a Python
+programmer would write it for speed — tuples for `vec3`, rays and hits,
+`__slots__` classes for what is built once — with the arithmetic in the same
+order. **Its image is byte-identical to scm's**, and **it is 2.7× faster per
+core** (2.8× on twelve). Both are bytecode interpreters: this CPython has no
+JIT (built `--enable-optimizations --with-lto`). On the loop that chose
+scm's representation, a million `vec3` adds, CPython takes 65 ms with a
+function and 41 ms inline against scm's 320 ms and 180 ms; the tracer's
+2.7× is smaller because more of its work is calls and branches, where the
+two are closer. The likely reasons are CPython's specialising interpreter
+(`BINARY_OP` rewritten in place to `BINARY_OP_ADD_FLOAT`), its freelists for
+tuples and floats, and a PGO-built dispatch loop.
+
+    python3 examples/raytracer/raytracer.py [--size WxH] [--out FILE]
+    WORKER="python3 examples/raytracer/raytracer.py" examples/raytracer/bench.sh
 
 ## The hybrid: ray/shape tests leaf-compiled
 
