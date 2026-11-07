@@ -12,6 +12,10 @@
 # the figure comparable to raylisp's render-parallel and to ray's timed render.
 # "wall" adds process start, scene build and writing text, which neither of
 # those counts.
+#
+# WORKER replaces the worker command, which is "$SCM raytracer.scm" by
+# default; the leaf-compiled hybrid is
+#     WORKER=target/release/examples/raytrace_hybrid examples/raytracer/bench.sh
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -27,8 +31,9 @@ now() { "$scm" -e '(current-jiffy)'; }   # microseconds
 start=$(now)
 k=0
 while [ "$k" -lt "$n" ]; do
-  "$scm" "$here/raytracer.scm" --size "$size" --stripe "$k/$n" \
-    --out "$work/$k.txt" > "$work/$k.log" &
+  # shellcheck disable=SC2086
+  ${WORKER:-$scm $here/raytracer.scm} --size "$size" --stripe "$k/$n" \
+    --out "$work/$k.txt" > "$work/$k.log" 2>&1 &
   k=$((k + 1))
 done
 wait

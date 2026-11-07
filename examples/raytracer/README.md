@@ -26,16 +26,53 @@ scm `421cbe4`, render loop only, best of three for ray and raylisp:
 | ray (Rust, rayon; `RAYON_NUM_THREADS=1` for one core) | 0.267 s · 3.45 Mpix/s | 0.032 s · 29 Mpix/s | 8.4× |
 | raylisp (SBCL, `(speed 3)`; `sb-thread` row stripes) | 0.866 s · 1.06 Mpix/s | 0.326 s · 2.83 Mpix/s | 2.7× |
 | scm (T1; one process per core) | 42.9 s · 0.021 Mpix/s | 5.33 s · 0.17 Mpix/s | 8.1× |
+| scm + leaf compiler (`raytrace_hybrid`, below) | 10.0 s · 0.092 Mpix/s | 1.27 s · 0.72 Mpix/s | 7.9× |
 
-- **Per core, scm is ~50× raylisp and ~160× ray.** That is the gap between a
-  bytecode interpreter and native code doing f64 arithmetic in a tight loop,
-  with every `vec3` a heap vector.
+- **Per core, scm is ~50× raylisp and ~160× ray.** A profile puts **84 % of
+  the time in `run_code`**, the bytecode loop itself; collection and
+  allocation are ~6 % and calls ~7 % (making `v+`, `dot` and the rest macros
+  saves 4 %). It is dispatch, about 10,000 operations a pixel.
 - **On the whole machine scm closes to ~16× raylisp**, because its processes
   scale 8.1× where SBCL's threads get 2.7×: raylisp consed 966 MB a frame when
   last profiled (August), and SBCL's stop-the-world collector serialises the
   threads.
-- **T2 does not help here** (5.57 s, 43.1 s): its gains are elsewhere.
-- One process and twelve write byte-identical images, as do T1 and T2.
+- One process and twelve write byte-identical images.
+- T2 is not measured: it needs `scm-cli --features jit`, and S13 records that
+  it currently hands nearly every unit back to T1.
+
+### Against CPython
+
+Not yet measured on the tracer. On the loop that chose the representation —
+a million `vec3` adds — CPython 3.13 (bytecode interpreter, no JIT, PGO+LTO)
+takes **65 ms** with a function and 41 ms inline, against scm's 320 ms and
+180 ms. If the tracer follows, CPython would be 3–5× faster than scm per
+core: its specialising interpreter rewrites `BINARY_OP` into
+`BINARY_OP_ADD_FLOAT` in place, and its tuples and floats come off
+freelists.
+
+## The hybrid: ray/shape tests leaf-compiled
+
+`leaves.scm` flattens the scene into a vector of numbers and writes the ray
+tests in the leaf compiler's subset (pure f64 arithmetic, no allocation,
+booleans only in tests): `nearest-shape` returns the index of the closest
+hit and `occluded` answers a shadow ray. It then redefines `scene-intersect`
+and `scene-occluded?` to call them, so Scheme computes the full hit on the
+winning shape only and every shadow ray is native. Shading, recursion,
+glass and output stay interpreted. `scm-llvm/examples/raytrace_hybrid.rs`
+loads both files, compiles the two leaves (~40 ms) and runs `main`:
+
+    LLVM_SYS_211_PREFIX=… cargo build --release -p scm-llvm --example raytrace_hybrid
+    target/release/examples/raytrace_hybrid [--size WxH] [--out FILE]
+    WORKER=target/release/examples/raytrace_hybrid examples/raytracer/bench.sh
+
+**4.3× the interpreted tracer, byte-identical image**, 11.6× raylisp per
+core and 3.9× on twelve. The leaves no longer appear in a profile: what is
+left is the interpreted shading, so going further means moving shading into
+leaves too, at which point the measurement is of LLVM, not of scm.
+
+Writing for the subset cost two rewrites, both refusals that named the line:
+a helper that *returns* a comparison became a macro, and an `or` became
+nested `if`s, because its expansion binds the boolean to a variable.
 
 ## Agreement
 
