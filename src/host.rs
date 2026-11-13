@@ -127,6 +127,7 @@ pub mod testing {
     thread_local! {
         static RECTS: RefCell<HashMap<u32, Rect>> = RefCell::new(HashMap::new());
         static SCALE: Cell<f32> = const { Cell::new(1.0) };
+        static TYPING: Cell<Option<u32>> = const { Cell::new(None) };
     }
 
     struct TestHost;
@@ -141,7 +142,7 @@ pub mod testing {
             SCALE.with(|s| s.get())
         }
         fn typing(&self) -> Option<u32> {
-            None
+            TYPING.with(|t| t.get())
         }
         fn window(&self) -> (u32, u32) {
             (0, 0)
@@ -158,6 +159,7 @@ pub mod testing {
     pub fn reset() {
         RECTS.with(|r| r.borrow_mut().clear());
         SCALE.with(|s| s.set(1.0));
+        TYPING.with(|t| t.set(None));
         install(&TestHost);
     }
 
@@ -169,5 +171,10 @@ pub mod testing {
     pub fn set_ui_scale(scale: f32) {
         install(&TestHost);
         SCALE.with(|s| s.set(scale));
+    }
+
+    pub fn set_typing(pane: Option<u32>) {
+        install(&TestHost);
+        TYPING.with(|t| t.set(pane));
     }
 }

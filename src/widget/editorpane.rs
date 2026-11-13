@@ -104,6 +104,8 @@ struct Doc {
     /// Per-line signature of the last-applied syntax spans (0 = unlexed) —
     /// only lines whose spans changed pay the reshape.
     line_sigs: Vec<u64>,
+    /// The last scan, and what was last applied from it (see [`LexCache`]).
+    lex: Option<LexCache>,
     /// The vi state machine (modit — the same parser COSMIC's ViEditor
     /// uses). Only consulted while the global vi toggle is on. Per-doc so a
     /// buffer remembers its NORMAL/INSERT mode across a switch (evil-style).
@@ -268,6 +270,7 @@ impl Doc {
             undo: Vec::new(),
             redo: Vec::new(),
             line_sigs: Vec::new(),
+            lex: None,
             vi: ViParser::new(),
             registers: HashMap::new(),
             search: None,
@@ -2191,6 +2194,20 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
     finish_into(editor, undo, redo, dirty, owners);
 }
 
+/// **The scan is kept until the text changes.** The editor pane is redrawn
+/// on every repaint of the window — a camera drag in a 3D pane included —
+/// and a scan of the whole buffer costs about 2 ms at 8,600 lines. A
+/// scan depends on the text alone, so it is redone only when a line differs
+/// from the copy kept here (a comparison, tens of microseconds at that
+/// size), and the per-line pass is skipped as well when the show-paren
+/// pair, the theme and the font family are what it last applied.
+struct LexCache {
+    lines: Vec<String>,
+    scan: language::Scan,
+    /// (theme signature, show-paren pair, font family) last applied.
+    applied: Option<(u64, Vec<(usize, usize)>, String)>,
+}
+
 /// Re-lex the whole buffer and apply syntax spans (plus the show-paren
 /// pair at the cursor, in accent, while `typing`). Only lines whose span
 /// signature changed get a fresh `AttrsList` — everything else keeps its
@@ -2210,12 +2227,26 @@ fn relex(pane: &mut Doc, family: &str, theme: &crate::theme::Theme, typing: bool
     };
     let cursor = pane.editor.cursor();
     let line_sigs = &mut pane.line_sigs;
+    let lex = &mut pane.lex;
     let lang = pane.lang;
     pane.editor.with_buffer_mut(|buffer| {
-        // Pass 1: lex every line, collecting spans and delimiter positions.
-        let lines: Vec<&str> = buffer.lines.iter().map(|l| l.text()).collect();
-        let language::Scan { spans: all_spans, parens } = lang.scan(&lines);
-        let parens: Vec<ParenPos> = parens;
+        // Pass 1: lex every line, collecting spans and delimiter positions —
+        // unless the text is what the kept scan was made from.
+        let same = lex.as_ref().is_some_and(|c| {
+            c.lines.len() == buffer.lines.len()
+                && c.lines.iter().zip(&buffer.lines).all(|(a, b)| a == b.text())
+        });
+        if !same {
+            let lines: Vec<&str> = buffer.lines.iter().map(|l| l.text()).collect();
+            *lex = Some(LexCache {
+                scan: lang.scan(&lines),
+                lines: lines.iter().map(|l| l.to_string()).collect(),
+                applied: None,
+            });
+        }
+        let cache = lex.as_mut().expect("just filled");
+        let all_spans = &cache.scan.spans;
+        let parens: &[ParenPos] = &cache.scan.parens;
         // Show-paren: the pair for a closer just before the cursor, else an
         // opener at it (Emacs's rule). Only while the cursor is visible.
         let mut matched: Vec<(usize, usize)> = Vec::new();
@@ -2235,14 +2266,14 @@ fn relex(pane: &mut Doc, family: &str, theme: &crate::theme::Theme, typing: bool
                     })
                 });
             if let Some(a) = at {
-                if let Some(b) = find_partner(&parens, a) {
+                if let Some(b) = find_partner(parens, a) {
                     matched.push((parens[a].line, parens[a].byte));
                     matched.push((parens[b].line, parens[b].byte));
                 }
             }
         }
-        // Pass 2: apply changed lines only.
-        line_sigs.resize(buffer.lines.len(), 0);
+        // Pass 2: apply changed lines only — none, when nothing that
+        // colours them moved and no line has been re-set since.
         let theme_sig = {
             let mut h = DefaultHasher::new();
             (theme.code_comment, theme.code_string, theme.code_keyword, theme.code_number,
@@ -2250,6 +2281,11 @@ fn relex(pane: &mut Doc, family: &str, theme: &crate::theme::Theme, typing: bool
                 .hash(&mut h);
             h.finish()
         };
+        let key = (theme_sig, matched.clone(), family.to_string());
+        if line_sigs.len() == buffer.lines.len() && cache.applied.as_ref() == Some(&key) {
+            return;
+        }
+        line_sigs.resize(buffer.lines.len(), 0);
         for (i, spans) in all_spans.iter().enumerate() {
             let marks: Vec<usize> =
                 matched.iter().filter(|&&(l, _)| l == i).map(|&(_, b)| b).collect();
@@ -2274,6 +2310,7 @@ fn relex(pane: &mut Doc, family: &str, theme: &crate::theme::Theme, typing: bool
             buffer.lines[i].set_attrs_list(list);
             line_sigs[i] = sig;
         }
+        cache.applied = Some(key);
     });
 }
 
@@ -2850,6 +2887,61 @@ mod tests {
         set_vi(false);
     }
 
+
+    /// A [`Language`] that counts its scans — how the cache test sees
+    /// whether a draw scanned.
+    struct Counting;
+    static SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static COUNTING: Counting = Counting;
+    impl Language for Counting {
+        fn scan(&self, lines: &[&str]) -> language::Scan {
+            SCANS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            language::SCHEME.scan(lines)
+        }
+        fn indent(&self, lines: &[&str], line: usize, byte: usize) -> usize {
+            language::SCHEME.indent(lines, line, byte)
+        }
+        fn enclosing_head(&self, lines: &[&str], line: usize, byte: usize) -> Option<String> {
+            language::SCHEME.enclosing_head(lines, line, byte)
+        }
+    }
+
+    #[test]
+    fn a_draw_scans_only_when_the_text_changed() {
+        set_vi(false);
+        crate::host::testing::reset();
+        let id = 959;
+        let rect = Rect { x: 0, y: 0, w: 300, h: 100 };
+        crate::host::testing::set_rect(id, rect);
+        crate::host::testing::set_typing(Some(id));
+        set_text(id, "(a (b) c)");
+        with_pane(id, |_, pane, _| pane.lang = &COUNTING);
+        let scans = || SCANS.load(std::sync::atomic::Ordering::SeqCst);
+        let pair = || with_pane(id, |_, p, _| p.lex.as_ref().and_then(|c| c.applied.as_ref()).map(|a| a.1.clone()));
+        let mut fb = Framebuffer::new(300, 100);
+
+        draw(id, &mut fb, rect, true);
+        let after_first = scans();
+        draw(id, &mut fb, rect, true);
+        draw(id, &mut fb, rect, true);
+        assert_eq!(scans(), after_first, "unchanged text is not scanned again");
+
+        // The cursor moves, the text doesn't: no scan, but show-paren follows.
+        act(id, "buffer-start", None, 0.0, 0.0);
+        draw(id, &mut fb, rect, true);
+        assert_eq!(pair(), Some(vec![(0, 0), (0, 8)]), "the outer pair, at the opener");
+        act(id, "right", None, 0.0, 0.0);
+        act(id, "right", None, 0.0, 0.0);
+        act(id, "right", None, 0.0, 0.0);
+        draw(id, &mut fb, rect, true);
+        assert_eq!(pair(), Some(vec![(0, 3), (0, 5)]), "the inner pair");
+        assert_eq!(scans(), after_first, "moving the cursor scans nothing");
+
+        act(id, "insert", Some("x"), 0.0, 0.0);
+        draw(id, &mut fb, rect, true);
+        assert_eq!(scans(), after_first + 1, "an edit scans once");
+        crate::host::testing::set_typing(None);
+    }
 
     #[test]
     fn set_text_same_content_still_highlights() {

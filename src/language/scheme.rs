@@ -1,15 +1,25 @@
-//! **Scheme, as the editor reads it** — a tiny Lisp lexer, per line,
-//! with the state a line hands the next (S4).
+//! **Scheme, as the editor reads it** — `scm-text`'s token scan (E1c), the
+//! one the modeler's `M-.` index and `scm-lsp` use too, so a fix to how
+//! Scheme is read reaches all three. Until E1c the editor had a lexer of
+//! its own; the two agreed on every line of the tree's 388 Scheme files
+//! (209,799 lines, a million spans) before the old one went.
 //!
-//! Lexing is mechanism (like glyph rendering), so it lives here; the COLORS
-//! are theme slots (code-comment/string/keyword/number/call/paren), so the
-//! look stays Scheme policy. It lexes Scheme's spelling: `;` line comments,
-//! `#| … |#` block comments (nesting), `#;` datum comments, `#t`/`#f`/`#\c`
-//! literals and `#(` vectors. Until 2026-11-02 it lexed Janet's — `#` as a
+//! What the editor adds to the tokens is the highlight CLASS: `:keyword`,
+//! literal (`#t`, `#\c`, numbers), a form's head (the first thing after a
+//! `(` on its own line, not after a vector's `#(`). The COLORS are theme
+//! slots (code-comment/string/keyword/number/call/paren), so the look
+//! stays the host's. It reads Scheme's spelling: `;` line comments, `#| … |#`
+//! block comments (nesting), `#;` datum comments, `#t`/`#f`/`#\c` literals
+//! and `#(` vectors. Until 2026-11-02 the old lexer read Janet's — `#` as a
 //! line comment — so `(set-denoise #t)` coloured from the `#t` to the end of
 //! the line as a comment and lost its closing paren from matching. The whole
-//! buffer re-lexes per draw — microseconds at scene-file sizes — and a
+//! buffer re-scans per draw — sub-millisecond at scene-file sizes — and a
 //! per-line signature limits reshaping to lines whose spans actually changed.
+//!
+//! `scm-text` counts CHARACTERS and the widget counts BYTES within a line,
+//! so every token is walked back to (line, byte) once, in order.
+
+use scm_text::text::{Kind, Token};
 
 use super::{Language, ParenPos, Scan, Tok};
 
@@ -20,21 +30,47 @@ pub static SCHEME: Scheme = Scheme;
 
 impl Language for Scheme {
     fn scan(&self, lines: &[&str]) -> Scan {
-        let mut st = LexIn::Code;
-        let mut out = Scan { spans: Vec::with_capacity(lines.len()), parens: Vec::new() };
-        let mut scratch = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
-            scratch.clear();
-            let (spans, next) = lex_line(st, line, &mut scratch);
-            out.parens.extend(scratch.iter().map(|&(byte, ch)| ParenPos { line: i, byte, ch }));
-            out.spans.push(spans);
-            st = next;
+        let toks = Tokens::new(lines);
+        let mut out = Scan { spans: vec![Vec::new(); lines.len()], parens: Vec::new() };
+        let span = |out: &mut Scan, (l0, b0): (usize, usize), (l1, b1): (usize, usize), t: Tok| {
+            for l in l0..=l1 {
+                let s = if l == l0 { b0 } else { 0 };
+                let e = if l == l1 { b1 } else { lines[l].len() };
+                if let Some(v) = out.spans.get_mut(l) {
+                    v.push((s, e, t));
+                }
+            }
+        };
+        for (i, p) in toks.placed.iter().enumerate() {
+            match p.tok.kind {
+                Kind::Comment => span(&mut out, p.start, p.end, Tok::Comment),
+                Kind::Str => span(&mut out, p.start, p.end, Tok::Str),
+                Kind::Prefix if toks.is_datum_comment(i) => span(&mut out, p.start, p.end, Tok::Comment),
+                Kind::Prefix => {}
+                Kind::Open | Kind::Close => {
+                    let ch = lines[p.start.0].as_bytes()[p.start.1];
+                    out.parens.push(ParenPos { line: p.start.0, byte: p.start.1, ch });
+                    span(&mut out, p.start, p.end, Tok::Paren);
+                }
+                Kind::Atom => {
+                    if let Some(tok) = toks.class(i) {
+                        span(&mut out, p.start, p.end, tok);
+                    }
+                }
+            }
         }
         out
     }
 
+    /// The innermost unclosed bracket's column + 2 for a `(` (the Lisp
+    /// convention), +1 for `[`/`{`, 0 at top level. Strings and comments
+    /// don't count.
     fn indent(&self, lines: &[&str], line: usize, byte: usize) -> usize {
-        target_indent(lines, line, byte)
+        match Tokens::new(lines).open_at((line, byte)).last() {
+            Some(&(b'(', _, col)) => col + 2,
+            Some(&(_, _, col)) => col + 1,
+            None => 0,
+        }
     }
 
     /// The head symbol of the innermost UNCLOSED `(` at the point — in
@@ -42,27 +78,8 @@ impl Language for Scheme {
     /// and comments don't count. Same-line heads only (the overwhelmingly
     /// common lisp shape).
     fn enclosing_head(&self, lines: &[&str], line: usize, byte: usize) -> Option<String> {
-        let mut st = LexIn::Code;
-        let mut stack: Vec<(usize, usize, u8)> = Vec::new();
-        let mut scratch = Vec::new();
-        for (ln, text) in lines.iter().enumerate() {
-            if ln > line {
-                break;
-            }
-            let slice = if ln == line { &text[..byte.min(text.len())] } else { text };
-            scratch.clear();
-            let (_, next) = lex_line(st, slice, &mut scratch);
-            for &(b, ch) in &scratch {
-                match ch {
-                    b'(' | b'[' | b'{' => stack.push((ln, b, ch)),
-                    _ => {
-                        stack.pop();
-                    }
-                }
-            }
-            st = next;
-        }
-        let (ln, b) = stack.iter().rev().find(|&&(_, _, ch)| ch == b'(').map(|&(l, b, _)| (l, b))?;
+        let open = Tokens::new(lines).open_at((line, byte));
+        let &(_, ln, b) = open.iter().rev().find(|&&(ch, _, _)| ch == b'(')?;
         let rest = lines[ln][b + 1..].trim_start();
         let head: String = rest
             .chars()
@@ -72,214 +89,162 @@ impl Language for Scheme {
     }
 }
 
-/// Lexer state carried across lines (multi-line strings and comments).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum LexIn {
-    #[default]
-    Code,
-    /// Inside a `"…"` string.
-    Str,
-    /// Inside a `#| … |#` block comment, this many deep (they nest).
-    Block(u8),
+/// A token, and where it starts and ends as (line, byte).
+struct Placed {
+    tok: Token,
+    start: (usize, usize),
+    end: (usize, usize),
 }
 
-/// Scan a block comment from `i` at nesting `depth` → (end, depth left).
-/// Depth 0 means it closed at `end`.
-fn scan_block(b: &[u8], mut i: usize, mut depth: u8) -> (usize, u8) {
-    let n = b.len();
-    while i < n {
-        if b[i] == b'|' && i + 1 < n && b[i + 1] == b'#' {
-            depth -= 1;
-            i += 2;
-            if depth == 0 {
-                return (i, 0);
-            }
-        } else if b[i] == b'#' && i + 1 < n && b[i + 1] == b'|' {
-            depth = depth.saturating_add(1);
-            i += 2;
+/// The buffer's tokens, placed.
+struct Tokens<'a> {
+    lines: &'a [&'a str],
+    placed: Vec<Placed>,
+}
+
+impl<'a> Tokens<'a> {
+    fn new(lines: &'a [&'a str]) -> Self {
+        let doc = scm_text::Doc::new(&lines.join("\n"));
+        let mut walk = Walker::new(lines);
+        let placed = doc
+            .tokens()
+            .iter()
+            .map(|&tok| Placed { tok, start: walk.at(tok.start), end: walk.at(tok.end) })
+            .collect();
+        Tokens { lines, placed }
+    }
+
+    fn text(&self, i: usize) -> &'a str {
+        let p = &self.placed[i];
+        if p.start.0 == p.end.0 {
+            &self.lines[p.start.0][p.start.1..p.end.1]
         } else {
-            i += 1;
+            // Only strings and block comments span lines, and no caller
+            // classifies those by their text.
+            &self.lines[p.start.0][p.start.1..]
         }
     }
-    (n, depth)
-}
 
-/// Lex one line given the carry-in state → (spans, carry-out). Code-context
-/// delimiters land in `parens` as (byte, ch) for match-finding and indent.
-pub fn lex_line(state: LexIn, line: &str, parens: &mut Vec<(usize, u8)>) -> (Vec<(usize, usize, Tok)>, LexIn) {
-    let b = line.as_bytes();
-    let n = b.len();
-    let mut spans = Vec::new();
-    let mut i = 0usize;
-    match state {
-        LexIn::Str => {
-            let mut closed = false;
-            while i < n {
-                match b[i] {
-                    b'\\' => i += 2,
-                    b'"' => {
-                        i += 1;
-                        closed = true;
-                        break;
-                    }
-                    _ => i += 1,
-                }
-            }
-            spans.push((0, i.min(n), Tok::Str));
-            if !closed {
-                return (spans, LexIn::Str);
-            }
-        }
-        LexIn::Block(depth) => {
-            let (end, left) = scan_block(b, 0, depth);
-            spans.push((0, end, Tok::Comment));
-            if left > 0 {
-                return (spans, LexIn::Block(left));
-            }
-            i = end;
-        }
-        LexIn::Code => {}
+    fn is_datum_comment(&self, i: usize) -> bool {
+        self.placed[i].tok.kind == Kind::Prefix && self.text(i) == "#;"
     }
-    let is_delim = |c: u8| {
-        matches!(c, b'(' | b')' | b'[' | b']' | b'{' | b'}' | b' ' | b'\t' | b'"' | b';')
-    };
-    // True right after an open `(` — the next symbol is the form's head.
-    let mut call_pending = false;
-    while i < n {
-        match b[i] {
-            b';' => {
-                spans.push((i, n, Tok::Comment));
-                i = n;
-            }
-            b'#' if i + 1 < n && b[i + 1] == b'|' => {
-                let start = i;
-                let (end, left) = scan_block(b, i + 2, 1);
-                spans.push((start, end, Tok::Comment));
-                if left > 0 {
-                    return (spans, LexIn::Block(left));
-                }
-                i = end;
-            }
-            b'#' if i + 1 < n && b[i + 1] == b';' => {
-                // A datum comment: the mark is coloured, the datum it
-                // comments out still lexes (its parens must still match).
-                spans.push((i, i + 2, Tok::Comment));
-                i += 2;
-            }
-            b'#' if i + 1 < n && b[i + 1] == b'(' => {
-                // A vector literal: `#(` opens like `(`, but its first
-                // element is data, not a call.
-                parens.push((i + 1, b'('));
-                spans.push((i, i + 2, Tok::Paren));
-                call_pending = false;
-                i += 2;
-            }
-            b'#' if i + 1 < n && b[i + 1] == b'\\' => {
-                // A character: `#\(` is a paren CHARACTER, not a paren.
-                let start = i;
-                i = (i + 3).min(n);
-                while i < n && !is_delim(b[i]) {
-                    i += 1;
-                }
-                spans.push((start, i, Tok::Str));
-                call_pending = false;
-            }
-            b'"' => {
-                let start = i;
-                i += 1;
-                let mut closed = false;
-                while i < n {
-                    match b[i] {
-                        b'\\' => i += 2,
-                        b'"' => {
-                            i += 1;
-                            closed = true;
-                            break;
-                        }
-                        _ => i += 1,
-                    }
-                }
-                spans.push((start, i.min(n), Tok::Str));
-                if !closed {
-                    return (spans, LexIn::Str);
-                }
-                call_pending = false;
-            }
-            b'\'' | b'`' | b',' => {
-                // Quote prefixes: the form after them is data.
-                i += 1;
-                call_pending = false;
-            }
-            c @ (b'(' | b'[' | b'{' | b')' | b']' | b'}') => {
-                parens.push((i, c));
-                spans.push((i, i + 1, Tok::Paren));
-                call_pending = c == b'(';
-                i += 1;
-            }
-            b' ' | b'\t' => i += 1,
-            _ => {
-                let start = i;
-                while i < n && !is_delim(b[i]) {
-                    i += 1;
-                }
-                let word = &line[start..i];
-                let first = word.as_bytes()[0];
-                let tok = if first == b':' {
-                    Some(Tok::Keyword)
-                } else if first == b'#'
-                    || first.is_ascii_digit()
-                    || (word.len() > 1
-                        && matches!(first, b'-' | b'+' | b'.')
-                        && word.as_bytes()[1].is_ascii_digit())
-                {
-                    // `#t`, `#f`, `#true`, `#e1.5`: literals, coloured as numbers.
-                    Some(Tok::Number)
-                } else if call_pending {
-                    Some(Tok::Call)
-                } else {
-                    None
-                };
-                if let Some(t) = tok {
-                    spans.push((start, i, t));
-                }
-                call_pending = false;
-            }
-        }
-    }
-    (spans, LexIn::Code)
-}
 
-/// The column a NEW line at (`upto_line`, `upto_byte`) should indent to:
-/// the innermost unclosed `(`'s column + 2 (the Lisp convention), +1 for
-/// `[`/`{`, 0 at top level. Strings and comments don't count.
-pub fn target_indent(lines: &[&str], upto_line: usize, upto_byte: usize) -> usize {
-    let mut st = LexIn::Code;
-    let mut stack: Vec<(u8, usize)> = Vec::new();
-    let mut scratch = Vec::new();
-    for (ln, text) in lines.iter().enumerate() {
-        if ln > upto_line {
-            break;
+    /// An atom's highlight class, or `None` for plain body text.
+    fn class(&self, i: usize) -> Option<Tok> {
+        let word = self.text(i);
+        let first = *word.as_bytes().first()?;
+        let next_opens = self
+            .placed
+            .get(i + 1)
+            .is_some_and(|n| n.tok.kind == Kind::Open && n.tok.start == self.placed[i].tok.end);
+        if word.starts_with("#\\") {
+            Some(Tok::Str)
+        } else if word == "#" && next_opens {
+            // `#(`: a vector opens like `(`, coloured as one.
+            Some(Tok::Paren)
+        } else if first == b':' {
+            Some(Tok::Keyword)
+        } else if first == b'#'
+            || first.is_ascii_digit()
+            || (word.len() > 1 && matches!(first, b'-' | b'+' | b'.') && word.as_bytes()[1].is_ascii_digit())
+        {
+            // `#t`, `#f`, `#true`, `#e1.5`: literals, coloured as numbers.
+            Some(Tok::Number)
+        } else if self.is_head(i) {
+            Some(Tok::Call)
+        } else {
+            None
         }
-        let slice = if ln == upto_line { &text[..upto_byte.min(text.len())] } else { text };
-        scratch.clear();
-        let (_, next) = lex_line(st, slice, &mut scratch);
-        for &(byte, ch) in &scratch {
-            match ch {
-                b'(' | b'[' | b'{' => stack.push((ch, byte)),
-                _ => {
+    }
+
+    /// Is the atom at `i` a form's head — the first thing after a `(` on
+    /// its own line? Comments and `#;` between don't count; a vector's `#(`
+    /// opens data, not a call, and a `[` or `{` is not a call either.
+    fn is_head(&self, i: usize) -> bool {
+        let line = self.placed[i].start.0;
+        let Some(at) = (0..i)
+            .rev()
+            .find(|&j| !(self.placed[j].tok.kind == Kind::Comment || self.is_datum_comment(j)))
+        else {
+            return false;
+        };
+        let open = &self.placed[at];
+        if open.tok.kind != Kind::Open || open.start.0 != line || self.text(at) != "(" {
+            return false;
+        }
+        // The token before the `(`: a bare `#` glued to it makes a vector.
+        !(at > 0 && {
+            let q = &self.placed[at - 1];
+            q.tok.kind == Kind::Atom && q.tok.end == open.tok.start && self.text(at - 1) == "#"
+        })
+    }
+
+    /// The brackets still open just before `point`, outermost first, as
+    /// (bracket, line, byte).
+    fn open_at(&self, point: (usize, usize)) -> Vec<(u8, usize, usize)> {
+        let mut stack = Vec::new();
+        for (i, p) in self.placed.iter().enumerate() {
+            if p.start >= point {
+                break;
+            }
+            match p.tok.kind {
+                Kind::Open => stack.push((*self.text(i).as_bytes().last().unwrap_or(&b'('), p.start.0, p.start.1)),
+                Kind::Close => {
                     stack.pop();
                 }
+                _ => {}
             }
         }
-        st = next;
-    }
-    match stack.last() {
-        Some(&(b'(', col)) => col + 2,
-        Some(&(_, col)) => col + 1,
-        None => 0,
+        stack
     }
 }
 
+/// Char offsets → (line, byte), for offsets visited in increasing order —
+/// the tokens' order — so the whole walk is one pass.
+struct Walker<'a> {
+    lines: &'a [&'a str],
+    line: usize,
+    /// The char offset where `line` starts, and its length in chars.
+    line_start: usize,
+    line_chars: usize,
+    /// Inside `line`: a char count and the byte it is at.
+    chars: usize,
+    byte: usize,
+}
+
+impl<'a> Walker<'a> {
+    fn new(lines: &'a [&'a str]) -> Self {
+        let line_chars = lines.first().map_or(0, |l| l.chars().count());
+        Walker { lines, line: 0, line_start: 0, line_chars, chars: 0, byte: 0 }
+    }
+
+    fn at(&mut self, off: usize) -> (usize, usize) {
+        // Whole lines first: each holds its chars and one '\n'.
+        while self.line + 1 < self.lines.len() && off > self.line_start + self.line_chars {
+            self.line_start += self.line_chars + 1;
+            self.line += 1;
+            self.line_chars = self.lines[self.line].chars().count();
+            self.chars = 0;
+            self.byte = 0;
+        }
+        let text = self.lines.get(self.line).copied().unwrap_or("");
+        let want = off - self.line_start;
+        if text.len() == self.line_chars {
+            // ASCII (bytes = chars), which nearly every line is.
+            self.chars = want;
+            self.byte = want;
+            return (self.line, self.byte);
+        }
+        for c in text[self.byte..].chars() {
+            if self.chars >= want {
+                break;
+            }
+            self.chars += 1;
+            self.byte += c.len_utf8();
+        }
+        (self.line, self.byte)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -288,50 +253,56 @@ mod tests {
 
     #[test]
     fn lexer_classifies_scheme_tokens() {
-        let mut parens = Vec::new();
-        let (spans, out) =
-            lex_line(LexIn::Code, "(add-sphere :at [1 2] 0.5) ; hi", &mut parens);
-        assert_eq!(out, LexIn::Code);
         let find = |spans: &[(usize, usize, Tok)], t: Tok| spans.iter().filter(|s| s.2 == t).count();
-        assert_eq!(find(&spans, Tok::Call), 1, "head symbol is a call");
-        assert_eq!(find(&spans, Tok::Keyword), 1, ":at is a keyword");
-        assert_eq!(find(&spans, Tok::Number), 3, "1 2 0.5 are numbers");
-        assert_eq!(find(&spans, Tok::Comment), 1);
-        assert_eq!(find(&spans, Tok::Paren), 4);
-        assert_eq!(parens.len(), 4);
+        let scan = SCHEME.scan(&["(add-sphere :at [1 2] 0.5) ; hi"]);
+        let spans = &scan.spans[0];
+        assert_eq!(find(spans, Tok::Call), 1, "head symbol is a call");
+        assert_eq!(find(spans, Tok::Keyword), 1, ":at is a keyword");
+        assert_eq!(find(spans, Tok::Number), 3, "1 2 0.5 are numbers");
+        assert_eq!(find(spans, Tok::Comment), 1);
+        assert_eq!(find(spans, Tok::Paren), 4);
+        assert_eq!(scan.parens.len(), 4);
 
         // `#t` is a literal, not Janet's comment: the closing paren still
         // counts, and only the `;` tail is a comment.
-        let mut p = Vec::new();
         let line = "(set-denoise #t) ; on";
-        let (spans, _) = lex_line(LexIn::Code, line, &mut p);
-        assert_eq!(p.len(), 2, "both parens count");
-        let comments: Vec<_> = spans.iter().filter(|s| s.2 == Tok::Comment).collect();
+        let scan = SCHEME.scan(&[line]);
+        assert_eq!(scan.parens.len(), 2, "both parens count");
+        let comments: Vec<_> = scan.spans[0].iter().filter(|s| s.2 == Tok::Comment).collect();
         assert_eq!(comments.len(), 1);
         assert_eq!(&line[comments[0].0..comments[0].1], "; on");
-        assert_eq!(find(&spans, Tok::Number), 1, "#t is a literal");
+        assert_eq!(find(&scan.spans[0], Tok::Number), 1, "#t is a literal");
 
-        // A vector opens a paren; a character `#\(` does not.
-        let mut p = Vec::new();
-        let (_, _) = lex_line(LexIn::Code, "(list #(1 2) #\\( 3)", &mut p);
-        assert_eq!(p.len(), 4, "( #( ) ) — the #\\( character is not a paren");
+        // A vector opens a paren; a character `#\\(` does not.
+        let scan = SCHEME.scan(&["(list #(1 2) #\\( 3)"]);
+        assert_eq!(scan.parens.len(), 4, "( #( ) ) — the #\\( character is not a paren");
 
-        // Multi-line string state carries; code resumes after the closer.
-        let (_, st) = lex_line(LexIn::Code, "(print \"open", &mut Vec::new());
-        assert_eq!(st, LexIn::Str);
-        let mut p2 = Vec::new();
-        let (spans, st) = lex_line(st, "still\" (f)", &mut p2);
-        assert_eq!(st, LexIn::Code);
-        assert_eq!(spans[0], (0, 6, Tok::Str));
-        assert_eq!(p2.len(), 2, "parens after the string close count again");
+        // A string carries across lines; code resumes after the closer.
+        let scan = SCHEME.scan(&["(print \"open", "still\" (f)"]);
+        assert_eq!(scan.spans[1][0], (0, 6, Tok::Str));
+        assert_eq!(scan.parens.iter().filter(|p| p.line == 1).count(), 2, "parens after the string close count again");
 
         // Block comments carry across lines and nest; parens inside don't count.
-        let mut p3 = Vec::new();
-        let (_, st) = lex_line(LexIn::Code, "#| a ) #| b", &mut p3);
-        assert_eq!(st, LexIn::Block(2));
-        let (_, st) = lex_line(st, "c |# d |# (g)", &mut p3);
-        assert_eq!(st, LexIn::Code);
-        assert_eq!(p3.len(), 2, "only (g)'s parens count");
+        let scan = SCHEME.scan(&["#| a ) #| b", "c |# d |# (g)"]);
+        assert_eq!(scan.spans[0], vec![(0, 11, Tok::Comment)]);
+        assert_eq!(scan.spans[1][0], (0, 9, Tok::Comment));
+        assert_eq!(scan.parens.len(), 2, "only (g)'s parens count");
+    }
+
+    /// Lines are bytes to the widget and characters to `scm-text`: a token
+    /// after a `λ` or an emoji must land on its own bytes.
+    #[test]
+    fn offsets_survive_multibyte_text() {
+        let lines = ["(λ (x) \"☕\")", "  (café :k)"];
+        let scan = SCHEME.scan(&lines);
+        let str_span = scan.spans[0].iter().find(|s| s.2 == Tok::Str).unwrap();
+        assert_eq!(&lines[0][str_span.0..str_span.1], "\"☕\"");
+        assert_eq!(scan.spans[0].iter().find(|s| s.2 == Tok::Call).map(|s| &lines[0][s.0..s.1]), Some("λ"));
+        let kw = scan.spans[1].iter().find(|s| s.2 == Tok::Keyword).unwrap();
+        assert_eq!(&lines[1][kw.0..kw.1], ":k");
+        let last = scan.parens.last().unwrap();
+        assert_eq!((last.line, &lines[1][last.byte..last.byte + 1]), (1, ")"));
+        assert_eq!(SCHEME.enclosing_head(&lines, 1, lines[1].len() - 1).as_deref(), Some("café"));
     }
 
     #[test]
@@ -339,28 +310,20 @@ mod tests {
         let lines = ["(define (f)", "  (let ((x 1"];
         // After line 1: innermost open is the second `(` of `((` at byte 8
         // → a `(` indents its body two past itself = 10.
-        assert_eq!(target_indent(&lines, 1, lines[1].len()), 10);
+        assert_eq!(SCHEME.indent(&lines, 1, lines[1].len()), 10);
         // A `[` aligns one past itself.
-        assert_eq!(target_indent(&["(f [x"], 0, 5), 4);
+        assert_eq!(SCHEME.indent(&["(f [x"], 0, 5), 4);
         // After just line 0: `(f)` closed; innermost is `(` at 0 → 2.
-        assert_eq!(target_indent(&lines[..1], 0, lines[0].len()), 2);
+        assert_eq!(SCHEME.indent(&lines[..1], 0, lines[0].len()), 2);
         // Parens inside strings/comments don't count.
         let tricky = ["(a \"( [\" ; ("];
-        assert_eq!(target_indent(&tricky, 0, tricky[0].len()), 2);
-        assert_eq!(target_indent(&["(done)"], 0, 6), 0);
+        assert_eq!(SCHEME.indent(&tricky, 0, tricky[0].len()), 2);
+        assert_eq!(SCHEME.indent(&["(done)"], 0, 6), 0);
     }
 
     #[test]
     fn paren_partner_matching_skips_across_lines() {
-        let text = ["(a [b", "   c] d)"];
-        let mut parens = Vec::new();
-        let mut st = LexIn::Code;
-        for (i, l) in text.iter().enumerate() {
-            let mut p = Vec::new();
-            let (_, next) = lex_line(st, l, &mut p);
-            parens.extend(p.iter().map(|&(byte, ch)| ParenPos { line: i, byte, ch }));
-            st = next;
-        }
+        let parens = SCHEME.scan(&["(a [b", "   c] d)"]).parens;
         // parens: ( [ ] )
         assert_eq!(find_partner(&parens, 0), Some(3), "( matches the final )");
         assert_eq!(find_partner(&parens, 1), Some(2), "[ matches ]");

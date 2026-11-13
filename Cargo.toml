@@ -35,3 +35,8 @@ modit = "0.1.5"
 # `Framebuffer::save_png` (the modeler's `--screenshot`) and the editor's
 # view-only image buffers (C-x C-f on a .png/.jpg).
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# Scheme as an editor sees it: the token scan the Scheme `Language` highlights
+# and indents from (docs/editor-crate-plan.md E1c) -- the same scan the
+# modeler's `M-.` index and `scm-lsp` use, so a fix to how Scheme is read
+# reaches all three. Text only: it does not link the interpreter.
+scm-text = { git = "https://github.com/k2msmith-gfx/scm.git", branch = "main" }
