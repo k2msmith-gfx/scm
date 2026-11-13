@@ -1362,6 +1362,38 @@ fn string_ref(e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
+/// `(%string-search text pattern [start [end]])` -> the index in TEXT where
+/// PATTERN first occurs within START..END, or #f. SRFI-13's
+/// `string-contains` order: the haystack first. An empty pattern is found
+/// at START.
+///
+/// **Native, and it copies nothing.** A search in Scheme is one interpreted
+/// iteration per character of the haystack, and a host function cannot do
+/// it either: the embedding hands a host function every string as a fresh
+/// copy (`read_val`), so a host search costs the WHOLE haystack per call
+/// however near the match is. ray's modeler had one (`%string-find`), and a
+/// `string-split` of a 1.1 MB, 46,629-line file through it -- one search
+/// per line -- took 105 s (ray `bd32cc74`, 2026-11-13). Here both strings
+/// are borrowed from the heap, so a search costs the distance it scans.
+fn string_search(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "%string-search";
+    let [t, p, ..] = a else {
+        return Err(err(format!("{WHO}: expects a string, a pattern, and an optional start and end")));
+    };
+    let text = str_chars(WHO, e, *t)?;
+    let pat = str_chars(WHO, e, *p)?;
+    let (start, end) = range_of(WHO, a, 2, text.len())?;
+    let hay = &text[start..end];
+    let Some(&first) = pat.first() else {
+        return Ok(Value::Fixnum(start as i64));
+    };
+    if pat.len() > hay.len() {
+        return Ok(Value::Bool(false));
+    }
+    let found = (0..=hay.len() - pat.len()).find(|&i| hay[i] == first && hay[i..i + pat.len()] == *pat);
+    Ok(found.map_or(Value::Bool(false), |i| Value::Fixnum((start + i) as i64)))
+}
+
 fn string_set(e: &mut Engine, a: &[Value]) -> PResult {
     match a {
         [v, Value::Fixnum(i), Value::Char(c)] => {
@@ -5096,6 +5128,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("vector?", is_vector);
     // strings
     vm.define_prim("string-length", string_length);
+    vm.define_prim("%string-search", string_search);
     vm.define_prim("string-ref", string_ref);
     vm.define_prim("string-set!", string_set);
     vm.define_prim("make-string", make_string);

@@ -507,8 +507,17 @@
     ;; the reference reaches for Knuth-Morris-Pratt, which is what
     ;; `string-lib-internals` exports it for, and is worth having only
     ;; when the pattern is long and highly self-similar.
+    ;; Case-sensitive, it is the native `%string-search`, which borrows
+    ;; both strings and costs only the distance it scans; the loop below
+    ;; is one interpreted iteration per character, and stays for -ci.
     (define (%contains text pattern opt fold? who)
       (let-values (((tstart tend pstart pend) (%range2 text pattern opt)))
+        (if (not fold?)
+            (%string-search text
+                            (if (and (= pstart 0) (= pend (string-length pattern)))
+                                pattern
+                                (substring pattern pstart pend))
+                            tstart tend)
         (let ((plen (- pend pstart)))
           (let loop ((i tstart))
             (cond ((> (+ i plen) tend) #f)
@@ -519,7 +528,7 @@
                                              fold?))
                               (match (+ j 1)))))
                    i)
-                  (else (loop (+ i 1))))))))
+                  (else (loop (+ i 1)))))))))
 
     (define (string-contains text pattern . opt)
       (%contains text pattern opt #f "string-contains"))

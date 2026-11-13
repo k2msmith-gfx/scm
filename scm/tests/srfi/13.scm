@@ -227,6 +227,14 @@
 (check contains-longer-than-text (string-contains "ab" "abc") #f)
 (check contains-ci (string-contains-ci "BANANA" "nan") 2)
 (check contains-in-a-range (string-contains "banana" "na" 3) 4)
+;; The case-sensitive search is the native %string-search: the range's END
+;; bounds the match, a pattern range is honoured, and indices are characters.
+(check contains-bounded-by-end (string-contains "banana" "na" 3 5) #f)
+(check contains-pattern-range (string-contains "banana" "xnan" 0 6 1 4) 2)
+(check contains-counts-characters (string-contains "café → banana" "nan") 9)
+(check contains-at-the-very-end (string-contains "banana" "a" 5) 5)
+(check contains-start-at-length (string-contains "banana" "" 6) 6)
+(check search-prim-directly (%string-search "a\nbb\nccc" "\n" 2) 4)
 
 ;; ── case mapping ─────────────────────────────────────────────────────
 (check upcase (string-upcase "hello") "HELLO")
