@@ -1,0 +1,37 @@
+[package]
+name = "edit"
+version = "0.1.0"
+edition = "2024"
+
+# The editor as a crate (docs/editor-crate-plan.md): the text widget, the
+# text panes and the glyph painter, shared by the modeler and (from E4) a
+# standalone program. A host — the modeler today — implements `host::Host`;
+# nothing here knows what a 3D pane is.
+
+[dependencies]
+# Kernel text (docs/modeler-plan.md "Draw primitives"): pane titles at M4,
+# the draw-text overlay primitive later. swash gives hinted, high-fidelity
+# glyph rasterization (the CoreText-quality gap ab_glyph left) — it bundles
+# zeno (the rasterizer, reached via swash::zeno) and the scaler/outline cache.
+# Same vendored DejaVu/JetBrains Mono; blend() stays sRGB (see text.rs).
+# The scene-editor pane's editing core (docs/modeler-scene-editor-plan.md):
+# shaped, subpixel-cached multi-line text with cursor/selection/scroll state.
+# Renderer-agnostic — it rasterizes through the same swash we already vendor
+# and draws via a plain per-rect callback into our CPU framebuffer. The text
+# panes' char-grid transcript stays on text.rs; only the editor pane shapes.
+# No system font discovery: we hand it a fontdb holding our mono face only.
+swash = "0.2"
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
+# View-only .md buffers (C-x C-f on a .md): the pull-parser's event stream maps
+# to cosmic-text spans for source highlighting. default-features=false drops the
+# `getopts`/`html` bits we don't use — just the core parser.
+pulldown-cmark = { version = "0.12", default-features = false }
+# The scene-editor's vi mode: modit is the modal state machine COSMIC's own
+# ViEditor wraps (normal/insert/visual, operators, text objects). We feed it
+# keys and translate its events onto our editor ourselves (editorpane.rs) —
+# adopting ViEditor wholesale would drag in syntect and displace the S4
+# lexer/theme-slot highlighting and our coalesced undo.
+modit = "0.1.5"
+# `Framebuffer::save_png` (the modeler's `--screenshot`) and the editor's
+# view-only image buffers (C-x C-f on a .png/.jpg).
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
