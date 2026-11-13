@@ -70,10 +70,12 @@ impl Doc {
         self.chars.iter().collect()
     }
 
-    /// The token stream, for the tests: every question above is answered
-    /// from it, so a lexing bug is cheaper to find here than through the
-    /// answer it corrupted.
-    #[cfg(test)]
+    /// The token stream. Every question above is answered from it, so a
+    /// lexing bug is cheaper to find here than through the answer it
+    /// corrupted -- which is why the tests read it. Public since ray's
+    /// `edit` crate highlights and indents from it (ray
+    /// docs/editor-crate-plan.md, E1c): one Scheme scanner for the editor,
+    /// the modeler and `scm-lsp`, not one each.
     pub fn tokens(&self) -> &[Token] {
         &self.tokens
     }
