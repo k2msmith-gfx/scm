@@ -8,10 +8,13 @@
 //! them only through [`host::Host`] — dirty flags, a pane's rect, the UI
 //! scale, keyboard focus and the colours in [`theme::Theme`] — so nothing in
 //! this crate knows what a 3D pane, a scene or a status bar is. What the
-//! editor knows about the text it edits is a [`language::Language`].
+//! editor knows about the text it edits is a [`language::Language`], and
+//! what Scheme reaches it through is [`scm_binding`] (E2), the one module
+//! that names the VM.
 
 pub mod host;
 pub mod language;
+pub mod scm_binding;
 pub mod theme;
 pub mod widget;
 

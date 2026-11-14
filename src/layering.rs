@@ -1,7 +1,8 @@
-//! **No file in `edit` names the VM — yet.** The modeler's rule
-//! (`modeler/src/layering.rs`): outside the binding, nothing names the VM.
-//! E1 has no binding in it, so the rule is absolute; E2 brings the `%editor-*`
-//! prims in as `scm_binding.rs`, the one file this will then allow.
+//! **Outside the binding, no file in `edit` names the VM** — the modeler's
+//! rule (`modeler/src/layering.rs`), for the same reason: the widget and the
+//! languages are what a second extension language would share, so they
+//! must not depend on this one. The binding is `scm_binding.rs` and
+//! `scm_binding/` (E2), and nothing else.
 
 #[test]
 fn no_file_names_the_vm() {
@@ -11,7 +12,7 @@ fn no_file_names_the_vm() {
     let mut offenders = Vec::new();
     for path in files {
         let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-        if rel == "layering.rs" {
+        if rel == "layering.rs" || rel == "scm_binding.rs" || rel.starts_with("scm_binding/") {
             continue;
         }
         let src = std::fs::read_to_string(&path).expect("read");
