@@ -431,8 +431,12 @@
 (define (edit-quit)
   (cond ((%edit :comp) (comp-close))
     ; The editor's own C-g first — the REPL's abandons a pending form (see
-    ; edit-start's ON-QUIT) — then the line.
+    ; edit-start's ON-QUIT) — then, in the MINIBUFFER, the prompt itself:
+    ; C-g aborts it, as in Emacs (Kevin, 2026-11-13; it cleared the line
+    ; until then, and Escape was the only way out). Another pane's line
+    ; editor — the REPL's — clears its line.
     ((let ((q (%edit :on-quit))) (and q (q))))
+    ((equal? (%edit :pane) (mini-id)) (mini-dismiss) (echo "Quit"))
     (else (edit-set "" 0))))
 
 ; ── The minibuffer instance ────────────────────────────────────────────────

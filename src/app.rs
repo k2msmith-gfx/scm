@@ -179,8 +179,13 @@ pub fn typing() -> Option<u32> {
     with(|s| s.typing)
 }
 
-/// Give `id` the keyboard: a text pane shows its cursor while it holds it.
+/// Give `id` the keyboard, and the focus with it — as the modeler's
+/// `panes::hold_typing` does: the keymap reads the FOCUSED pane's local map,
+/// so a prompt that held the keyboard without the focus never got its own
+/// backspace or C-g, nor drew its cursor. A text pane shows its cursor while
+/// it holds the keyboard.
 pub fn hold_typing(id: u32) {
+    focus(id);
     if let Some(old) = typing() {
         textpane::set_active(old, false);
     }
@@ -338,13 +343,10 @@ fn draw_icons(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::them
 pub fn draw(fb: &mut Framebuffer) {
     let theme = crate::theme::Theme::default();
     fb.fill_rect(Rect { x: 0, y: 0, w: fb.width, h: fb.height }, theme.panel_bg);
-    let (focused, typing) = (focused(), typing());
+    let focused = focused();
     for id in [EDITOR, TRANSCRIPT, MINIBUFFER] {
         let Some(r) = rect(id) else { continue };
-        // The pane with the keyboard draws as focused, so a prompt shows
-        // its cursor: M-x holds the minibuffer's typing without moving the
-        // pane focus, and its cursor went undrawn.
-        let lit = focused == id || typing == Some(id);
+        let lit = focused == id;
         if id == EDITOR {
             editorpane::draw(id, fb, r, lit);
         } else if id == TRANSCRIPT && terminal_showing() {

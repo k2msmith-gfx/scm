@@ -22,6 +22,9 @@
       ((3) :minibuffer)
       (else #f))))
 
+; A prompt that closes gives the keyboard back to the editor.
+(set! *prompt-closed* (lambda () (focus-scene-editor)))
+
 ; ── Where a send's answers go: the transcript ─────────────────────────────
 (set! *transcript-append*
   (lambda (text (style #f))

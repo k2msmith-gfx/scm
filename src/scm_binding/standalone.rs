@@ -352,8 +352,14 @@ mod tests {
         s.key("M-x");
         assert_eq!(app::typing(), Some(app::MINIBUFFER));
         assert!(accent_in(strip) > before + 20, "the prompt draws its cursor block");
+        // Backspace edits the line; C-g aborts and gives the editor back.
+        for c in "abc".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("backspace");
+        assert_eq!(crate::textpane::input(app::MINIBUFFER).0, "ab");
         s.key("C-g");
-        s.escape();
+        assert_eq!(app::typing(), Some(app::EDITOR), "C-g aborted the prompt");
         // C-x C-f prompts in the minibuffer; Escape gives the keyboard back.
         s.key("C-x");
         s.key("C-f");

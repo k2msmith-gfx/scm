@@ -320,8 +320,8 @@ mod tests {
         eval(&mut interp, r#"(set! *pane-role* (lambda (id kind) :elsewhere))"#);
         assert_eq!(eval(&mut interp, "(on-menu-press 5 5)"), Val::Bool(false));
         // The minibuffer: a prompt holds typing, text arrives through
-        // on-text, return hands it to the callback, C-g clears the line, and
-        // echo lands in the minibuffer's pane.
+        // on-text, backspace edits, return hands it to the callback, C-g
+        // aborts a prompt, and echo lands in the minibuffer's pane.
         eval(&mut interp, r#"
             (set! *pane-id* (lambda (key) (and (eq? key :minibuffer) 7)))
             (bind-editor-keys :minibuffer)
@@ -329,12 +329,17 @@ mod tests {
             (read-minibuffer "Name: " (lambda (s) (set! answer s)))"#);
         assert_eq!(eval(&mut interp, "*typing*"), Val::Int(7), "the prompt holds typing");
         eval(&mut interp, r#"(set! %focused-pane (lambda () 7))
-                             (on-text "x") (on-key "C-g")
+                             (on-text "x") (on-key "backspace")
                              (on-text "a") (on-text "b") (on-key "return")"#);
         assert_eq!(eval(&mut interp, "answer"), Val::Str("ab".into()));
         assert_eq!(eval(&mut interp, "*typing*"), Val::Bool(false), "submitting released it");
+        eval(&mut interp, r#"(set! answer #f)
+                             (read-minibuffer "Name: " (lambda (s) (set! answer s)))
+                             (on-text "z") (on-key "C-g")"#);
+        assert_eq!(eval(&mut interp, "*typing*"), Val::Bool(false), "C-g aborted the prompt");
+        assert_eq!(eval(&mut interp, "answer"), Val::Bool(false), "and ran nothing");
         eval(&mut interp, r#"(echo "saved " 3 " files")"#);
-        assert_eq!(eval(&mut interp, "(%pane-row-text 7 0)"), Val::Str("saved 3 files".into()));
+        assert_eq!(eval(&mut interp, "(%pane-row-text 7 (- (%pane-row-count 7) 1))"), Val::Str("saved 3 files".into()));
         // Buffers: a scratch is named, saved as a file, switched away from
         // and back by name, and killing the last one leaves a fresh scratch.
         let path = std::env::temp_dir().join(format!("edit-shell-test-{}.scm", std::process::id()));
