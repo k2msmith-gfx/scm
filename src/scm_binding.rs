@@ -397,6 +397,7 @@ mod tests {
         let sent = eval(&mut interp, "(apply string-append helped)");
         let Val::Str(sent) = sent else { panic!("{sent:?}") };
         assert!(sent.contains(";; defun: (sq 7)") && sent.contains("=> 49"), "{sent}");
+        assert!(sent.contains("=> sq") && !sent.contains("#<unspecified>"), "a definition answers its name: {sent}");
         // Describe: on an argument, the form's head is described, from the
         // buffer's backend.
         eval(&mut interp, r#"

@@ -505,6 +505,8 @@ mod tests {
         let transcript: Vec<String> =
             crate::textpane::lines(crate::app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
         assert!(transcript.iter().any(|l| l == "=> 12"), "{transcript:?}");
+        assert!(transcript.iter().any(|l| l == "=> area"), "a remote definition answers its name: {transcript:?}");
+        assert!(!transcript.iter().any(|l| l.contains("#<unspecified>")), "{transcript:?}");
         // Not this image's: `area` is defined over there only.
         assert_eq!(s.eval_to_string("(%env-ref 'area #f)").unwrap(), "#f");
         assert_eq!(
@@ -597,6 +599,7 @@ mod guile_tests {
         s.call("(%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)");
         assert!(s.settle(30.0), "Guile answers");
         assert!(transcript().iter().any(|l| l == "=> 98"), "{:?}", transcript());
+        assert!(transcript().iter().any(|l| l == "=> sq"), "Guile's define* answers its name: {:?}", transcript());
         assert_eq!(s.eval_to_string("(%env-ref 'sq #f)").unwrap(), "#f", "in Guile, not here");
         let b = "(backend-of (%editor-active-buffer 1))";
         assert_eq!(s.eval_to_string(&format!("((backend-op {b} :doc) \"sq\")")).unwrap(), "\"Squares X.\"");

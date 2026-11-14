@@ -199,16 +199,24 @@
       (guard (e (#t (failed (if (string? e) e (readable e)))))
         (set! *send-failed* #f)
         (*after-send*)
-        (let ((val (%alist-ref r :value #f))
-              (secs (%alist-ref r :secs 0)))
-          (when val (*transcript-append* (string-append "=> " (%alist-ref r :printed "")) :dim))
-          ; Echo the value, Emacs eval-last-sexp style — a (defn ...) send prints
-          ; its function name, so redefining confirms itself on the echo line and
-          ; not only in the (possibly closed) REPL transcript.
-          ; The window waited while the forms ran — a render-to-file in them
-          ; traces right here — so a long run says how long, or the pause is
-          ; a mystery.
-          (echo label " => " (or (and (eq? val (if #f #f)) (defined-name src)) (%alist-ref r :printed ""))
+        (let* ((val (%alist-ref r :value #f))
+               (shown (%alist-ref r :printed ""))
+               (secs (%alist-ref r :secs 0))
+               ; UNSPECIFIED — a define's value, a display's — by the value
+               ; itself in this image, by its printed text from another
+               ; process (scm's or Guile's: the value stays over there).
+               (unspec? (or (eq? val (if #f #f)) (string=? shown "#<unspecified>")))
+               ; One definition answers its NAME, so a redefinition confirms
+               ; itself — `=> area`, not `=> #<unspecified>` — in the
+               ; transcript and on the echo line alike (Kevin, 2026-11-13: the
+               ; name had reached the echo only, and only in this image).
+               (name (and unspec? (not (member label '("buffer" "file"))) (defined-name src))))
+          (cond (name (*transcript-append* (string-append "=> " name) :dim))
+                (unspec? #f)   ; nothing worth a line, as the REPL prints none
+                (val (*transcript-append* (string-append "=> " shown) :dim)))
+          ; Echo the value too, Emacs eval-last-sexp style. A long run says
+          ; how long, or the pause is a mystery.
+          (echo label " => " (or name shown)
                 (if (>= secs 1)
                   (string-append "   (ran " (number->string (/ (round (* 10 secs)) 10.0)) " s)")
                   ""))
@@ -221,7 +229,9 @@ unspecified, where Janet's defn answered the function; this is what lets a
 send of one still echo `sexp => probe-fn`, so a redefinition confirms
 itself on the echo line."
   (let* ((t (string-trim-both src))
-         (head (find (lambda (h) (string-prefix? h t)) '("(define (" "(define " "(defn " "(def "))))
+         ; define* and define-syntax too: Guile buffers send them.
+         (head (find (lambda (h) (string-prefix? h t))
+                     '("(define* (" "(define (" "(define-syntax " "(define* " "(define " "(defn " "(def "))))
     (and head
          (let loop ((i (string-length head)))
            (if (or (= i (string-length t)) (memv (string-ref t i) '(#\space #\( #\) #\newline #\tab)))
