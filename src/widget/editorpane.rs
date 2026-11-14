@@ -1047,8 +1047,66 @@ fn md_layout_reading(theme: &crate::theme::Theme, src: &str) -> (String, Vec<(st
     let mut lists: Vec<Option<u64>> = Vec::new();
     // Just emitted a bullet marker — keep the item's first paragraph on its line.
     let mut at_item = false;
+    // A table being read: its rows of cells (each cell its styled runs), set
+    // out in aligned columns when it ends — the reading view is in the mono
+    // face, so padding lines the columns up (Kevin, 2026-11-14: :help's
+    // tables ran together into one paragraph).
+    let mut table: Option<MdTable> = None;
 
-    for (ev, _r) in Parser::new_ext(src, Options::empty()).into_offset_iter() {
+    for (ev, _r) in Parser::new_ext(src, Options::ENABLE_TABLES).into_offset_iter() {
+        // Inside a table cell, text goes to the cell.
+        if let Some(t) = table.as_mut() {
+            let st = md_inline_style(theme, None, bold > 0 || t.in_head, italic > 0, link > 0, false, false);
+            match &ev {
+                Event::Text(s) => {
+                    t.push(s, st);
+                    continue;
+                }
+                Event::Code(s) => {
+                    t.push(s, MdStyle { color: Some(theme.code_string), ..Default::default() });
+                    continue;
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    t.push(" ", st);
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match &ev {
+            Event::Start(Tag::Table(aligns)) => {
+                blank(&mut out);
+                table = Some(MdTable { aligns: aligns.clone(), rows: Vec::new(), head_rows: 0, in_head: false });
+            }
+            Event::Start(Tag::TableHead) => {
+                if let Some(t) = table.as_mut() {
+                    t.in_head = true;
+                    t.rows.push(Vec::new());
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(t) = table.as_mut() {
+                    t.in_head = false;
+                    t.head_rows = t.rows.len();
+                }
+            }
+            Event::Start(Tag::TableRow) => {
+                if let Some(t) = table.as_mut() {
+                    t.rows.push(Vec::new());
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                if let Some(row) = table.as_mut().and_then(|t| t.rows.last_mut()) {
+                    row.push(Vec::new());
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(t) = table.take() {
+                    t.lay_out(theme, &mut out, &mut spans);
+                }
+            }
+            _ => {}
+        }
         match ev {
             Event::Start(Tag::Heading { level, .. }) => {
                 blank(&mut out);
@@ -1150,6 +1208,71 @@ fn md_layout_reading(theme: &crate::theme::Theme, src: &str) -> (String, Vec<(st
         out.pop();
     }
     (out, spans)
+}
+
+/// A markdown table as it is read: rows of cells, each cell its styled runs.
+struct MdTable {
+    aligns: Vec<pulldown_cmark::Alignment>,
+    rows: Vec<Vec<Vec<(String, MdStyle)>>>,
+    /// How many of `rows` are the header (above the rule).
+    head_rows: usize,
+    in_head: bool,
+}
+
+impl MdTable {
+    fn push(&mut self, s: &str, st: MdStyle) {
+        if let Some(cell) = self.rows.last_mut().and_then(|r| r.last_mut()) {
+            cell.push((s.to_string(), st));
+        }
+    }
+
+    /// Set the table out as aligned columns: cells padded to their column's
+    /// width, a dim │ between columns, a ─┼─ rule under the header.
+    fn lay_out(&self, theme: &crate::theme::Theme, out: &mut String, spans: &mut Vec<(std::ops::Range<usize>, MdStyle)>) {
+        use pulldown_cmark::Alignment;
+        let width = |cell: &Vec<(String, MdStyle)>| cell.iter().map(|(s, _)| s.chars().count()).sum::<usize>();
+        let cols = self.rows.iter().map(Vec::len).max().unwrap_or(0);
+        let widths: Vec<usize> = (0..cols)
+            .map(|c| self.rows.iter().filter_map(|r| r.get(c)).map(width).max().unwrap_or(0))
+            .collect();
+        let dim = MdStyle { color: Some(theme.text_dim), ..Default::default() };
+        let mut push = |out: &mut String, s: &str, st: MdStyle| {
+            if !s.is_empty() {
+                let start = out.len();
+                out.push_str(s);
+                spans.push((start..out.len(), st));
+            }
+        };
+        let empty = Vec::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            for (c, w) in widths.iter().enumerate() {
+                if c > 0 {
+                    push(out, " │ ", dim.clone());
+                }
+                let cell = row.get(c).unwrap_or(&empty);
+                let pad = w - width(cell);
+                let (before, after) = match self.aligns.get(c) {
+                    Some(Alignment::Right) => (pad, 0),
+                    Some(Alignment::Center) => (pad / 2, pad - pad / 2),
+                    _ => (0, pad),
+                };
+                out.push_str(&" ".repeat(before));
+                for (s, st) in cell {
+                    push(out, s, st.clone());
+                }
+                // No trailing padding on the last column.
+                if c + 1 < widths.len() {
+                    out.push_str(&" ".repeat(after));
+                }
+            }
+            out.push('\n');
+            if i + 1 == self.head_rows {
+                let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+                push(out, &rule.join("─┼─"), dim.clone());
+                out.push('\n');
+            }
+        }
+    }
 }
 
 /// Clip whole-text `spans` to per-line [`AttrsList`]s over `text` (split on
@@ -3025,6 +3148,27 @@ mod tests {
             a.metrics_opt.map(|m| Metrics::from(m).font_size > 14.0).unwrap_or(false)
         });
         assert!(big, "heading is rendered larger than body");
+    }
+
+    /// A table reads as aligned columns — it ran together into one
+    /// paragraph before (Kevin, 2026-11-14, on :help).
+    #[test]
+    fn markdown_reading_view_sets_tables_in_columns() {
+        let theme = crate::theme::get();
+        let src = "before\n\n| key | what |\n|---|--:|\n| `C-s` | search |\n| `M-%` | replace, one by one |\n\nafter\n";
+        let (text, spans) = md_layout_reading(&theme, src);
+        let lines: Vec<&str> = text.lines().collect();
+        let at = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle} in {text:?}"));
+        let (head, rule, r1, r2) = (at("key"), at("┼"), at("C-s"), at("M-%"));
+        assert_eq!((rule, r1, r2), (head + 1, head + 2, head + 3), "a row per line, the rule under the header:\n{text}");
+        assert!(!text.contains('|'), "no pipes left: {text:?}");
+        // The column rule falls at the same place on every row.
+        let bar = |l: &str| l.chars().position(|c| c == '│' || c == '┼');
+        assert!([head, rule, r1, r2].iter().all(|&i| bar(lines[i]) == bar(lines[head])), "columns line up:\n{text}");
+        // The second column is right-aligned (--:): its rows end together.
+        assert_eq!(lines[r1].chars().count(), lines[r2].chars().count(), "{text}");
+        assert!(text.contains("before") && text.contains("after"));
+        let _ = md_bake("Monaco", &text, &spans, 14.0);
     }
 
     #[test]

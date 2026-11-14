@@ -1066,7 +1066,7 @@ mod tests {
         // the replace, the ':' commands, then every key binding.
         ex(&mut s, "help");
         let md = s.eval_to_string("(vi-help-markdown)").unwrap();
-        for want in ["## vi: normal mode", "## Search", "**search forward** — plain `C-s` or `Cmd-F` · vi `/`", "## Replace", ":%s/old/new/c", ":q!"] {
+        for want in ["## vi: normal mode", "## Search", "| search forward | `C-s` `Cmd-F` | `/` |", "## Replace", ":%s/old/new/c", ":q!"] {
             assert!(md.contains(want), "help has {want}");
         }
         assert!(s.eval_to_string("(buffer-name (%editor-active-buffer 1))").unwrap().contains("*help*"), "it opened");
