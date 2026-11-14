@@ -29,6 +29,9 @@ pub enum Panel {
     Repl,
 }
 
+/// The minibuffer's text size, as a share of the panes'.
+const MINI_SHARE: f32 = 0.88;
+
 /// The panel's share of the height under the editor.
 const TRANSCRIPT_SHARE: f32 = 0.25;
 
@@ -95,12 +98,13 @@ impl crate::host::Host for AppHost {
     fn window(&self) -> (u32, u32) {
         with(|s| s.size)
     }
-    /// The minibuffer reads at the modeline's size — 0.8 of the text —
-    /// smaller than the panes, as the modeler's strip is. (The widget draws
-    /// a strip pane's mono at 0.94 of this, to sit level with a status
-    /// label beside it; the division undoes that.)
+    /// The minibuffer reads a little smaller than the panes, as the
+    /// modeler's strip does: MINI_SHARE of the text (a touch above the
+    /// modeline's 0.8 — Kevin, 2026-11-13). (The widget draws a strip
+    /// pane's mono at 0.94 of this, to sit level with a status label beside
+    /// it; the division undoes that.)
     fn strip_font_px(&self, pane: u32) -> Option<f32> {
-        (pane == MINIBUFFER).then(|| textpane::font_px() * 0.8 / 0.94)
+        (pane == MINIBUFFER).then(|| textpane::font_px() * MINI_SHARE / 0.94)
     }
     fn theme(&self) -> crate::theme::Theme {
         crate::theme::Theme::default()
@@ -123,7 +127,7 @@ pub fn install_host() {
 /// above it, the editor the rest.
 pub fn resize(w: u32, h: u32, scale: f32) {
     // The minibuffer's strip at its own text size (`strip_font_px`).
-    let row = (crate::text::mono_metrics(textpane::font_px() * 0.8 * scale).1 + 10.0 * scale).ceil() as u32;
+    let row = (crate::text::mono_metrics(textpane::font_px() * MINI_SHARE * scale).1 + 10.0 * scale).ceil() as u32;
     let mini = row.min(h);
     let above = h - mini;
     let (shown, share) = with(|s| (s.panel.is_some(), s.share));
