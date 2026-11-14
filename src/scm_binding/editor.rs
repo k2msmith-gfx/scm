@@ -111,6 +111,28 @@ prim! {
 }
 
 prim! {
+    /// `(%editor-diagnostics id)` — what the active buffer's reader cannot
+    /// read (E3f), in buffer order: `((line column message error?) …)`, the
+    /// line from 0, the column in CHARACTERS, error? 1 for text that will
+    /// not read and 0 for a form left open.
+    "%editor-diagnostics", fn editor_diagnostics(id: num) {
+        let id = id as u32;
+        let text = crate::editorpane::text(id);
+        let lines: Vec<&str> = text.split('\n').collect();
+        Out::rows(crate::editorpane::diagnostics(id).into_iter().map(|d| {
+            let (line, byte) = d.start;
+            let column = lines.get(line).map_or(0, |l| l[..byte.min(l.len())].chars().count());
+            Out::Many(vec![
+                Out::Num(line as f64),
+                Out::Num(column as f64),
+                Out::Text(d.message),
+                Out::Num(if d.error { 1.0 } else { 0.0 }),
+            ])
+        }))
+    }
+}
+
+prim! {
     /// `(%editor-set-vi on)` — global vi-mode toggle for editor panes (modit,
     /// COSMIC's vi engine: NORMAL/INSERT/VISUAL, motions, operators, text
     /// objects). `(%editor-vi-mode id)` reads the mode badge text ("" = off).
@@ -525,6 +547,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         editor_completions::install(interp)?,
         editor_replace::install(interp)?,
         editor_head::install(interp)?,
+        editor_diagnostics::install(interp)?,
         editor_set_vi::install(interp)?,
         editor_vi_mode::install(interp)?,
         editor_goto_line::install(interp)?,

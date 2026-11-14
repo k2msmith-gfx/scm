@@ -100,11 +100,32 @@ prim! {
     }
 }
 
+prim! {
+    /// `(%text-definitions text)` — what TEXT defines, in order, for the
+    /// document-symbols popup (E3f): `((name form detail line column) …)`,
+    /// line from 0 and column in characters at the name, detail the call
+    /// shape `(f a b)` for a procedure or #f. The same scan as the index,
+    /// so it answers for a half-typed buffer.
+    "%text-definitions", fn text_definitions(text: text) {
+        let doc = scm_text::Doc::new(&text);
+        Out::rows(doc.definitions().into_iter().map(|d| {
+            Out::Many(vec![
+                Out::Text(d.name),
+                Out::Text(d.form),
+                d.detail.map_or(Out::Nil, Out::Text),
+                Out::Num(doc.position(d.name_at).0 as f64),
+                Out::Num(doc.column(d.name_at) as f64),
+            ])
+        }))
+    }
+}
+
 pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm::EmbedError> {
     Ok(vec![
         xref_index::install(interp)?,
         xref_update::install(interp)?,
         xref_sites::install(interp)?,
         xref_matching::install(interp)?,
+        text_definitions::install(interp)?,
     ])
 }

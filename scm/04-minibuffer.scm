@@ -186,7 +186,8 @@
 
 (define (comp-open source at)
   "Open completion at the cursor's token. source :files (segment-wise,
-  zsh-style), :commands, :buffers, :definitions, or :symbols; at true when triggered by @ (the
+  zsh-style), :commands, :buffers, :definitions, :symbols, or a list of
+  candidate strings; at true when triggered by @ (the
   @ is part of the token and the accepted path replaces it, quoted)."
   (define all
     (case source
@@ -201,7 +202,9 @@
       ((:definitions)
         (let ((f (%env-ref 'find-definitions #f)))
           (if f (delete-duplicates (map car (f "" 100000))) '())))
-      (else (symbol-candidates))))
+      ; A LIST is the candidates themselves — a prompt over choices it
+      ; computed (document-symbols' definitions).
+      (else (if (list? source) source (symbol-candidates)))))
   (%edit! :comp
     (%make-state :all all
                  :files (eq? source :files)

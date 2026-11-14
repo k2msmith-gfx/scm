@@ -21,7 +21,7 @@
 
 use scm_text::text::{Kind, Token};
 
-use super::{Language, ParenPos, Scan, Tok};
+use super::{Diagnostic, Language, ParenPos, Scan, Tok};
 
 pub struct Scheme;
 
@@ -87,6 +87,68 @@ impl Language for Scheme {
             .collect();
         (!head.is_empty()).then_some(head)
     }
+
+    /// What scm's READER says, when the host has installed one
+    /// ([`set_reader`]): the datum that will not read, or — when the text
+    /// ends inside a form — the outermost bracket left open, which is where
+    /// the missing closer belongs. That one is quiet, not an error: a form
+    /// being typed is open until its last paren, and a red mark under the
+    /// cursor at every keystroke would be noise (scm-lsp's rule, which
+    /// reports it as information).
+    fn diagnose(&self, lines: &[&str], scan: &Scan) -> Vec<Diagnostic> {
+        let Some(read) = READER.get() else { return Vec::new() };
+        match read(&lines.join("\n")) {
+            ReadCheck::Fine => Vec::new(),
+            ReadCheck::Invalid { start, end, message } => {
+                // Offsets in order, as the walker wants them.
+                let mut walk = Walker::new(lines);
+                let (from, to) = (walk.at(start), walk.at(end.max(start)));
+                vec![Diagnostic { start: from, end: to, message, error: true }]
+            }
+            ReadCheck::Incomplete => {
+                let mut open: Vec<&ParenPos> = Vec::new();
+                for p in &scan.parens {
+                    if matches!(p.ch, b'(' | b'[' | b'{') {
+                        open.push(p);
+                    } else {
+                        open.pop();
+                    }
+                }
+                let (at, message) = match open.first() {
+                    Some(p) => (
+                        (p.line, p.byte),
+                        format!("`{}` is never closed: what follows it reads as inside it", p.ch as char),
+                    ),
+                    // No bracket open: a string or a `#|` comment is.
+                    None => {
+                        let last = lines.len().saturating_sub(1);
+                        ((last, lines.get(last).map_or(0, |l| l.len())), "a string or `#|` comment is never closed".to_string())
+                    }
+                };
+                let end = (at.0, (at.1 + 1).min(lines.get(at.0).map_or(0, |l| l.len())));
+                vec![Diagnostic { start: at, end, message, error: false }]
+            }
+        }
+    }
+}
+
+/// What a READER says of a whole text, in CHARACTER offsets — the
+/// interpreter's own answer, which is what decides whether a send will
+/// read. Installed by the binding (`scm_binding`), because this module may
+/// not name the VM (`layering.rs`).
+pub enum ReadCheck {
+    Fine,
+    /// The text ends inside a datum.
+    Incomplete,
+    Invalid { start: usize, end: usize, message: String },
+}
+
+static READER: std::sync::OnceLock<fn(&str) -> ReadCheck> = std::sync::OnceLock::new();
+
+/// Install the reader [`Scheme::diagnose`] asks. The first one stays: there
+/// is one interpreter's reader per process.
+pub fn set_reader(read: fn(&str) -> ReadCheck) {
+    let _ = READER.set(read);
 }
 
 /// A token, and where it starts and ends as (line, byte).

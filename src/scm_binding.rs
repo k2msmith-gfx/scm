@@ -151,6 +151,7 @@ macro_rules! prim {
     };
 }
 
+mod breaks;
 mod clipboard;
 mod editor;
 mod menu;
@@ -161,7 +162,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -173,16 +174,32 @@ pub fn shell_dir() -> std::path::PathBuf {
 /// the modeler records them, so its prelude can unwrap the array records
 /// it passes (`99-scheme-only.scm`, `%prim-names`).
 pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Result<(), scm::EmbedError> {
+    crate::language::scheme::set_reader(read_check);
     for name in editor::install(interp)?
         .into_iter()
         .chain(text::install(interp)?)
         .chain(xref::install(interp)?)
         .chain(menu::install(interp)?)
         .chain(clipboard::install(interp)?)
+        .chain(breaks::install(interp)?)
     {
         installed(name);
     }
     Ok(())
+}
+
+/// **Diagnostics as you type** (E3f): the editor's Scheme asks scm's own
+/// reader whether a buffer reads, as `scm-lsp` does, on a fresh engine so
+/// that reading allocates nothing in the session. The reader is the one a
+/// send will meet, so what it marks is exactly what would fail to send.
+fn read_check(text: &str) -> crate::language::scheme::ReadCheck {
+    use crate::language::scheme::ReadCheck;
+    let mut engine = scm::Engine::new();
+    match scm::Reader::read_all(text, &mut engine) {
+        Ok(_) => ReadCheck::Fine,
+        Err(scm::ReadError::Incomplete) => ReadCheck::Incomplete,
+        Err(scm::ReadError::Invalid { span, msg }) => ReadCheck::Invalid { start: span.start, end: span.end, message: msg },
+    }
 }
 
 #[cfg(test)]
@@ -443,6 +460,70 @@ mod tests {
         assert_eq!(eval(&mut interp, "(%alist-ref r :output #f)"), Val::Str("1".into()));
         assert_eq!(eval(&mut interp, "(%alist-ref e :status #f)"), Val::Sym("error".into()));
         assert!(eval(&mut interp, "(backend-op (in-process-backend) :definition-sites)") != Val::Bool(false), "all five offered");
+        // An error's message is what a guard around the send would have
+        // printed, whichever way it was raised.
+        for (src, message) in [("(car 5)", "car: not a pair: 5"), ("(raise 'sym)", "sym"), (r#"(error \"boom\" 1)"#, "boom 1")] {
+            let m = eval(&mut interp, &format!(r#"(%alist-ref (in-process-eval "{src}") :message #f)"#));
+            assert_eq!(m, Val::Str(message.into()), "{src}");
+        }
+        // An error the sent code catches is its own business: no break.
+        eval(&mut interp, r#"(define c (in-process-eval "(guard (e (#t 'caught)) (car 1))"))"#);
+        assert_eq!(eval(&mut interp, "(%alist-ref c :value #f)"), Val::Sym("caught".into()));
+
+        // E3f, the reader: text that will not read is marked where the
+        // reader stops; a form left open, quietly, at its outermost opener;
+        // M-g n goes there and says why.
+        eval(&mut interp, r#"(let ((b (%editor-buffer-new 3))) (register-buffer b #f) (visit-buffer b))
+                             (%editor-set-text 3 "(define (f x)\n  (car x))\n(f 1 #<)")"#);
+        let d = eval(&mut interp, "(car (%editor-diagnostics 3))");
+        let Val::List(d) = d else { panic!("{d:?}") };
+        assert_eq!((&d[0], &d[3]), (&Val::Int(2), &Val::Int(1)), "an error, on line 3: {d:?}");
+        eval(&mut interp, r#"(%editor-set-text 3 "(ok)\n(open (more)\n  (x)")"#);
+        assert_eq!(eval(&mut interp, "(map (lambda (d) (list (car d) (cadr d) (cadddr d))) (%editor-diagnostics 3))"),
+                   Val::List(vec![Val::List(vec![Val::Int(1), Val::Int(0), Val::Int(0)])]), "open at (open");
+        eval(&mut interp, "(goto-diagnostic)");
+        assert_eq!(eval(&mut interp, "(%editor-cursor 3)"), Val::List(vec![Val::Int(1), Val::Int(0)]));
+        eval(&mut interp, r#"(%editor-set-text 3 "(fine)")"#);
+        assert_eq!(eval(&mut interp, "(null? (%editor-diagnostics 3))"), Val::Bool(true));
+        // A file that is not Scheme is not read as Scheme.
+        eval(&mut interp, r#"(%editor-set-text 3 "{ \"json\": [1, 2 }")
+                             (%buffer-set-path 3 (%editor-active-buffer 3) "/tmp/x.json")"#);
+        assert_eq!(eval(&mut interp, "(null? (%editor-diagnostics 3))"), Val::Bool(true));
+        eval(&mut interp, "(%buffer-set-path 3 (%editor-active-buffer 3) #f)");
+
+        // Document symbols: what the buffer defines, name:LINE in order,
+        // as the minibuffer's list; RET on one goes there.
+        eval(&mut interp, r#"(%editor-set-text 3 "(define (f x) x)\n\n(define y 2)")"#);
+        assert_eq!(eval(&mut interp, "(map definition-label (%text-definitions (%editor-text 3)))"),
+                   Val::List(vec![Val::Str("f:1".into()), Val::Str("y:3".into())]));
+        // (RET takes the highlighted candidate, as in M-x; RET again goes.)
+        eval(&mut interp, r#"(document-symbols) (on-text "y") (on-key "return") (on-key "return")"#);
+        assert_eq!(eval(&mut interp, "(%editor-cursor 3)"), Val::List(vec![Val::Int(2), Val::Int(8)]), "on y");
+
+        // The error pane: a send that raises keeps the calls it raised in,
+        // innermost first, each with its locals — none of them the send's
+        // own machinery — and C-h e shows them.
+        eval(&mut interp, r#"
+            (in-process-eval "(define (inner v) (vector-ref v 9)) (define (outer n) (inner (make-vector n 0)))")
+            (set! helped '())
+            (%editor-set-text 3 "(outer 3)")
+            (%editor-goto-line 3 0) (eval-defun)"#);
+        let frames = eval(&mut interp, "(list-ref *last-error* 3)");
+        let Val::List(frames) = frames else { panic!("{frames:?}") };
+        let Val::List(first) = &frames[0] else { panic!("{frames:?}") };
+        assert_eq!(first[0], Val::Str("(vector-ref v 9)".into()), "{frames:?}");
+        let locals = format!("{:?}", first[2]);
+        assert!(locals.contains("\"v\"") && locals.contains("#(0 0 0)"), "{locals}");
+        assert!(!format!("{frames:?}").contains("07-backend"), "{frames:?}");
+        let sent = eval(&mut interp, "(apply string-append helped)");
+        let Val::Str(sent) = sent else { panic!("{sent:?}") };
+        assert!(sent.contains("C-h e"), "{sent}");
+        eval(&mut interp, "(view-last-error)");
+        assert!(eval(&mut interp, r#"(buffer-by-name "*error*")"#) != Val::Bool(false));
+        let page = eval(&mut interp, "(error-markdown *last-error*)");
+        let Val::Str(page) = page else { panic!("{page:?}") };
+        assert!(page.starts_with("# vector-ref") && page.contains("## 1 · `(vector-ref v 9)`"), "{page}");
+
         let keys = eval(&mut interp, "(describe-keys)");
         let Val::Str(keys) = keys else { panic!("{keys:?}") };
         assert!(keys.contains("C-x C-f — "), "{keys}");

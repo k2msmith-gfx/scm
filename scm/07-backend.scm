@@ -16,7 +16,10 @@
 ;   :eval (src)        → a RESULT, an alist —
 ;                        ((:status . ok) (:value . v) (:printed . "…")
 ;                         (:output . "…") (:secs . n))
-;                        or ((:status . error) (:message . "…") (:output . "…"))
+;                        or ((:status . error) (:message . "…") (:output . "…")
+;                            (:frames . ((call location ((name printed) …)) …)))
+;                        :frames, innermost first, where the backend can
+;                        see them (in-process; the error pane shows them)
 ;                        :value is the live value where the backend has one
 ;                        (in-process); :printed is what to show either way
 ;   :complete (prefix) → candidate names
@@ -30,20 +33,34 @@
 (define (in-process-eval src)
   "A send evaluated in THIS image — SRC's forms in order, at top level — as
 a backend RESULT: what the forms printed is captured, and a form that
-raises answers an error result rather than unwinding the editor."
-  (let ((out (open-output-string)))
-    (guard
-      (e (#t (list (cons :status 'error)
-                   (cons :message (if (string? e) e (*show-value* e)))
-                   (cons :output (get-output-string out)))))
-      (let* ((t0 (current-jiffy))
-             (val (parameterize ((current-output-port out)) (eval-string src)))
-             (secs (/ (- (current-jiffy) t0) (jiffies-per-second))))
-        (list (cons :status 'ok)
-              (cons :value val)
-              (cons :printed (*show-value* val))
+raises answers an error result rather than unwinding the editor, with the
+frames it raised in (:frames — the error pane's, E3f)."
+  ;; Through %call-with-break, so an error the sent code does not catch
+  ;; itself is taken at the raise, frames and locals live (the snapshot is
+  ;; edit's scm_binding/breaks.rs). The value stays in this closure: a
+  ;; value crossing back through the prim would be copied.
+  (let ((out (open-output-string))
+        (val #f)
+        (t0 (current-jiffy)))
+    (set! %break-condition #f)
+    (if (%call-with-break
+          (lambda ()
+            (set! val (parameterize ((current-output-port out)) (eval-string src)))
+            #t))
+      (list (cons :status 'ok)
+            (cons :value val)
+            (cons :printed (*show-value* val))
+            (cons :output (get-output-string out))
+            (cons :secs (/ (- (current-jiffy) t0) (jiffies-per-second))))
+      (let ((e %break-condition)
+            (brk (%last-break)))
+        (set! %break-condition #f)
+        (list (cons :status 'error)
+              (cons :message (cond ((not e) (if brk (car brk) "error"))
+                                   ((string? e) e)
+                                   (else (*show-value* e))))
               (cons :output (get-output-string out))
-              (cons :secs secs))))))
+              (cons :frames (if brk (cadr brk) '())))))))
 
 (define (in-process-backend)
   "The backend that is this image: sends evaluate here, completion and docs

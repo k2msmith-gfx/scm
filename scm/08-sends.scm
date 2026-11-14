@@ -178,7 +178,10 @@
       (echo "error: " msg))
     (unless (string=? printed "") (*transcript-append* printed))
     (if (not (eq? (%alist-ref r :status #f) 'ok))
-      (failed (%alist-ref r :message ""))
+      (begin
+        (failed (%alist-ref r :message ""))
+        ;; The frames it raised in, for the error pane (12-error-pane).
+        (note-send-error! label src (%alist-ref r :message "") (%alist-ref r :frames '())))
       (guard (e (#t (failed (if (string? e) e (readable e)))))
         (set! *send-failed* #f)
         (*after-send*)

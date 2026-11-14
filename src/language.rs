@@ -46,6 +46,24 @@ pub trait Language: Sync {
     /// The name of the call the point at (`line`, `byte`) is inside — what
     /// eldoc describes. `None` when there is none.
     fn enclosing_head(&self, lines: &[&str], line: usize, byte: usize) -> Option<String>;
+    /// What is wrong with the text as the language READS it (E3f), given
+    /// the scan just made of it. None by default: a language with no reader
+    /// to ask marks nothing, which is not the same as saying it is fine.
+    fn diagnose(&self, _lines: &[&str], _scan: &Scan) -> Vec<Diagnostic> {
+        Vec::new()
+    }
+}
+
+/// A stretch of text the language cannot read, from `start` to `end`, each
+/// a (line, byte) — the widget underlines it and the shell can say why.
+/// `error` is text that will not read at all; otherwise it is a form still
+/// open, which is what text being typed usually is, and is drawn quieter.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Diagnostic {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub message: String,
+    pub error: bool,
 }
 
 /// A code-context delimiter's position, buffer-wide.

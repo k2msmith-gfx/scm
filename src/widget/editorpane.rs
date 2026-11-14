@@ -279,6 +279,20 @@ impl Doc {
         }
     }
 
+    /// Does this buffer read as its language — so the reader's diagnostics
+    /// apply? Text: a scratch buffer, or a file named as Scheme. A `.janet`
+    /// session file, a `.txt` or a `.json` is also edited here, and the
+    /// Scheme reader's complaints about it would be noise. (One language
+    /// for every buffer until E6 picks one per file.)
+    fn reads(&self) -> bool {
+        self.md.is_none()
+            && self.image.is_none()
+            && self.path.as_deref().is_none_or(|p| {
+                let p = p.to_ascii_lowercase();
+                [".scm", ".ss", ".sld", ".sls"].iter().any(|ext| p.ends_with(ext))
+            })
+    }
+
     /// Close an open insert-coalescing run, banking it as one undo step.
     fn close_insert_run(&mut self) {
         if self.insert_run {
@@ -595,6 +609,17 @@ pub fn enclosing_head(id: u32) -> Option<String> {
             let lines: Vec<&str> = buffer.lines.iter().map(|l| l.text()).collect();
             pane.lang.enclosing_head(&lines, cursor.line, cursor.index)
         })
+    })
+}
+
+/// What the active buffer's language cannot read (E3f), from the scan the
+/// draw keeps — made now if the text has changed since.
+pub fn diagnostics(id: u32) -> Vec<language::Diagnostic> {
+    with_pane(id, |_, pane, _| {
+        let reads = pane.reads();
+        let (lex, lang) = (&mut pane.lex, pane.lang);
+        pane.editor.with_buffer(|buffer| fresh_scan(lex, lang, reads, buffer));
+        pane.lex.as_ref().map_or_else(Vec::new, |c| c.diags.clone())
     })
 }
 
@@ -2204,8 +2229,35 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
 struct LexCache {
     lines: Vec<String>,
     scan: language::Scan,
+    /// What the language's reader says of the same text (E3f) — made with
+    /// the scan, so it costs nothing until the text changes. Empty for a
+    /// buffer that does not read as the language ([`Doc::reads`]).
+    diags: Vec<language::Diagnostic>,
+    reads: bool,
     /// (theme signature, show-paren pair, font family) last applied.
     applied: Option<(u64, Vec<(usize, usize)>, String)>,
+}
+
+/// Make `lex` the scan of `buffer`'s text — and the reader's diagnostics
+/// of it — unless it already is.
+fn fresh_scan(lex: &mut Option<LexCache>, lang: &'static dyn Language, reads: bool, buffer: &Buffer) {
+    let same = lex.as_ref().is_some_and(|c| {
+        c.reads == reads
+            && c.lines.len() == buffer.lines.len()
+            && c.lines.iter().zip(&buffer.lines).all(|(a, b)| a == b.text())
+    });
+    if !same {
+        let lines: Vec<&str> = buffer.lines.iter().map(|l| l.text()).collect();
+        let scan = lang.scan(&lines);
+        let diags = if reads { lang.diagnose(&lines, &scan) } else { Vec::new() };
+        *lex = Some(LexCache {
+            scan,
+            diags,
+            reads,
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+            applied: None,
+        });
+    }
 }
 
 /// Re-lex the whole buffer and apply syntax spans (plus the show-paren
@@ -2226,24 +2278,14 @@ fn relex(pane: &mut Doc, family: &str, theme: &crate::theme::Theme, typing: bool
         })
     };
     let cursor = pane.editor.cursor();
+    let reads = pane.reads();
     let line_sigs = &mut pane.line_sigs;
     let lex = &mut pane.lex;
     let lang = pane.lang;
     pane.editor.with_buffer_mut(|buffer| {
         // Pass 1: lex every line, collecting spans and delimiter positions —
         // unless the text is what the kept scan was made from.
-        let same = lex.as_ref().is_some_and(|c| {
-            c.lines.len() == buffer.lines.len()
-                && c.lines.iter().zip(&buffer.lines).all(|(a, b)| a == b.text())
-        });
-        if !same {
-            let lines: Vec<&str> = buffer.lines.iter().map(|l| l.text()).collect();
-            *lex = Some(LexCache {
-                scan: lang.scan(&lines),
-                lines: lines.iter().map(|l| l.to_string()).collect(),
-                applied: None,
-            });
-        }
+        fresh_scan(lex, lang, reads, buffer);
         let cache = lex.as_mut().expect("just filled");
         let all_spans = &cache.scan.spans;
         let parens: &[ParenPos] = &cache.scan.parens;
@@ -2511,6 +2553,57 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
         };
         editor.render(&mut renderer, text_color, cursor_color, selection_color, text_color);
 
+        // What the reader cannot read (E3f), underlined: in the error ink for
+        // text that will not read, and faintly for a form left open — which
+        // is also what every form is while it is being typed.
+        let diags = match (&pane.md, &pane.lex) {
+            (None, Some(c)) => c.diags.clone(),
+            _ => Vec::new(),
+        };
+        if !diags.is_empty() {
+            let thick = (2.0 * scale).round().max(1.0) as i32;
+            let advance = crate::text::mono_metrics(px).0;
+            pane.editor.with_buffer(|buffer| {
+                for run in buffer.layout_runs() {
+                    for d in diags.iter().filter(|d| (d.start.0..=d.end.0).contains(&run.line_i)) {
+                        let mut spans: Vec<(f32, f32)> = run
+                            .highlight(Cursor::new(d.start.0, d.start.1), Cursor::new(d.end.0, d.end.1))
+                            .collect();
+                        // An empty span — the reader stopped at a line's end
+                        // — still marks one cell where it stopped.
+                        if spans.is_empty() && d.start == d.end && run.line_i == d.start.0 {
+                            let x = run
+                                .glyphs
+                                .iter()
+                                .find(|g| g.start >= d.start.1)
+                                .map_or(run.line_w, |g| g.x);
+                            spans.push((x, advance));
+                        }
+                        let a = if d.error { 0xff } else { 0x70 };
+                        let color = Color::rgba(
+                            (theme.text_error >> 16) as u8,
+                            (theme.text_error >> 8) as u8,
+                            theme.text_error as u8,
+                            a,
+                        );
+                        let y = (run.line_top + run.line_height) as i32 - thick;
+                        for (x, w) in spans {
+                            let x0 = (x as i32 + ox as i32).max(cx0).max(0);
+                            let x1 = ((x + w.max(1.0)) as i32 + ox as i32).min(cx1).min(fbw);
+                            let y0 = (y + oy as i32).max(cy0).max(0);
+                            let y1 = (y + thick + oy as i32).min(cy1).min(fbh);
+                            for py in y0..y1 {
+                                let row = py as u32 * fb.width;
+                                for px_ in x0..x1 {
+                                    blend_px(&mut fb.pixels[(row + px_ as u32) as usize], color);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         // Vi block cursor: a translucent accent cell over the character —
         // the glyph stays readable through it.
         if vi_block {
@@ -2541,6 +2634,13 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
         // typing focus. Replaces the old floating badge and corner dirty dot.
         let left = if buf_dirty { format!("{buf_name} *") } else { buf_name };
         let left = if buf_tag.is_empty() { left } else { format!("{left} · {buf_tag}") };
+        // Text that will not read says where, so a mark scrolled out of
+        // view is still found (M-g n goes there). A form left open does
+        // not: it is what typing looks like.
+        let left = match diags.iter().find(|d| d.error) {
+            Some(d) => format!("{left} · unreadable at line {}", d.start.0 + 1),
+            None => left,
+        };
         draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, &theme, &left, vi_label.as_deref());
     });
 }
