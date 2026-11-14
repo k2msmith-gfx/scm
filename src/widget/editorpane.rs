@@ -2444,6 +2444,13 @@ fn draw_image(
     draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, theme, name, Some(&dim));
 }
 
+/// The modeline's height in physical pixels at `scale` — what a host's
+/// divider grabs (the standalone's bar between the editor and its panel).
+pub fn modeline_height(scale: f32) -> f32 {
+    let ml_px = crate::textpane::font_px() * scale * 0.8;
+    crate::text::mono_metrics(ml_px).1 + 4.0 * scale
+}
+
 /// Draw the pane: background, then the shaped buffer through cosmic-text's
 /// rect callback (text + selection + cursor in one pass), clipped to the
 /// pane. The cursor draws only while the pane holds TYPING focus — matching
@@ -2467,8 +2474,8 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
     // the text it labels (Kevin, 2026-11-13 — the same font, not the same
     // size; a full-size bar read as one more line of text).
     let ml_px = px * 0.8;
-    let (ml_adv, ml_row) = crate::text::mono_metrics(ml_px);
-    let ml_h = ml_row + 4.0 * scale;
+    let ml_adv = crate::text::mono_metrics(ml_px).0;
+    let ml_h = modeline_height(scale);
 
     with_state(|state| {
         let pane = state.panes.entry(id).or_insert_with(PaneState::new);

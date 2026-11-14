@@ -250,31 +250,32 @@ pub fn terminal_showing() -> bool {
     panel() == Some(Panel::Terminal) && crate::termpane::is_open(TRANSCRIPT)
 }
 
-/// Half the height of the divider's grab strip, in logical pixels: the bar
-/// is the editor's modeline edge, so the strip straddles it.
-const DIVIDER_GRAB: f32 = 4.0;
+/// The divider IS the editor's modeline — the bar along the editor's
+/// bottom, just above the panel — so it is grabbed anywhere on the bar and
+/// a drag moves the bar's centre line to the pointer (Kevin: grab it by its
+/// centre, not by its bottom edge). Its centre line, in window pixels.
+fn bar_centre() -> Option<(f64, f64)> {
+    let top = rect(TRANSCRIPT)?.y as f64;
+    let half = editorpane::modeline_height(with(|s| s.scale)) as f64 / 2.0;
+    Some((top - half, half))
+}
 
 /// Is a window point on the divider between the editor and the panel?
 pub fn divider_at(x: f64, y: f64) -> bool {
     let _ = x;
-    match rect(TRANSCRIPT) {
-        Some(r) => {
-            let grab = (DIVIDER_GRAB * with(|s| s.scale)) as f64;
-            (y - r.y as f64).abs() <= grab
-        }
-        None => false,
-    }
+    bar_centre().is_some_and(|(centre, half)| (y - centre).abs() <= half)
 }
 
-/// Drag the divider to window height `y`: the panel takes what is below
-/// it, kept between a few rows and most of the window.
+/// Drag the divider's centre line to window height `y`: the panel takes
+/// what is below the bar, kept between a few rows and most of the window.
 pub fn drag_divider(y: f64) {
     let Some(mini) = rect(MINIBUFFER) else { return };
     let above = mini.y as f64;
     if above <= 0.0 {
         return;
     }
-    let share = ((above - y) / above).clamp(0.08, 0.85) as f32;
+    let half = editorpane::modeline_height(with(|s| s.scale)) as f64 / 2.0;
+    let share = ((above - (y + half)) / above).clamp(0.08, 0.85) as f32;
     let (w, h, scale) = with(|s| {
         s.share = share;
         (s.size.0, s.size.1, s.scale)

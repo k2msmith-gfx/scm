@@ -411,13 +411,16 @@ mod tests {
         s.call("(term-close)");
         assert_eq!(app::panel(), Some(app::Panel::Repl), "a closed terminal leaves the REPL");
 
-        // The divider: grabbed at the panel's top edge, dragged up, the
-        // panel grows and the editor shrinks to meet it.
+        // The divider is the editor's modeline: grabbed on the bar (its
+        // centre line, not the panel's edge below it), dragged up, the bar's
+        // centre follows the pointer and the panel grows to meet it.
         let top = app::rect(app::TRANSCRIPT).unwrap().y as f64;
-        assert!(app::divider_at(100.0, top + 2.0) && !app::divider_at(100.0, top + 40.0));
-        app::drag_divider(top - 100.0);
+        let half = crate::editorpane::modeline_height(1.0) as f64 / 2.0;
+        assert!(app::divider_at(100.0, top - half), "the bar's centre line");
+        assert!(!app::divider_at(100.0, top + 6.0), "not the panel's own text below it");
+        app::drag_divider(top - half - 100.0);
         let (ed, panel) = (app::rect(app::EDITOR).unwrap(), app::rect(app::TRANSCRIPT).unwrap());
-        assert!((panel.y as f64 - (top - 100.0)).abs() <= 1.0, "the panel's top follows the drag");
+        assert!((panel.y as f64 - (top - 100.0)).abs() <= 1.0, "the bar moved with the pointer");
         assert_eq!(ed.y + ed.h, panel.y, "the editor ends where the panel starts");
 
         // Menus: a quick right-click on the editor posts its sends; on the
