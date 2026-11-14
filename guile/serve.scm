@@ -15,9 +15,13 @@
 ;;; Each connection is served on its own thread, so `:interrupt` from a
 ;;; second connection reaches an evaluation running on the first — the
 ;;; protocol's rule, because an interrupt queued behind the form it is meant
-;;; to stop would never arrive.
+;;; to stop would never arrive. A line starting with a comma is one of
+;;; Guile's REPL commands (,help ,describe ,apropos ,time), run as its REPL
+;;; runs them.
 
 (use-modules (system base compile)
+             (system repl command)
+             (system repl common)
              (ice-9 rdelim)
              (ice-9 regex)
              (ice-9 session)
@@ -60,6 +64,37 @@
         (if (eof-object? form)
             last
             (loop (compile form #:env user)))))))
+
+;; Guile's own REPL commands — ,help ,describe ,apropos ,time ,expand … —
+;; are its REPL's, not its evaluator's: compiled, `,help` would read as
+;; (unquote help). A line that starts with a comma runs as one, in a REPL
+;; of this server's own, in guile-user, and what it printed is the answer.
+(define meta-repl (save-module-excursion
+                    (lambda () (set-current-module user) (make-repl 'scheme))))
+
+(define (meta-command-line? code)
+  (let ((t (string-trim code)))
+    (and (> (string-length t) 1) (char=? (string-ref t 0) #\,))))
+
+(define (answer-meta id code)
+  (let* ((line (string-trim (string-trim code) #\,))
+         (port (open-output-string))
+         (failed
+           (catch #t
+             (lambda ()
+               (with-output-to-port port
+                 (lambda ()
+                   (save-module-excursion
+                     (lambda ()
+                       (set-current-module user)
+                       (with-input-from-port (open-input-string (string-append line "\n"))
+                         (lambda () (meta-command meta-repl)))))))
+               #f)
+             (lambda (key . args) (error-text key args)))))
+    (if failed
+        (format #f "(:id ~a :status error :message ~a :output ~a :host-stopped #f :backtrace ())"
+                id (wire-string failed) (wire-string (get-output-string port)))
+        (format #f "(:id ~a :status ok :value \"\" :output ~a)" id (wire-string (get-output-string port))))))
 
 (define (answer-eval id code)
   (let* ((out (open-output-string))
@@ -144,7 +179,8 @@
   (let ((id (or (field req ':id) 0))
         (op (let ((o (field req ':op))) (if (string? o) (string->symbol o) o))))
     (case op
-      ((eval) (answer-eval id (or (field req ':code) "")))
+      ((eval) (let ((code (or (field req ':code) "")))
+                (if (meta-command-line? code) (answer-meta id code) (answer-eval id code))))
       ((complete) (answer-complete id (or (field req ':prefix) "")))
       ((describe) (answer-describe id (let ((n (field req ':name))) (if (symbol? n) (symbol->string n) (or n "")))))
       ((parse) (answer-parse id (or (field req ':code) "")))

@@ -388,9 +388,18 @@ mod guile_tests {
             s.text(&c.to_string());
         }
         s.key("return");
+        // Guile's own REPL commands work at it, as at Guile's prompt.
+        for line in [",help", ",describe sq"] {
+            for c in line.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+        }
         let t = transcript();
         assert!(t.iter().any(|l| l == "scheme@(guile-user)> (sq 3)"), "{t:?}");
         assert!(t.iter().any(|l| l == "=> 9"), "{t:?}");
+        assert!(t.iter().any(|l| l.contains(",apropos REGEXP")), ",help listed the commands: {t:?}");
+        assert!(t.iter().any(|l| l.contains("Squares X.")), ",describe showed the docstring: {t:?}");
         s.call("(focus-scene-editor)");
         // An error comes back with Guile's message.
         s.call(r#"(%editor-set-text 1 "(car 5)") (%editor-goto-line 1 0) (eval-defun)"#);
