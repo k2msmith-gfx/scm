@@ -86,7 +86,18 @@ answer from its live bindings."
 ; backend-of, which honours that first.
 (define *attached-backends* (make-hash-table equal?))
 
+; A LANGUAGE may name its own backend (E6): a Guile buffer's sends go to a
+; Guile, whatever the host would send a Scheme buffer to. Name → a thunk
+; answering the backend (it may start one), consulted by the buffer's
+; language (%buffer-language).
+(define *language-backends* (make-hash-table equal?))
+
 (define (backend-of buf)
-  "BUF's backend: the one it was attached to, else the host's choice."
-  (or (hash-table-ref/default *attached-backends* buf #f) (*buffer-backend* buf)))
+  "BUF's backend: the one it was attached to, else its language's, else
+the host's choice."
+  (or (hash-table-ref/default *attached-backends* buf #f)
+      (let ((f (hash-table-ref/default *language-backends*
+                                       (%buffer-language (*pane-id* :editor) buf) #f)))
+        (and f (f)))
+      (*buffer-backend* buf)))
 (define *after-send* (lambda () #f))

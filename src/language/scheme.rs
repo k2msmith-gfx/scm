@@ -29,6 +29,10 @@ pub struct Scheme;
 pub static SCHEME: Scheme = Scheme;
 
 impl Language for Scheme {
+    fn name(&self) -> &'static str {
+        "scheme"
+    }
+
     fn scan(&self, lines: &[&str]) -> Scan {
         let toks = Tokens::new(lines);
         let mut out = Scan { spans: vec![Vec::new(); lines.len()], parens: Vec::new() };

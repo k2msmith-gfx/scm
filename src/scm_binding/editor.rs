@@ -111,6 +111,25 @@ prim! {
 }
 
 prim! {
+    /// `(%editor-set-language id name)` — the active buffer's language, by
+    /// name ("scheme", "guile"): highlighting, indentation and read marks
+    /// follow. 1 when NAME is a language.
+    "%editor-set-language", fn editor_set_language(id: num, name: text) {
+        Out::Num(if crate::editorpane::set_language(id as u32, &name) { 1.0 } else { 0.0 })
+    }
+}
+
+prim! {
+    /// `(%buffer-language id buf)` — buffer BUF's language, by name.
+    "%buffer-language", fn buffer_language(id: num, buf: num) {
+        match crate::editorpane::buffer_language(id as u32, buf as u32) {
+            Some(n) => Out::Text(n.to_string()),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
     /// `(%editor-diagnostics id)` — what the active buffer's reader cannot
     /// read (E3f), in buffer order: `((line column message error?) …)`, the
     /// line from 0, the column in CHARACTERS, error? 1 for text that will
@@ -548,6 +567,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         editor_replace::install(interp)?,
         editor_head::install(interp)?,
         editor_diagnostics::install(interp)?,
+        editor_set_language::install(interp)?,
+        buffer_language::install(interp)?,
         editor_set_vi::install(interp)?,
         editor_vi_mode::install(interp)?,
         editor_goto_line::install(interp)?,

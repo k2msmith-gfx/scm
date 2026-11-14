@@ -3,15 +3,27 @@
 //! brackets are, how a new line indents, and the call around the cursor.
 //! The widget asks a buffer's [`Language`] and nothing else, so a second
 //! language (E6) is a second implementation, not an edit to the widget.
-//! Scheme ([`scheme::Scheme`]) is the one there is.
+//! There are two: scm's Scheme ([`scheme::Scheme`]) and GNU Guile
+//! ([`guile::Guile`]), each buffer set to one by name ([`by_name`]).
 //!
 //! The highlight COLOURS are not here: each [`Tok`] is a theme slot
 //! (code-comment/string/keyword/number/call/paren), so the look stays the
 //! host's policy.
 
+pub mod guile;
 pub mod scheme;
 
+pub use guile::GUILE;
 pub use scheme::SCHEME;
+
+/// A language by the name a buffer is set to (`%editor-set-language`).
+pub fn by_name(name: &str) -> Option<&'static dyn Language> {
+    match name {
+        "scheme" => Some(&SCHEME),
+        "guile" => Some(&GUILE),
+        _ => None,
+    }
+}
 
 /// A highlight class. A language maps its own tokens onto these; text in no
 /// class draws in the body ink.
@@ -39,6 +51,9 @@ pub struct Scan {
 }
 
 pub trait Language: Sync {
+    /// The language's name, as a buffer is set to it and the shell asks
+    /// which backend a buffer's sends go to: "scheme" (scm's), "guile".
+    fn name(&self) -> &'static str;
     /// Scan the buffer, one entry per line.
     fn scan(&self, lines: &[&str]) -> Scan;
     /// The column a NEW line at (`line`, `byte`) indents to.

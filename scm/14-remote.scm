@@ -11,12 +11,13 @@
 (define *remote-timeout* 30)      ; seconds a send waits before interrupting
 (define *remote-program* "scm")   ; what remote-start runs with --serve
 
-(define (remote-backend conn)
-  "A backend that asks the scm image at connection CONN: sends evaluate
+(define (remote-backend conn (label "scm"))
+  "A backend that asks the image at connection CONN — scm's, or anything
+that speaks its protocol (Guile's serve.scm, 15-guile): sends evaluate
 there, completion and docs answer from its live bindings, and M-. stays
-with this editor's index of the files."
+with this editor's index of the files. LABEL names it."
   (define (describe name) (guard (e (#t #f)) (%remote-describe conn name)))
-  (list (cons :name (string-append "scm at " (or (%remote-address conn) "?")))
+  (list (cons :name (string-append label " at " (or (%remote-address conn) "?")))
         (cons :eval
               (lambda (src)
                 (guard (e (#t (list (cons :status 'error)

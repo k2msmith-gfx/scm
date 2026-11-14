@@ -623,6 +623,25 @@ pub fn diagnostics(id: u32) -> Vec<language::Diagnostic> {
     })
 }
 
+/// Set the ACTIVE buffer's language by name ("scheme", "guile"): its
+/// highlighting, indentation and read marks follow. False for a name no
+/// language answers to.
+pub fn set_language(id: u32, name: &str) -> bool {
+    let Some(lang) = language::by_name(name) else { return false };
+    with_pane(id, |_, pane, _| {
+        pane.lang = lang;
+        pane.lex = None;
+        pane.line_sigs.clear();
+    });
+    crate::host::mark_dirty_ui();
+    true
+}
+
+/// The language of buffer `buf` in pane `id`, by name.
+pub fn buffer_language(id: u32, buf: u32) -> Option<&'static str> {
+    with_doc(id, buf, |d| d.lang.name())
+}
+
 /// The buffer now matches the file on disk (save just wrote it).
 pub fn mark_saved(id: u32) {
     with_pane(id, |_, pane, _| {
@@ -3004,6 +3023,9 @@ mod tests {
     static SCANS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static COUNTING: Counting = Counting;
     impl Language for Counting {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
         fn scan(&self, lines: &[&str]) -> language::Scan {
             SCANS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             language::SCHEME.scan(lines)

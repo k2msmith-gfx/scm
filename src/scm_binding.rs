@@ -167,7 +167,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -180,6 +180,14 @@ pub fn shell_dir() -> std::path::PathBuf {
 /// it passes (`99-scheme-only.scm`, `%prim-names`).
 pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Result<(), scm::EmbedError> {
     crate::language::scheme::set_reader(read_check);
+    // `(%edit-path rel)` — a file of the edit crate's tree, as an absolute
+    // path: Guile's serve.scm (E6), read where this binary was built, as
+    // the shell's own files are.
+    interp.define_fn("%edit-path", |args| {
+        let rel = val_text(args, 0).unwrap_or_default();
+        Ok(scm::Val::Str(shell_dir().join("..").join(rel).to_string_lossy().into_owned()))
+    })?;
+    installed("%edit-path");
     for name in editor::install(interp)?
         .into_iter()
         .chain(text::install(interp)?)

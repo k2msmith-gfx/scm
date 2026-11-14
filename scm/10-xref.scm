@@ -27,6 +27,10 @@
         (%editor-buffer-new eid))
       (register-buffer (%editor-active-buffer eid) p)
       (%editor-set-text eid (if (file-exists? p) (slurp p) ""))
+      ; Its language from what the file says (15-guile): a reused scratch
+      ; starts over as scm's Scheme.
+      (%editor-set-language eid "scheme")
+      (detect-language! eid p)
       (%editor-mark-saved eid)
       (visit-buffer (%editor-active-buffer eid)))))
 (define *visit-file* visit-file-text)
