@@ -285,10 +285,10 @@ impl Session {
             self.call("(begin (editor-comp-cancel) (on-menu-cancel))");
             return true;
         }
-        // A query-replace running stops: Escape is one of its quit keys,
-        // ahead of vi's own use of it (an open ? menu closes first, above).
-        if self.eval_to_string("(if *query* 1 0)").as_deref() == Ok("1") {
-            self.call("(query-answer :quit)");
+        // A query-replace running stops, and a search's single keys end:
+        // Escape is one of their quit keys, ahead of vi's own use of it (an
+        // open ? menu closes first, above).
+        if self.eval_to_string("(if (search-escape) 1 0)").as_deref() == Ok("1") {
             return true;
         }
         if typing == Some(app::EDITOR) && crate::editorpane::vi_escape(app::EDITOR) {
@@ -857,16 +857,53 @@ mod tests {
         s.call("(focus-scene-editor)");
         set(&mut s, "alpha beta\ngamma Beta\nbeta");
 
-        // C-s: the first match from the cursor, then the next, then round.
+        // C-s: the first match from the cursor; then single keys — n next,
+        // p previous — and the prompt names them.
+        let cur = || crate::editorpane::cursor(app::EDITOR);
+        let mini = || crate::textpane::lines(app::MINIBUFFER).last().map(|(_, l)| l.clone()).unwrap_or_default();
         s.key("C-s");
         typed(&mut s, "beta");
-        assert_eq!(crate::editorpane::cursor(app::EDITOR), (0, 10), "first beta selected, cursor at its end");
+        assert_eq!(cur(), (0, 10), "first beta selected, cursor at its end");
+        for k in ["[n] next", "[p] previous", "[r] replace", "[a] replace all", "[q] done"] {
+            assert!(mini().contains(k), "the prompt names {k}: {}", mini());
+        }
+        s.text("n");
+        assert_eq!(cur(), (1, 10), "n: the next; no capital, so Beta matches");
+        s.text("n");
+        s.text("n");
+        assert_eq!(cur(), (0, 10), "wrapped to the top");
+        assert!(mini().starts_with("Wrapped"), "{}", mini());
+        s.text("p");
+        assert_eq!(cur(), (2, 4), "p: back round to the last");
+        // q leaves the keys: n is the editor's own again.
+        s.text("q");
+        assert_eq!(s.eval_to_string("(if *search-mode* 1 0)").unwrap(), "0", "q ended the search's keys");
+        set(&mut s, "alpha beta\ngamma Beta\nbeta");
+        // Any other key ends the search and does its own thing.
         s.key("C-s");
         typed(&mut s, "");
-        assert_eq!(crate::editorpane::cursor(app::EDITOR), (1, 10), "C-s RET: the last search again; no capital, so Beta matches");
-        s.key("s-g");
-        s.key("s-g");
-        assert_eq!(crate::editorpane::cursor(app::EDITOR), (0, 10), "wrapped to the top");
+        assert_eq!(s.eval_to_string("(if *search-mode* 1 0)").unwrap(), "1", "an empty answer is the last search");
+        s.text("Z");
+        assert_eq!(s.eval_to_string("(if *search-mode* 1 0)").unwrap(), "0");
+        // r replaces what was searched for, one by one from the match on
+        // screen; a replaces them all.
+        set(&mut s, "alpha beta\ngamma Beta\nbeta");
+        s.key("C-s");
+        typed(&mut s, "");
+        s.text("n");
+        s.text("r");
+        typed(&mut s, "Q");
+        s.text("y");
+        s.text("q");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "alpha beta\ngamma Q\nbeta", "r replaced from the match on screen");
+        s.key("C-s");
+        typed(&mut s, "");
+        s.text("a");
+        typed(&mut s, "W");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "alpha W\ngamma Q\nW", "a replaced every one");
+        s.call("(%editor-undo 1)");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "alpha beta\ngamma Q\nbeta", "in one undo step");
+        set(&mut s, "alpha beta\ngamma Beta\nbeta");
 
         // M-%: y, n, then . stops.
         s.call("(%editor-goto-line 1 0)");
@@ -901,7 +938,7 @@ mod tests {
         typed(&mut s, "x");
         typed(&mut s, "yy");
         s.text("n");
-        s.text("!");
+        s.text("a");
         assert_eq!(text(&mut s), "yy yy\nx yy", "skipped the first, ! did the rest round the end");
         s.call("(%editor-undo 1)");
         assert_eq!(text(&mut s), "x x\nx x", "! was one undo step");

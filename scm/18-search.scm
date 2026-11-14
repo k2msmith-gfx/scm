@@ -5,10 +5,16 @@
 ;## one, as query-replace does; replace-all does the lot in one undo step.
 ;## The text side is edit's editorpane (find, select_range, replace_all);
 ;## matching is plain text within a line, ignoring case unless the search
-;## has a capital in it.
+;## has a capital in it. After a search finds a match the keys are single
+;## letters, as in the replace: n next, p previous, r replace one by one,
+;## a replace all, q done; any
+;## other key or a click ends that and does what it always does (Kevin,
+;## 2026-11-14: "show the single key commands", not chords).
 
 (define *search-last* #f)       ; the last search string
 (define *replace-last* #f)      ; the last replacement
+(define *search-mode* #f)       ; the match on screen (line start end) while
+                                ; the search's single keys are live, else #f
 
 (define (search-fold? s)
   ; Smart case: a search with no capitals ignores case.
@@ -35,10 +41,59 @@
         (match m
           ((l s e wrapped)
             (%editor-select (editor-pane-id) l s e)
-            (echo (if (positive? wrapped) "wrapped: " "") needle "  (line " (+ l 1) ")"
-                  "     [Cmd-G] next   [Cmd-Shift-G] previous   [M-%] replace")
+            (set! *search-mode* (list l s e))
+            (search-help (positive? wrapped))
             #t)
-          (_ (echo "not found: " needle) #f))))))
+          (_ (set! *search-mode* #f) (echo "not found: " needle) #f))))))
+
+(define (search-help (wrapped #f))
+  ; The search's prompt, as the replace's is: in the accent, every key.
+  (match *search-mode*
+    ((l s e)
+      (%pane-append (mini-id) "accent"
+        (string-append (if wrapped "Wrapped: " "") "“" *search-last* "” line " (number->string (+ l 1))
+                       "   [n] next   [p] previous   [r] replace   [a] replace all   [q] done")))
+    (_ #f)))
+
+(define (search-done)
+  "Leave the search's single keys; the match stays selected."
+  (set! *search-mode* #f)
+  (echo ""))
+
+(define (search-replace)
+  ; r: replace what was searched for, asking only what with, starting at
+  ; the match on screen.
+  (match *search-mode*
+    ((l s e)
+      (set! *search-mode* #f)
+      (read-minibuffer (with-default (string-append "Replace “" *search-last* "” with") *replace-last*)
+                       (lambda (to)
+                         (%editor-select (editor-pane-id) l s s)
+                         (query-replace-run *search-last* (or-last to *replace-last*)))))
+    (_ #f)))
+
+(define (search-replace-all)
+  ; a: replace every match of what was searched for, in the whole buffer,
+  ; asking only what with — one undo step.
+  (when *search-mode*
+    (set! *search-mode* #f)
+    (let ((from *search-last*))
+      (read-minibuffer (with-default (string-append "Replace every “" from "” with") *replace-last*)
+                       (lambda (to)
+                         (let ((to (or-last to *replace-last*)))
+                           (set! *replace-last* to)
+                           (let ((n (%editor-replace-all (editor-pane-id) from to (search-fold? from) 0 0 1000000000 0)))
+                             (echo "replaced " n (if (= n 1) " match" " matches")))))))))
+
+(define (search-key k)
+  ; A key while the search's single keys are live: #f for one it does not
+  ; know, which ends the mode and goes on to do what it always does.
+  (cond ((member k '("n" "C-s" "s-g")) (search-step *search-last* #t) #t)
+        ((member k '("p" "C-r" "S-s-g")) (search-step *search-last* #f) #t)
+        ((equal? k "r") (search-replace) #t)
+        ((equal? k "a") (search-replace-all) #t)
+        ((member k '("q" "return" "C-g" "escape")) (search-done) #t)
+        (else (set! *search-mode* #f) #f)))
 
 (define (with-default prompt last)
   ; "Search (beta): " — the last answer, which an empty RET takes. Shown
@@ -55,12 +110,13 @@
 
 (define (search-forward)
   "Search forward from the cursor — C-s, Cmd-F — wrapping round once. An
-  empty answer searches for the last thing again, so C-s RET is \"next\";
-  Cmd-G finds the next one without asking."
+  empty answer searches for the last thing again. On a match: n next, p
+  previous, r replace one by one, a replace all, q done; any other key
+  ends the search and acts."
   (search-prompt #t))
 
 (define (search-backward)
-  "Search backward from the cursor — C-r. Cmd-Shift-G repeats it."
+  "Search backward from the cursor — C-r. The same keys on a match."
   (search-prompt #f))
 
 (define (search-next)
@@ -75,7 +131,7 @@
 ; While one runs, its keys come first (the handlers below):
 ;   y SPC   replace this one, go to the next
 ;   n DEL   skip this one
-;   !       replace this one and every one after it
+;   a !     replace this one and every one after it
 ;   .       replace this one and stop
 ;   q RET   quit (C-g and Escape too)
 ;   ?       the same as a menu at the match, to read or click
@@ -89,7 +145,7 @@
   (%pane-append (mini-id) "accent"
     (string-append
       "Replace “" (%state-ref *query* :from) "” with “" (%state-ref *query* :to) "”?   "
-      "[y] replace   [n] skip   [!] all the rest   [.] replace and stop   [q] quit   [?] menu"
+      "[y] replace   [n] skip   [a] all the rest   [.] replace and stop   [q] quit   [?] menu"
       (let ((n (%state-ref *query* :count)))
         (if (positive? n) (string-append "    " (number->string n) " replaced") "")))))
 
@@ -101,7 +157,7 @@
       (show-menu-items
         (list (list "Replace this one" (lambda () (query-answer :yes)) "y")
               (list "Skip this one" (lambda () (query-answer :no)) "n")
-              (list "Replace all the rest" (lambda () (query-answer :all)) "!")
+              (list "Replace all the rest" (lambda () (query-answer :all)) "a")
               (list "Replace this one and stop" (lambda () (query-answer :this-and-stop)) ".")
               (list "Quit" (lambda () (query-answer :quit)) "q"))
         x y 0 #t))
@@ -187,7 +243,7 @@
   "Replace a string, one match at a time — M-% (option-shift-5), Cmd-Alt-F. Asks what to
   replace and with what, then selects each match from the cursor on
   (wrapping round once) and asks: y or SPC replaces it, n or DEL skips it,
-  ! replaces it and all the rest, . replaces it and stops, q quits (RET,
+  a (or !) replaces it and all the rest, . replaces it and stops, q quits (RET,
   C-g and Escape too)."
   (read-minibuffer (with-default "Replace" *search-last*)
                    (lambda (from)
@@ -219,7 +275,7 @@
   (when (menu-open?) (menu-close))
   (cond ((member k '("y" "space" " ")) (query-answer :yes))
         ((member k '("n" "backspace" "delete")) (query-answer :no))
-        ((equal? k "!") (query-answer :all))
+        ((member k '("a" "!")) (query-answer :all))
         ((equal? k ".") (query-answer :this-and-stop))
         ((member k '("q" "return" "C-g" "escape")) (query-answer :quit))
         ((member k '("?" "S-/")) (query-menu))
@@ -231,6 +287,17 @@
 (add-handler *key-handlers* 18 :query-replace (lambda (key) (and *query* (query-key key))))
 (add-handler *text-handlers* 50 :query-replace (lambda (s) (and *query* (query-key s))))
 (add-handler *escape-handlers* 60 :query-replace (lambda () (and *query* (query-answer :quit) #t)))
+(add-handler *key-handlers* 17 :search (lambda (key) (and *search-mode* (search-key key))))
+(add-handler *text-handlers* 49 :search (lambda (s) (and *search-mode* (search-key s))))
+; A click anywhere ends the search's keys (a POST handler: it runs whoever
+; claims the click), so a later n types an n.
+(add-handler *click-handlers* -5 :search (lambda _ (set! *search-mode* #f) #f))
+
+(define (search-escape)
+  ; Escape: quit a replace, else leave the search's keys; #f when neither ran.
+  (cond (*query* (query-answer :quit) #t)
+        (*search-mode* (search-done) #t)
+        (else #f)))
 
 ; ── Keys and menu ──────────────────────────────────────────────────────────
 ; Global, acting only while the editor has the keys (as M-g n does), so a
