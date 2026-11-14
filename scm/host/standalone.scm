@@ -125,18 +125,29 @@
 (set! *help-open* (lambda () (unless (%panel) (%show-panel :repl))))
 
 ; ── The REPL: the transcript with a prompt ─────────────────────────────────
-; It evaluates where this editor's sends do — this image, or the scm image
-; remote-start / remote-connect attached (14-remote) — so the two always
-; agree. RET submits a form the reader says is complete and continues one
-; that is not; up and down walk the history.
+; It evaluates where the ACTIVE BUFFER's sends do — this image, the scm
+; image remote-start / remote-connect attached (14-remote), or a Guile
+; buffer's Guile (15-guile) — so the REPL and the buffer always agree, and
+; its prompt says which: scm's `scheme λ > `, or Guile's own
+; `scheme@(guile-user)> `. RET submits a form the reader says is complete
+; and continues one that is not; up and down walk the history.
 (define *repl-history* '())
 (define *repl-pending* "")
 
-(define (repl-prompt) (if (string=? *repl-pending* "") "scheme λ > " "         > "))
-
 (define (repl-backend)
-  ; Where the REPL's forms go: the socket image while one is connected.
-  (if *remote* (remote-backend *remote*) (in-process-backend)))
+  ; Where the REPL's forms go: the active buffer's backend, else this image
+  ; — never a terminal one, which is a program with its own prompt.
+  (let ((b (backend-of (%editor-active-buffer (editor-pane-id)))))
+    (if (and b (not (equal? (%alist-ref b :name #f) "the terminal"))) b (in-process-backend))))
+
+(define (repl-guile?)
+  (string-prefix? "guile" (%alist-ref (repl-backend) :name "")))
+
+(define (repl-prompt)
+  ; Guile's REPL says its language and module; the continuation lines up
+  ; under the form, as the prompt's width of spaces.
+  (let ((p (if (repl-guile?) "scheme@(guile-user)> " "scheme λ > ")))
+    (if (string=? *repl-pending* "") p (make-string (string-length p) #\space))))
 
 (define (repl-focus)
   "Give the REPL's prompt the keyboard."

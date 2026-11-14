@@ -382,6 +382,16 @@ mod guile_tests {
         let b = "(backend-of (%editor-active-buffer 1))";
         assert_eq!(s.eval_to_string(&format!("((backend-op {b} :doc) \"sq\")")).unwrap(), "\"Squares X.\"");
         assert_eq!(s.eval_to_string(&format!("((backend-op {b} :signature) \"sq\")")).unwrap(), "\"(sq x #:key by)\"");
+        // The REPL follows the buffer: Guile's prompt, Guile's image.
+        s.call("(repl)");
+        for c in "(sq 3)".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("return");
+        let t = transcript();
+        assert!(t.iter().any(|l| l == "scheme@(guile-user)> (sq 3)"), "{t:?}");
+        assert!(t.iter().any(|l| l == "=> 9"), "{t:?}");
+        s.call("(focus-scene-editor)");
         // An error comes back with Guile's message.
         s.call(r#"(%editor-set-text 1 "(car 5)") (%editor-goto-line 1 0) (eval-defun)"#);
         assert!(transcript().iter().any(|l| l.starts_with("error: car:")), "{:?}", transcript());
