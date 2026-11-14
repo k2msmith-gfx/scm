@@ -140,12 +140,12 @@ the shell's own (edit/scm/)?"
 ; Kevin, 2026-11-13: two icons at the strip's right end (src/app.rs), one
 ; for each, mutually exclusive — the panel shows one or the other, and the
 ; lit icon clicked again hides the whole panel, as the modeler's dock
-; toggles do. The terminal runs your $SHELL; the REPL is a prompt over the
+; toggles do. The terminal runs your login shell; the REPL is a prompt over the
 ; image this editor's sends go to, so what C-M-x defined, it can see.
 
 (define (show-panel kind)
   "Show the bottom panel with KIND in it — :terminal or :repl — and give
-  it the keyboard. The terminal's first show starts your $SHELL."
+  it the keyboard. The terminal's first show starts your login shell."
   (case kind
     ((:terminal) (%show-panel :terminal) (if (term-id) (term-focus) (term-open)))
     ((:repl) (%show-panel :repl) (repl-focus))))

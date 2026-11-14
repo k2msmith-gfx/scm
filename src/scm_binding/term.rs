@@ -86,6 +86,44 @@ prim! {
     }
 }
 
+/// The user's LOGIN shell, from the account database — not `$SHELL`, which a
+/// tool can replace: under `nix develop` it is the build environment's bash,
+/// compiled without readline, so the terminal had no Tab completion, history
+/// or line editing (Kevin, 2026-11-14). macOS keeps accounts in Directory
+/// Services (`dscl`); elsewhere `getent passwd`, then /etc/passwd.
+pub fn login_shell() -> Option<String> {
+    let user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).ok()?;
+    let run = |prog: &str, args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new(prog).args(args).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let shell = if cfg!(target_os = "macos") {
+        run("/usr/bin/dscl", &[".", "-read", &format!("/Users/{user}"), "UserShell"])
+            .and_then(|o| o.split_whitespace().nth(1).map(str::to_string))
+    } else {
+        let line = run("getent", &["passwd", &user]).or_else(|| {
+            std::fs::read_to_string("/etc/passwd")
+                .ok()?
+                .lines()
+                .find(|l| l.starts_with(&format!("{user}:")))
+                .map(str::to_string)
+        });
+        line.and_then(|l| l.trim().rsplit(':').next().map(str::to_string))
+    };
+    shell.filter(|s| !s.is_empty() && std::path::Path::new(s).exists())
+}
+
+prim! {
+    /// `(%login-shell)` — the user's login shell (zsh, bash, …) from the
+    /// account database, or #f; the terminal's default program.
+    "%login-shell", fn login_shell_prim() {
+        match login_shell() {
+            Some(s) => Out::Text(s),
+            None => Out::Nil,
+        }
+    }
+}
+
 pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm::EmbedError> {
     // `(%term-open id program args cwd)` — run PROGRAM with ARGS (a list of
     // strings) in a terminal shown by pane ID, in CWD (#f: the editor's
@@ -110,5 +148,6 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         term_selection::install(interp)?,
         term_clear_selection::install(interp)?,
         term_paste::install(interp)?,
+        login_shell_prim::install(interp)?,
     ])
 }

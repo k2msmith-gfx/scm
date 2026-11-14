@@ -49,10 +49,15 @@
 
 Run PROGRAM with ARGS in the terminal pane and give it the keyboard —
 `(term-open \"scm\")` for a Scheme REPL in its own process, `(term-open
-\"python3\")`, or, with no PROGRAM, your $SHELL. A program already running
-there is stopped first. C-x o leaves the terminal; C-c C-c sends it a C-c."
+\"python3\")`, or, with no PROGRAM, your login shell. A program already
+running there is stopped first. C-x o leaves the terminal; C-c C-c sends it
+a C-c.
+
+The login shell comes from the account database, not $SHELL: under `nix
+develop` $SHELL is the build environment's bash, built without readline —
+no Tab completion, no history (Kevin, 2026-11-14)."
   (let ((id (*term-pane*))
-        (program (or program (get-environment-variable "SHELL") "/bin/sh")))
+        (program (or program (%login-shell) (get-environment-variable "SHELL") "/bin/sh")))
     (if (not id)
       (begin (echo "no pane to run a terminal in") #f)
       (begin
@@ -63,7 +68,7 @@ there is stopped first. C-x o leaves the terminal; C-c C-c sends it a C-c."
 
 (define (term)
   "Prompt for a program and run it in the terminal pane — M-x term. The
-  line is the program and its arguments; empty runs your $SHELL."
+  line is the program and its arguments; empty runs your login shell."
   (read-minibuffer
     "Run in terminal: "
     (lambda (line)

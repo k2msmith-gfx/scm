@@ -847,7 +847,7 @@ mod tests {
         let set = |s: &mut Session, text: &str| {
             s.call(&format!("(%editor-set-text 1 {}) (%editor-goto-line 1 0)", lit(text)));
         };
-        let text = |s: &mut Session| crate::editorpane::text(app::EDITOR);
+        let text = |_: &mut Session| crate::editorpane::text(app::EDITOR);
         let typed = |s: &mut Session, line: &str| {
             for c in line.chars() {
                 s.text(&c.to_string());
@@ -1124,5 +1124,44 @@ mod tests {
         s.text("n");
         assert_eq!(cur(), (1, 2), "n: the next");
         s.text("q");
+    }
+
+    /// The terminal runs the LOGIN shell, not $SHELL: under `nix develop`
+    /// $SHELL is a bash without readline, and Tab completed nothing (Kevin,
+    /// 2026-11-14). Here: the login shell, then Tab completing in it.
+    #[test]
+    fn the_terminal_runs_the_login_shell_and_tab_completes() {
+        let Some(shell) = super::super::term::login_shell() else {
+            eprintln!("no login shell to be found here — skipped");
+            return;
+        };
+        assert!(std::path::Path::new(&shell).exists(), "{shell}");
+        app::resize(1000, 700, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        s.call("(term-open)");
+        let wait = |pred: &dyn Fn(&[String]) -> bool| {
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < std::time::Duration::from_secs(20) {
+                if pred(&crate::termpane::screen_text(app::TRANSCRIPT)) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            false
+        };
+        // Ask the shell its name, once it is up.
+        for c in "echo shell-is-$0".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("return");
+        let base = std::path::Path::new(&shell).file_name().unwrap().to_string_lossy().into_owned();
+        assert!(wait(&|t| t.iter().any(|l| l.contains("shell-is-") && l.contains(&base) && !l.contains("echo"))), "the login shell ({base}) runs, not $SHELL");
+        // Tab completes a command name in it (zsh and bash both do).
+        for c in "ech".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("tab");
+        assert!(wait(&|t| t.iter().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| l.trim_end().ends_with("echo"))), "Tab completed ech to echo");
+        s.call("(term-close)");
     }
 }
