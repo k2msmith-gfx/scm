@@ -515,6 +515,20 @@ pub fn replace_range(id: u32, l0: usize, i0: usize, l1: usize, i1: usize, text: 
     crate::host::mark_dirty_ui();
 }
 
+/// The selected text, or `None` when there is none to take — the one way
+/// copy, cut and a vi yank read a selection. cosmic-text's own
+/// `copy_selection` indexes the buffer's first line, and a buffer that was
+/// never given text has NO lines (`Buffer::new_empty`; even `set_text("")`
+/// leaves it empty): Copy on a fresh buffer after a click — which leaves a
+/// selection anchor — panicked the whole program (Kevin, 2026-11-13, the
+/// marking menu's Copy). A selection that is only a point copies nothing.
+fn selection_text(editor: &Editor<'static>) -> Option<String> {
+    if editor.with_buffer(|b| b.lines.is_empty()) {
+        return None;
+    }
+    editor.copy_selection().filter(|t| !t.is_empty())
+}
+
 /// The cursor at character offset `off` of [`buffer_text`] (lines joined
 /// by one `\n`), clamped to the end. Scheme counts characters; a cursor's
 /// index is a byte offset into its line.
@@ -1413,10 +1427,10 @@ pub fn act(id: u32, kind: &str, arg: Option<&str>, x: f64, y: f64) -> Option<Str
             }
             "copy" => {
                 pane.close_insert_run();
-                pane.editor.copy_selection()
+                selection_text(&pane.editor)
             }
             "cut" => {
-                let copied = pane.editor.copy_selection();
+                let copied = selection_text(&pane.editor);
                 if copied.is_some() {
                     pane.discrete(|e| e.delete_selection());
                 }
@@ -1987,7 +2001,7 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
                 return;
             }
             ViEvent::Yank { register } => {
-                if let Some(data) = editor.copy_selection() {
+                if let Some(data) = selection_text(editor) {
                     registers.insert(register, (editor.selection(), data));
                 }
                 return;
@@ -2863,6 +2877,24 @@ mod tests {
     /// A view-only doc is read-only, not inert: the mouse still selects and
     /// `copy` still reads the selection back (how a form gets out of (help)
     /// and into the REPL), while every edit stays refused.
+    /// Copy, cut and a drag on a buffer that never had text: nothing to
+    /// take, and no panic (cosmic-text indexes the first line, and a fresh
+    /// buffer has none).
+    #[test]
+    fn copy_on_an_empty_buffer_copies_nothing() {
+        let id = 993;
+        crate::host::testing::set_rect(id, Rect { x: 0, y: 0, w: 300, h: 200 });
+        let _ = text(id);
+        buffer_new(id);
+        for kind in ["click", "drag", "copy", "cut", "double-click", "copy", "triple-click", "cut"] {
+            assert_eq!(act(id, kind, None, 10.0, 10.0), None, "{kind} on an empty buffer");
+        }
+        // And a click alone — a point — on real text copies nothing either.
+        set_text(id, "(a b)");
+        act(id, "click", None, 10.0, 10.0);
+        assert_eq!(act(id, "copy", None, 0.0, 0.0), None);
+    }
+
     #[test]
     fn view_only_buffers_select_and_copy_but_refuse_edits() {
         let id = 961;
