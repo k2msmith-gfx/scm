@@ -401,6 +401,19 @@ mod guile_tests {
         assert!(t.iter().any(|l| l.contains(",apropos REGEXP")), ",help listed the commands: {t:?}");
         assert!(t.iter().any(|l| l.contains("Squares X.")), ",describe showed the docstring: {t:?}");
         s.call("(focus-scene-editor)");
+        // remote-start asks which Scheme; a scratch buffer started on Guile
+        // becomes a Guile buffer, its sends Guile's.
+        s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b))");
+        assert_eq!(s.eval_to_string("(buffer-scheme)").unwrap(), "\"scm\"", "a scratch is scm's");
+        s.call("(remote-start \"guile\")");
+        assert_eq!(s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap(), "\"guile\"");
+        s.call(r#"(%editor-set-text 1 "(define* (k #:key (v 3)) v)\n(k #:v 4)") (%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)"#);
+        assert!(transcript().iter().any(|l| l == "=> 4"), "{:?}", transcript());
+        // The prompt offers the buffer's own Scheme first.
+        s.call("(remote-start)");
+        assert_eq!(s.eval_to_string("(%edit :text)").unwrap_or_default(), "\"guile\"");
+        s.key("C-g");
+        s.call("(remote-stop)");
         // An error comes back with Guile's message.
         s.call(r#"(%editor-set-text 1 "(car 5)") (%editor-goto-line 1 0) (eval-defun)"#);
         assert!(transcript().iter().any(|l| l.starts_with("error: car:")), "{:?}", transcript());

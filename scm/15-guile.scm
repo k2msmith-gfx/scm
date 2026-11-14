@@ -13,6 +13,9 @@
   ; serve.scm, uncompiled (no cache to go stale), on the address.
   (list "--no-auto-compile" "-s" (%edit-path "guile/serve.scm") "{addr}"))
 
+; remote-start can start one too (14-remote's *schemes*).
+(define-scheme! "guile" (lambda () *guile-program*) guile-args "guile")
+
 (define (guile-start)
   "Start a Guile for the Guile buffers' sends, or answer the one running —
 M-x guile-start. The first send from a Guile buffer starts it; this is for

@@ -8,8 +8,27 @@
 ;## scm_binding/remote.rs.
 
 (define *remote* #f)              ; the current connection's id, or #f
+(define *remote-kind* "scm")      ; which Scheme it is — a *schemes* name
 (define *remote-timeout* 30)      ; seconds a send waits before interrupting
-(define *remote-program* "scm")   ; what remote-start runs with --serve
+(define *remote-program* "scm")   ; what remote-start runs for scm, with --serve
+
+; THE SCHEMES remote-start can start (Kevin, 2026-11-13: "you should be able
+; to choose which scheme you want to start"): each a name, the program and
+; its arguments (thunks, so a changed *…-program* is seen; "{addr}" stands
+; for the address, and no arguments means scm's `--serve {addr}`), and the
+; LANGUAGE a buffer sending to it is set to. 15-guile adds Guile; a third is
+; one more define-scheme!.
+(define *schemes* '())
+
+(define (define-scheme! name program args language)
+  "Make NAME a Scheme remote-start can start: PROGRAM and ARGS, thunks
+answering the program and its arguments, and LANGUAGE, the editor language
+a buffer sending to it is set to."
+  (set! *schemes* (append (filter (lambda (s) (not (equal? (car s) name))) *schemes*)
+                          (list (list name program args language))))
+  name)
+
+(define-scheme! "scm" (lambda () *remote-program*) (lambda () '()) "scheme")
 
 (define (remote-backend conn (label "scm"))
   "A backend that asks the image at connection CONN — scm's, or anything
@@ -18,6 +37,7 @@ there, completion and docs answer from its live bindings, and M-. stays
 with this editor's index of the files. LABEL names it."
   (define (describe name) (guard (e (#t #f)) (%remote-describe conn name)))
   (list (cons :name (string-append label " at " (or (%remote-address conn) "?")))
+        (cons :conn conn)
         (cons :eval
               (lambda (src)
                 (guard (e (#t (list (cons :status 'error)
@@ -52,13 +72,16 @@ with this editor's index of the files. LABEL names it."
       (list line #f '()))))
 
 (define (remote-attach)
-  "Send this buffer's forms to the connected scm image from now on —
-  C-M-x, C-x C-e and C-c C-b evaluate there; completion and describe ask
-  it. remote-detach sends them to this image again."
+  "Send this buffer's forms to the connected Scheme from now on — C-M-x,
+  C-x C-e and C-c C-b evaluate there; completion and describe ask it, and
+  the buffer takes that Scheme's language. remote-detach sends them back."
   (let ((buf (%editor-active-buffer (editor-pane-id))))
     (if *remote*
-      (begin (hash-table-set! *attached-backends* buf (remote-backend *remote*))
-             (echo (%text (buffer-name buf)) " sends to scm at " (%remote-address *remote*)))
+      (begin (hash-table-set! *attached-backends* buf (remote-backend *remote* *remote-kind*))
+             (match (assoc *remote-kind* *schemes*)
+               ((name program args language) (%editor-set-language (editor-pane-id) language))
+               (_ #f))
+             (echo (%text (buffer-name buf)) " sends to " *remote-kind* " at " (%remote-address *remote*)))
       (echo "not connected — M-x remote-start, or remote-connect"))))
 
 (define (remote-detach)
@@ -67,32 +90,60 @@ with this editor's index of the files. LABEL names it."
     (hash-table-delete! *attached-backends* buf)
     (echo (%text (buffer-name buf)) " sends to this image")))
 
-(define (remote-connect (addr "127.0.0.1:4007"))
-  "(remote-connect [\"HOST:PORT\"])  ->  the connection
+(define (remote-connect (addr "127.0.0.1:4007") (kind "scm"))
+  "(remote-connect [\"HOST:PORT\" [KIND]])  ->  the connection
 
-Attach to an scm REPL server already running — SLIME's slime-connect —
-and point this buffer's sends at it. `ray --tcp` serves one on 4007 (the
+Attach to a REPL server already running — SLIME's slime-connect — and
+point this buffer's sends at it. KIND names the Scheme it is (\"scm\", the
+default, or \"guile\" for a serve.scm). `ray --tcp` serves scm on 4007 (the
 default), `scm --serve HOST:PORT` anywhere. Its image is the one a send
 changes, and the one completion and describe read."
   (when *remote* (%remote-close *remote*))
   (set! *remote* (%remote-connect addr))
+  (set! *remote-kind* kind)
   (remote-attach)
   *remote*)
 
-(define (remote-start)
-  "Start a fresh `scm --serve` on a free port and point this buffer's sends
-  at it — SLIME's M-x slime, the image in its own process. A loop that never
-  ends is interrupted after *remote-timeout* seconds; a crash takes the
-  server, not the editor. M-x remote-stop ends it."
-  (when *remote* (%remote-close *remote*))
-  (set! *remote* (%remote-start *remote-program* 0))
-  (remote-attach)
-  (echo "scm running at " (%remote-address *remote*) " — this buffer sends there")
-  *remote*)
+(define (buffer-scheme)
+  ; The *schemes* name for this buffer's language: what remote-start offers
+  ; first.
+  (let ((lang (%buffer-language (editor-pane-id) (%editor-active-buffer (editor-pane-id)))))
+    (or (any (lambda (s) (and (equal? (cadddr s) lang) (car s))) *schemes*) "scm")))
+
+(define (remote-start (which #f))
+  "Start a Scheme in a process of its own and point this buffer's sends at
+it — SLIME's M-x slime. Asks WHICH — scm or guile (*schemes*), the buffer's
+own first — and the buffer takes that Scheme's language. A loop that never
+ends is interrupted after *remote-timeout* seconds; a crash takes the
+server, not the editor. M-x remote-stop ends it; (remote-start \"guile\")
+asks nothing."
+  (define (go name)
+    (match (assoc name *schemes*)
+      ((name program args language)
+        (when *remote* (%remote-close *remote*))
+        (set! *remote* (%remote-start (program) 0 (args)))
+        (set! *remote-kind* name)
+        (remote-attach)
+        (echo name " running at " (%remote-address *remote*) " — this buffer sends there")
+        *remote*)
+      (_ (echo "no Scheme called " name " — " (string-join (map car *schemes*) ", ")) #f)))
+  (if which
+    (go which)
+    (begin
+      (read-minibuffer "Start which Scheme: "
+                       (lambda (s) (go (string-trim-both s)))
+                       (map car *schemes*)
+                       (buffer-scheme))
+      #f)))
 
 (define (remote-stop)
-  "Drop the connection, stopping the server if remote-start began it."
+  "Drop the connection, stopping the server if remote-start began it. The
+  buffers that sent to it send where their language does again."
   (when *remote*
+    (for-each (lambda (buf)
+                (when (equal? (%alist-ref (hash-table-ref *attached-backends* buf) :conn #f) *remote*)
+                  (hash-table-delete! *attached-backends* buf)))
+              (hash-table-keys *attached-backends*))
     (%remote-close *remote*)
     (set! *remote* #f)
     (echo "disconnected")))
