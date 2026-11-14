@@ -208,6 +208,18 @@ prim! {
 }
 
 prim! {
+    /// `(%editor-cursor-xy id)` → `[x y]`, the window point just under the
+    /// cursor — where a popup about the text there opens; nil before the
+    /// first layout.
+    "%editor-cursor-xy", fn editor_cursor_xy(id: num) {
+        match crate::editorpane::cursor_window_pos(id as u32) {
+            Some((x, y, line_h)) => Out::Many(vec![Out::Num(x as f64), Out::Num((y + line_h) as f64)]),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
     /// `(%editor-cursor id)` → `[line byte-index]` — the cursor position, the
     /// anchor for send-expression-at-point (unify.scm's sexp scanner).
     "%editor-cursor", fn editor_cursor(a0: num) {
@@ -597,6 +609,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         editor_buffer_list::install(interp)?,
         editor_cursor::install(interp)?,
         editor_find::install(interp)?,
+        editor_cursor_xy::install(interp)?,
         editor_select::install(interp)?,
         editor_replace_all::install(interp)?,
         editor_set_text::install(interp)?,

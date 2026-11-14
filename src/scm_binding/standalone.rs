@@ -274,12 +274,6 @@ impl Session {
     /// editor leaves its mode, then an open menu closes, then a typing pane
     /// lets go of the keyboard. Answers whether anything took it.
     pub fn escape(&mut self) -> bool {
-        // A query-replace running stops: Escape is one of its quit keys,
-        // ahead of vi's own use of it.
-        if self.eval_to_string("(if *query* 1 0)").as_deref() == Ok("1") {
-            self.call("(query-answer :quit)");
-            return true;
-        }
         let typing = app::typing();
         // A terminal's program gets Escape, as every other key (D4): vi in a
         // terminal needs it. C-x o is how the keyboard leaves.
@@ -289,6 +283,12 @@ impl Session {
         if crate::textpane::overlay_active() {
             crate::textpane::clear_completions();
             self.call("(begin (editor-comp-cancel) (on-menu-cancel))");
+            return true;
+        }
+        // A query-replace running stops: Escape is one of its quit keys,
+        // ahead of vi's own use of it (an open ? menu closes first, above).
+        if self.eval_to_string("(if *query* 1 0)").as_deref() == Ok("1") {
+            self.call("(query-answer :quit)");
             return true;
         }
         if typing == Some(app::EDITOR) && crate::editorpane::vi_escape(app::EDITOR) {
@@ -873,6 +873,21 @@ mod tests {
         s.key("M-S-5");
         typed(&mut s, "beta");
         typed(&mut s, "B");
+        let prompt = crate::textpane::lines(app::MINIBUFFER).last().map(|(_, l)| l.clone()).unwrap_or_default();
+        assert!(prompt.contains("[y] replace") && prompt.contains("[q] quit") && prompt.contains("[?] menu"), "the prompt lists the keys: {prompt}");
+        s.text("?");
+        assert_eq!(s.eval_to_string("(menu-open?)").unwrap(), "#t", "? opens the answers as a menu");
+        s.key("down");
+        s.key("down");
+        s.key("down");
+        s.key("down");
+        s.key("return");
+        assert_eq!(s.eval_to_string("*query*").unwrap(), "#f", "the menu's Quit quits");
+        s.call("(%editor-goto-line 1 0)");
+        // Again: an empty answer is the last one, shown in the prompt.
+        s.key("M-S-5");
+        typed(&mut s, "");
+        typed(&mut s, "");
         s.text("y");
         s.text("n");
         s.text(".");

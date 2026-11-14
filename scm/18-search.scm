@@ -35,7 +35,8 @@
         (match m
           ((l s e wrapped)
             (%editor-select (editor-pane-id) l s e)
-            (echo (if (positive? wrapped) "wrapped: " "") needle "  (line " (+ l 1) ")")
+            (echo (if (positive? wrapped) "wrapped: " "") needle "  (line " (+ l 1) ")"
+                  "     [Cmd-G] next   [Cmd-Shift-G] previous   [M-%] replace")
             #t)
           (_ (echo "not found: " needle) #f))))))
 
@@ -77,13 +78,34 @@
 ;   !       replace this one and every one after it
 ;   .       replace this one and stop
 ;   q RET   quit (C-g and Escape too)
+;   ?       the same as a menu at the match, to read or click
 
 (define *query* #f)   ; while running: a hash of :from :to :fold :count :match :start :wrapped
 
 (define (query-help)
-  (echo "replace “" (%state-ref *query* :from) "” with “" (%state-ref *query* :to)
-        "”?  y replace · n skip · ! all · . this and stop · q quit"
-        (let ((n (%state-ref *query* :count))) (if (positive? n) (string-append "  (" (number->string n) " done)") ""))))
+  ; The prompt, in the accent so it reads as a question waiting for a key,
+  ; not a message: every key it takes, and ? for the menu (Kevin,
+  ; 2026-11-14: "it needs a prompt that explains the keys").
+  (%pane-append (mini-id) "accent"
+    (string-append
+      "Replace “" (%state-ref *query* :from) "” with “" (%state-ref *query* :to) "”?   "
+      "[y] replace   [n] skip   [!] all the rest   [.] replace and stop   [q] quit   [?] menu"
+      (let ((n (%state-ref *query* :count)))
+        (if (positive? n) (string-append "    " (number->string n) " replaced") "")))))
+
+(define (query-menu)
+  ; The answers as a popup under the match, each with its key: the long
+  ; form of the prompt, to read or click.
+  (match (%editor-cursor-xy (editor-pane-id))
+    ((x y)
+      (show-menu-items
+        (list (list "Replace this one" (lambda () (query-answer :yes)) "y")
+              (list "Skip this one" (lambda () (query-answer :no)) "n")
+              (list "Replace all the rest" (lambda () (query-answer :all)) "!")
+              (list "Replace this one and stop" (lambda () (query-answer :this-and-stop)) ".")
+              (list "Quit" (lambda () (query-answer :quit)) "q"))
+        x y 0 #t))
+    (_ (query-help))))
 
 (define (query-done)
   (let ((n (%state-ref *query* :count)))
@@ -194,14 +216,18 @@
 ; key never edits the buffer mid-run. Printable keys arrive as TEXT while the
 ; editor holds typing, so both chains are watched.
 (define (query-key k)
+  (when (menu-open?) (menu-close))
   (cond ((member k '("y" "space" " ")) (query-answer :yes))
         ((member k '("n" "backspace" "delete")) (query-answer :no))
         ((equal? k "!") (query-answer :all))
         ((equal? k ".") (query-answer :this-and-stop))
         ((member k '("q" "return" "C-g" "escape")) (query-answer :quit))
+        ((member k '("?" "S-/")) (query-menu))
         (else (query-help)))
   #t)
 
+;; Below the menu's own keys (20), so with the ? menu up, up/down/RET work
+;; it; a letter still answers straight away.
 (add-handler *key-handlers* 18 :query-replace (lambda (key) (and *query* (query-key key))))
 (add-handler *text-handlers* 50 :query-replace (lambda (s) (and *query* (query-key s))))
 (add-handler *escape-handlers* 60 :query-replace (lambda () (and *query* (query-answer :quit) #t)))
