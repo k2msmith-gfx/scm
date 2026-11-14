@@ -100,6 +100,12 @@ struct Content {
     /// Top-anchored panes (the outliner) list rows from the top down;
     /// transcripts (default) anchor at the bottom and grow upward.
     top_anchor: bool,
+    /// A list pane whose rows' TEXT reads in the proportional label face —
+    /// the file tree's names, as Zed's project panel sets them (IBM Plex
+    /// Sans, which it ships as Zed Plex Sans) — while the leading marks
+    /// (indent, ▸/▾, icon cells) keep the mono grid, so anything a host draws
+    /// over a cell still lands on it.
+    proportional: bool,
     /// Rows that fit in the pane at its last draw — cached so `reveal_row`
     /// (perf item 7) can scroll a selected row into view without re-deriving
     /// the pane geometry. 0 until the first draw.
@@ -258,6 +264,13 @@ pub fn set_active(id: u32, active: bool) {
 /// Anchor a pane's rows to the top (the outliner's list layout).
 pub fn set_top_anchor(id: u32, top: bool) {
     with(id, |c| c.top_anchor = top);
+    crate::host::mark_dirty_ui();
+}
+
+/// Set a list pane's row text in the proportional label face (see
+/// `Content::proportional`).
+pub fn set_proportional(id: u32, on: bool) {
+    with(id, |c| c.proportional = on);
     crate::host::mark_dirty_ui();
 }
 
@@ -1147,7 +1160,22 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
                     break;
                 }
                 let row: String = line.chars().take(cols).collect();
-                text::draw_mono_line(fb, rect.x as f32 + pad, y, px, style.ink(&theme), &row);
+                if c.proportional {
+                    // The leading marks on the mono grid; the rest — the
+                    // name — in the label face, on the same baseline.
+                    let split = row
+                        .char_indices()
+                        .find(|&(_, ch)| !matches!(ch, ' ' | '▸' | '▾' | '\u{E000}'))
+                        .map_or(row.len(), |(i, _)| i);
+                    let (marks, name) = row.split_at(split);
+                    let x0 = rect.x as f32 + pad;
+                    text::draw_mono_line(fb, x0, y, px, style.ink(&theme), marks);
+                    let nx = x0 + marks.chars().count() as f32 * advance;
+                    let ny = y + text::mono_ascent(px) - text::label_ascent(px);
+                    text::draw_label(fb, nx.round() as i32, ny.round() as i32, px, style.ink(&theme), 1.0, name);
+                } else {
+                    text::draw_mono_line(fb, rect.x as f32 + pad, y, px, style.ink(&theme), &row);
+                }
                 laid.push(LaidRow { y, text: row, cont: false });
                 y += row_h;
             }

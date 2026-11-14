@@ -537,6 +537,17 @@ pub fn label_center_top(px: f32, box_top: f32, box_h: f32) -> f32 {
 
 /// The advance width of `text` at `px` tall — what right-aligned placement
 /// (the HUD's :top-right/:bottom-right) needs; the seed of `measure-text`.
+/// How far below a line's top its baseline sits, in the mono face at `px`.
+pub fn mono_ascent(px: f32) -> f32 {
+    MONO.with(|m| m.borrow().as_ref().metrics(&[]).scale(px).ascent)
+}
+
+/// The same for the label face — so a label set beside mono text can share
+/// its baseline (the file tree's names after its mono markers).
+pub fn label_ascent(px: f32) -> f32 {
+    LABEL.with(|l| l.borrow().as_ref().metrics(&[]).scale(px).ascent)
+}
+
 pub fn measure_label(px: f32, text: &str) -> f32 {
     LABEL.with(|l| {
         let of = l.borrow();

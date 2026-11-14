@@ -222,6 +222,16 @@ prim! {
     }
 }
 
+prim! {
+    /// `(%pane-proportional id on)` — set list pane ID's row text in the
+    /// proportional label face, its leading marks kept on the mono grid (the
+    /// file tree).
+    "%pane-proportional", fn pane_proportional(id: num, on: num) {
+        crate::textpane::set_proportional(id as u32, on != 0.0);
+        Out::Nil
+    }
+}
+
 /// This module's prims, installed; answers their names.
 pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm::EmbedError> {
     Ok(vec![
@@ -242,5 +252,6 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         pane_set_input::install(interp)?,
         pane_row_at::install(interp)?,
         pane_top_anchor::install(interp)?,
+        pane_proportional::install(interp)?,
     ])
 }

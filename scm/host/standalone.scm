@@ -28,6 +28,9 @@
 ; Rooted at the git checkout the editor was started in, laid out as a list,
 ; and following the buffer on screen.
 (%pane-top-anchor 4 1)
+; Names in IBM Plex Sans, as Zed's project panel sets them (it ships the
+; face as Zed Plex Sans); the marks and folder cells stay on the mono grid.
+(%pane-proportional 4 1)
 (set! *files-shown* (lambda (on) (%show-files on)))
 (set! *buffers-changed*
   (lambda ()
