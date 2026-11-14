@@ -35,6 +35,9 @@ modit = "0.1.5"
 # `Framebuffer::save_png` (the modeler's `--screenshot`) and the editor's
 # view-only image buffers (C-x C-f on a .png/.jpg).
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# System clipboard for the shared input editor (REPL/minibuffer/agent):
+# paste, copy-line, cut-line. Pure-Rust face over the OS pasteboards.
+arboard = "3"
 # Scheme as an editor sees it: the token scan the Scheme `Language` highlights
 # and indents from (docs/editor-crate-plan.md E1c) -- the same scan the
 # modeler's `M-.` index and `scm-lsp` use, so a fix to how Scheme is read

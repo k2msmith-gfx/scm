@@ -151,6 +151,7 @@ macro_rules! prim {
     };
 }
 
+mod clipboard;
 mod editor;
 mod menu;
 mod text;
@@ -177,6 +178,7 @@ pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Res
         .chain(text::install(interp)?)
         .chain(xref::install(interp)?)
         .chain(menu::install(interp)?)
+        .chain(clipboard::install(interp)?)
     {
         installed(name);
     }

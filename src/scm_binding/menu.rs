@@ -1,7 +1,9 @@
 //! The menu prims — the popup overlay (the linear menu and completion share
 //! it) and the marking-menu pie — moved from the modeler's `script/scene.rs`,
 //! `script/panes.rs` and `script.rs` with the menus' Scheme
-//! (docs/editor-crate-plan.md, E3b). Each is one call into `textpane`.
+//! (docs/editor-crate-plan.md, E3b), and the completion overlay's own
+//! `%set-completions` with the minibuffer's (E3c). Each is one call into
+//! `textpane`.
 
 prim! {
     /// `(%show-menu lines selected x y)` — open the popup overlay as a context
@@ -88,6 +90,20 @@ prim! {
     }
 }
 
+prim! {
+    /// `(%set-completions pane lines selected)` — show the completion overlay:
+    /// '\n'-separated rows anchored above the pane's input line.
+    /// `(%clear-completions)` hides it.
+    "%set-completions", fn set_completions(pane: num, lines: opt_text, selected: num) {
+        let pane = pane as u32;
+        let lines = lines.unwrap_or_default();
+        let selected = selected.max(0.0) as usize;
+        crate::textpane::set_completions(pane, &lines, selected);
+        Out::Nil
+
+    }
+}
+
 pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm::EmbedError> {
     Ok(vec![
         show_menu::install(interp)?,
@@ -97,5 +113,6 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         pie_mark::install(interp)?,
         clear_completions::install(interp)?,
         set_menu_alpha::install(interp)?,
+        set_completions::install(interp)?,
     ])
 }

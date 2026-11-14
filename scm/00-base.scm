@@ -76,3 +76,56 @@ selection, a pie's armed sector); a record built once and read is an alist."
     t))
 
 (define (%state-ref t k) (hash-table-ref/default t k #f))
+
+;; What echo, the input editor and M-x are written in, from the modeler's
+;; 00-helpers and 99-scheme-only (E3c).
+
+(define (%as-keyword x)
+  "X as a keyword: a keyword is itself, a string or symbol is named, #f stays
+#f. A name arrives as any of the three — :curve, \"curve\", 'curve."
+  (cond ((keyword? x) x)
+        ((string? x) (string->keyword x))
+        ((symbol? x) (string->keyword (symbol->string x)))
+        (else x)))
+
+(define (%alist-ref a k default)
+  "Field K of the alist A, or DEFAULT when A has none (or is not a list). A
+record read back from a file, or answered by a ray verb, is an alist."
+  (let ((p (and (pair? a) (assq k a)))) (if p (cdr p) default)))
+
+(define (%number-text x)
+  "X as a status line prints a number: a whole value without a trailing .0
+(2.0 is \"2\"), anything else as Scheme writes it. Janet had one number type
+and printed 2.0 as 2; every echo, readout and transcript line the prelude
+writes was made under that rule, so this keeps it."
+  (if (and (inexact? x) (integer? x) (< (abs x) 1e15))
+      (number->string (exact x))
+      (number->string x)))
+
+(define (%describe-part x)
+  "X as one PART of a status line — what `echo` and the transcripts join:
+a string as it is, #f as nothing, #t as \"true\", a keyword or symbol by
+NAME (no colon), a number by %number-text, anything else as `display` would
+show it. The compat layer's `describe`, whose rules every message in the
+prelude was written against."
+  (cond ((string? x) x)
+        ((not x) "")
+        ((eq? x #t) "true")
+        ((keyword? x) (keyword->string x))
+        ((symbol? x) (symbol->string x))
+        ((number? x) (%number-text x))
+        ((char? x) (make-string 1 x))
+        (else (format "~a" x))))
+
+(define (eval-string src)
+  "Every form in the Scheme string SRC, in order, in this image; the last
+form's value is the answer — Janet's `eval-string`, which the prelude was
+first written against, over Scheme source.
+
+A Janet scene cannot run here: the reader stops at the first Janet-only
+form it meets. scripts/dev/janet_to_scheme.py converts one."
+  (let ((port (open-input-string src)))
+    (let loop ((form (read port)) (last #f))
+      (if (eof-object? form)
+          last
+          (loop (read port) (eval form (interaction-environment)))))))
