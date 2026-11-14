@@ -177,9 +177,9 @@ pub fn scroll_by(id: u32, rows: i32) -> usize {
     s
 }
 
-/// Row-level edits for the outliner's incremental refresh (perf item 7): the
-/// list is kept in sync with the scene by touching individual rows instead of
-/// clearing and re-appending every object on each selection/add/delete.
+// Row-level edits for the outliner's incremental refresh (perf item 7): the
+// list is kept in sync with the scene by touching individual rows instead of
+// clearing and re-appending every object on each selection/add/delete.
 
 /// Number of rows currently held (the outliner's object count).
 pub fn row_count(id: u32) -> usize {
@@ -910,8 +910,8 @@ fn wrap_mapped(line: &str, cols: usize) -> Vec<(String, Vec<Option<usize>>)> {
             i += 1;
         }
         if row.len() + (i - start) <= cols {
-            for k in start..i {
-                row.push(chars[k]);
+            for (k, &ch) in chars.iter().enumerate().take(i).skip(start) {
+                row.push(ch);
                 map.push(Some(k));
             }
             continue;

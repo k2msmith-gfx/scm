@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 # The editor as a crate (docs/editor-crate-plan.md): the text widget, the
-# text panes and the glyph painter, shared by the modeler and (from E4) a
-# standalone program. A host — the modeler today — implements `host::Host`;
-# nothing here knows what a 3D pane is.
+# text panes and the glyph painter, shared by ray's modeler and a standalone
+# program (`edit`). A host implements `host::Host`; nothing here knows what
+# a 3D pane is. Built in ray's workspace, moved here 2026-11-14 (D2): ray's
+# modeler takes it from this repo by git, as it takes scm.
 
 [dependencies]
 # Kernel text (docs/modeler-plan.md "Draw primitives"): pane titles at M4,
@@ -42,7 +43,7 @@ arboard = "3"
 # and indents from (docs/editor-crate-plan.md E1c) -- the same scan the
 # modeler's `M-.` index and `scm-lsp` use, so a fix to how Scheme is read
 # reaches all three. Text only: it does not link the interpreter.
-scm-text = { git = "https://github.com/k2msmith-gfx/scm.git", branch = "main" }
+scm-text = { path = "../scm-text" }
 # The window (E4): `keys` names a winit key press for the keymap, for both
 # hosts, and the standalone program opens its window with winit and presents
 # the framebuffer through softbuffer -- the modeler's two, at its versions.
@@ -54,4 +55,4 @@ softbuffer = "0.4"
 alacritty_terminal = "0.26"
 # THE VM, for `scm_binding` — the one file in this crate that names it
 # (`layering.rs`). The package is `schemers`; the library it builds is `scm`.
-schemers = { git = "https://github.com/k2msmith-gfx/scm.git", branch = "main" }
+schemers = { path = "../scm" }

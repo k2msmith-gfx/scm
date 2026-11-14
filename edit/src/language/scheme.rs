@@ -37,9 +37,9 @@ impl Language for Scheme {
         let toks = Tokens::new(lines);
         let mut out = Scan { spans: vec![Vec::new(); lines.len()], parens: Vec::new() };
         let span = |out: &mut Scan, (l0, b0): (usize, usize), (l1, b1): (usize, usize), t: Tok| {
-            for l in l0..=l1 {
+            for (l, line) in lines.iter().enumerate().take(l1 + 1).skip(l0) {
                 let s = if l == l0 { b0 } else { 0 };
-                let e = if l == l1 { b1 } else { lines[l].len() };
+                let e = if l == l1 { b1 } else { line.len() };
                 if let Some(v) = out.spans.get_mut(l) {
                     v.push((s, e, t));
                 }

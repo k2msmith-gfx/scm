@@ -84,14 +84,12 @@ impl App {
         let m = self.modifiers;
         // A typing pane gets printable keys as TEXT, which honours shift and
         // the layout; chords travel as descriptors, as in the modeler.
-        if app::typing().is_some() && !m.control_key() && !m.alt_key() && !m.super_key() {
-            if let Some(txt) = event.text.as_deref() {
-                if !txt.is_empty() && txt.chars().all(|c| !c.is_control()) {
+        if app::typing().is_some() && !m.control_key() && !m.alt_key() && !m.super_key()
+            && let Some(txt) = event.text.as_deref()
+                && !txt.is_empty() && txt.chars().all(|c| !c.is_control()) {
                     self.session.text(txt);
                     return;
                 }
-            }
-        }
         if let Some(desc) = edit::keys::descriptor(&event.key_without_modifiers(), m) {
             self.session.key(&desc);
         }
@@ -266,14 +264,13 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(at) = self.pie_deadline {
-            if std::time::Instant::now() >= at {
+        if let Some(at) = self.pie_deadline
+            && std::time::Instant::now() >= at {
                 self.pie_deadline = None;
                 event_loop.set_control_flow(ControlFlow::Wait);
                 self.session.menu_hold();
                 self.settle(event_loop);
             }
-        }
     }
 }
 

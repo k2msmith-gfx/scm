@@ -84,7 +84,7 @@ prim! {
     /// `(%set-menu-alpha a)` — the menus' glass opacity (0..1); a negative or
     /// missing argument only reads it. Returns what is in effect.
     "%set-menu-alpha", fn set_menu_alpha(a0: num) {
-        let a = (a0 as f32) as f32;
+        let a = a0 as f32;
         Out::Num(crate::textpane::set_menu_alpha(a) as f64)
 
     }

@@ -333,12 +333,11 @@ fn interrupt(addr: &str) {
 }
 
 fn close(id: u32) {
-    if let Some(mut conn) = CONNS.with(|c| c.borrow_mut().remove(&id)) {
-        if let Some(mut child) = conn.child.take() {
+    if let Some(mut conn) = CONNS.with(|c| c.borrow_mut().remove(&id))
+        && let Some(mut child) = conn.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
-    }
 }
 
 /// Stop every server this editor started — at exit, so a Scheme the editor

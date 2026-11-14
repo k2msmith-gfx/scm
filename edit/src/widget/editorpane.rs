@@ -297,11 +297,10 @@ impl Doc {
     fn close_insert_run(&mut self) {
         if self.insert_run {
             self.insert_run = false;
-            if let Some(change) = self.editor.finish_change() {
-                if !change.items.is_empty() {
+            if let Some(change) = self.editor.finish_change()
+                && !change.items.is_empty() {
                     self.push_undo(change);
                 }
-            }
         }
     }
 
@@ -320,11 +319,10 @@ impl Doc {
         self.close_insert_run();
         self.editor.start_change();
         let r = f(&mut self.editor);
-        if let Some(change) = self.editor.finish_change() {
-            if !change.items.is_empty() {
+        if let Some(change) = self.editor.finish_change()
+            && !change.items.is_empty() {
                 self.push_undo(change);
             }
-        }
         r
     }
 }
@@ -1887,8 +1885,8 @@ fn finish_into(
     dirty: &mut bool,
     owners: &mut [Owner],
 ) {
-    if let Some(change) = editor.finish_change() {
-        if !change.items.is_empty() {
+    if let Some(change) = editor.finish_change()
+        && !change.items.is_empty() {
             shift_owners(owners, &change);
             *dirty = true;
             undo.push(change);
@@ -1897,7 +1895,6 @@ fn finish_into(
             }
             redo.clear();
         }
-    }
 }
 
 /// Whole-line search for `value` from the cursor (cosmic-text's vi.rs).
@@ -2242,14 +2239,13 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
                         let mut cursor = editor.cursor();
                         editor.with_buffer(|b| {
                             let text = b.lines[cursor.line].text();
-                            if cursor.index < text.len() {
-                                if let Some((i, _)) = text[cursor.index..]
+                            if cursor.index < text.len()
+                                && let Some((i, _)) = text[cursor.index..]
                                     .char_indices()
                                     .find(|&(i, c)| i > 0 && c == find_c)
                                 {
                                     cursor.index += i;
                                 }
-                            }
                         });
                         editor.set_cursor(cursor);
                         return;
@@ -2334,13 +2330,12 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
                         let mut cursor = editor.cursor();
                         editor.with_buffer(|b| {
                             let text = b.lines[cursor.line].text();
-                            if cursor.index > 0 {
-                                if let Some((i, _)) =
+                            if cursor.index > 0
+                                && let Some((i, _)) =
                                     text[..cursor.index].char_indices().rfind(|&(_, c)| c == find_c)
                                 {
                                     cursor.index = i;
                                 }
-                            }
                         });
                         editor.set_cursor(cursor);
                         return;
@@ -2349,18 +2344,14 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
                         let mut cursor = editor.cursor();
                         editor.with_buffer(|b| {
                             let text = b.lines[cursor.line].text();
-                            if cursor.index > 0 {
-                                if let Some(i) = text[..cursor.index]
+                            if cursor.index > 0
+                                && let Some(i) = text[..cursor.index]
                                     .char_indices()
-                                    .filter_map(|(i, c)| {
-                                        (c == find_c && i + c.len_utf8() < cursor.index)
-                                            .then(|| i + c.len_utf8())
-                                    })
+                                    .filter(|&(i, c)| c == find_c && i + c.len_utf8() < cursor.index).map(|(i, c)| i + c.len_utf8())
                                     .next_back()
                                 {
                                     cursor.index = i;
                                 }
-                            }
                         });
                         editor.set_cursor(cursor);
                         return;
@@ -2465,6 +2456,10 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
     finish_into(editor, undo, redo, dirty, owners);
 }
 
+/// What a draw last applied to a pane: (theme signature, show-paren pair,
+/// font family).
+type Applied = (u64, Vec<(usize, usize)>, String);
+
 /// **The scan is kept until the text changes.** The editor pane is redrawn
 /// on every repaint of the window — a camera drag in a 3D pane included —
 /// and a scan of the whole buffer costs about 2 ms at 8,600 lines. A
@@ -2481,7 +2476,7 @@ struct LexCache {
     diags: Vec<language::Diagnostic>,
     reads: bool,
     /// (theme signature, show-paren pair, font family) last applied.
-    applied: Option<(u64, Vec<(usize, usize)>, String)>,
+    applied: Option<Applied>,
 }
 
 /// Make `lex` the scan of `buffer`'s text — and the reader's diagnostics
@@ -2553,12 +2548,11 @@ fn relex(pane: &mut Doc, family: &str, theme: &crate::theme::Theme, typing: bool
                             && matches!(p.ch, b'(' | b'[' | b'{')
                     })
                 });
-            if let Some(a) = at {
-                if let Some(b) = find_partner(parens, a) {
+            if let Some(a) = at
+                && let Some(b) = find_partner(parens, a) {
                     matched.push((parens[a].line, parens[a].byte));
                     matched.push((parens[b].line, parens[b].byte));
                 }
-            }
         }
         // Pass 2: apply changed lines only — none, when nothing that
         // colours them moved and no line has been re-set since.
@@ -2862,8 +2856,8 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
 
         // Vi block cursor: a translucent accent cell over the character —
         // the glyph stays readable through it.
-        if vi_block {
-            if let Some((cx, cy)) = pane.editor.cursor_position() {
+        if vi_block
+            && let Some((cx, cy)) = pane.editor.cursor_position() {
                 let advance = crate::text::mono_metrics(px).0;
                 let line_h = (px * LEADING).round();
                 let x0 = (cx + ox as i32).max(cx0).max(0);
@@ -2883,7 +2877,6 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
                     }
                 }
             }
-        }
 
         // Modeline: buffer name (+ dirty star, + its place in the loaded
         // scene) at the left; vi mode at the right while the pane holds
@@ -2949,8 +2942,8 @@ mod tests {
     fn set_font_preserves_buffers() {
         let id = 952;
         set_text(id, "(keep me)");
-        let dejavu = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/DejaVuSans.ttf");
-        set_font(std::fs::read(dejavu).expect("vendored font"));
+        let other = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/IBMPlexSans-Regular.ttf");
+        set_font(std::fs::read(other).expect("vendored font"));
         assert_eq!(text(id), "(keep me)", "a font swap must not drop buffer text");
         // Restore the mono face for other tests on this thread.
         set_font(crate::text::mono_font_bytes());

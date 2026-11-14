@@ -133,7 +133,7 @@ macro_rules! prim {
             pub const NAME: &str = $name;
 
             $(#[$doc])*
-            #[allow(unused_variables)]
+            #[allow(unused_variables, clippy::too_many_arguments)]
             pub fn core($($a: prim_ty!($k)),*) -> Out $body
 
             pub fn install(interp: &mut scm::Interp) -> Result<&'static str, scm::EmbedError> {
@@ -169,10 +169,58 @@ mod xref;
 /// other way round.
 pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex"];
 
-/// Where [`SHELL`]'s files are: read at boot from the tree this binary was
-/// built from, as the modeler's own prelude is.
+/// Where [`SHELL`]'s files are in the tree this binary was built from. They
+/// are read from there while it exists, so an edit to one takes effect
+/// without a rebuild; [`shell_source`] falls back on the copies compiled in.
 pub fn shell_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scm")
+}
+
+/// Every shell file, compiled in: the shell (`SHELL`) and the standalone's
+/// two host files. Since the crate moved to the scm repo (2026-11-14) ray's
+/// modeler builds it from a git checkout in Cargo's cache, which Cargo may
+/// clear -- and a binary must not lose its shell when it does.
+const EMBEDDED: &[(&str, &str)] = &[
+    ("00-base", include_str!("../scm/00-base.scm")),
+    ("01-handlers", include_str!("../scm/01-handlers.scm")),
+    ("02-keymap", include_str!("../scm/02-keymap.scm")),
+    ("03-menus", include_str!("../scm/03-menus.scm")),
+    ("04-minibuffer", include_str!("../scm/04-minibuffer.scm")),
+    ("05-buffers", include_str!("../scm/05-buffers.scm")),
+    ("06-help", include_str!("../scm/06-help.scm")),
+    ("07-backend", include_str!("../scm/07-backend.scm")),
+    ("08-sends", include_str!("../scm/08-sends.scm")),
+    ("09-complete", include_str!("../scm/09-complete.scm")),
+    ("10-xref", include_str!("../scm/10-xref.scm")),
+    ("11-diagnostics", include_str!("../scm/11-diagnostics.scm")),
+    ("12-error-pane", include_str!("../scm/12-error-pane.scm")),
+    ("13-term", include_str!("../scm/13-term.scm")),
+    ("14-remote", include_str!("../scm/14-remote.scm")),
+    ("15-guile", include_str!("../scm/15-guile.scm")),
+    ("16-repl-commands", include_str!("../scm/16-repl-commands.scm")),
+    ("17-files", include_str!("../scm/17-files.scm")),
+    ("18-search", include_str!("../scm/18-search.scm")),
+    ("19-ex", include_str!("../scm/19-ex.scm")),
+    ("host/prelude", include_str!("../scm/host/prelude.scm")),
+    ("host/standalone", include_str!("../scm/host/standalone.scm")),
+];
+
+/// Guile's REPL server, compiled in for the same reason (see `%edit-path`).
+const GUILE_SERVE: &str = include_str!("../guile/serve.scm");
+
+/// Shell file NAME (`"05-buffers"`, `"host/prelude"`) as `(source, the name
+/// to report it under)`: from the tree when it is there, else the copy
+/// compiled in.
+pub fn shell_source(name: &str) -> Result<(String, String), String> {
+    let path = shell_dir().join(format!("{name}.scm"));
+    if let Ok(src) = std::fs::read_to_string(&path) {
+        return Ok((src, path.to_string_lossy().into_owned()));
+    }
+    EMBEDDED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, src)| (src.to_string(), format!("edit/scm/{name}.scm")))
+        .ok_or_else(|| format!("{}: no such shell file", path.display()))
 }
 
 /// Install every editor prim into `interp`, telling `installed` each name —
@@ -182,10 +230,18 @@ pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Res
     crate::language::scheme::set_reader(read_check);
     // `(%edit-path rel)` — a file of the edit crate's tree, as an absolute
     // path: Guile's serve.scm (E6), read where this binary was built, as
-    // the shell's own files are.
+    // the shell's own files are. Guile runs it as a FILE, so when the tree
+    // is gone the compiled-in copy is written to a temporary one.
     interp.define_fn("%edit-path", |args| {
         let rel = val_text(args, 0).unwrap_or_default();
-        Ok(scm::Val::Str(shell_dir().join("..").join(rel).to_string_lossy().into_owned()))
+        let path = shell_dir().join("..").join(&rel);
+        if !path.exists() && rel == "guile/serve.scm" {
+            let tmp = std::env::temp_dir().join(format!("edit-guile-serve-{}.scm", std::process::id()));
+            if std::fs::write(&tmp, GUILE_SERVE).is_ok() {
+                return Ok(scm::Val::Str(tmp.to_string_lossy().into_owned()));
+            }
+        }
+        Ok(scm::Val::Str(path.to_string_lossy().into_owned()))
     })?;
     installed("%edit-path");
     // `(%git-root dir)` — the top of the git checkout DIR is in, or #f: where
@@ -278,6 +334,19 @@ mod tests {
     /// menu, by keys and by a right-press through the role registry, the
     /// minibuffer from a prompt to its callback, buffers from a scratch to a
     /// saved file and back, and the help screens.
+    /// Every shell file is compiled in, and the copy is the file: a binary
+    /// whose source tree is gone (a git dependency's checkout, cleared)
+    /// still has its whole shell.
+    #[test]
+    fn every_shell_file_is_compiled_in() {
+        for name in SHELL.iter().copied().chain(["host/prelude", "host/standalone"]) {
+            let (_, src) = EMBEDDED.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("{name} is not in EMBEDDED"));
+            let disk = std::fs::read_to_string(shell_dir().join(format!("{name}.scm"))).expect("on disk");
+            assert_eq!(*src, disk, "{name}");
+        }
+        assert_eq!(GUILE_SERVE, std::fs::read_to_string(shell_dir().join("../guile/serve.scm")).unwrap());
+    }
+
     #[test]
     fn the_shell_runs_on_a_bare_interpreter() {
         let mut interp = scm::Interp::new().expect("interp");
@@ -286,8 +355,8 @@ mod tests {
         // helpers and the file I/O — host/prelude.scm, as the standalone
         // program loads them — then the focus prims, the pane under a point,
         // a clock, the kernel's typing hold and a path resolver.
-        let host = shell_dir().join("host/prelude.scm");
-        interp.eval_named(&std::fs::read_to_string(&host).expect("host prelude"), &host.to_string_lossy()).expect("host prelude loads");
+        let (src, host) = shell_source("host/prelude").expect("host prelude");
+        interp.eval_named(&src, &host).expect("host prelude loads");
         eval(&mut interp, r#"
             (define *typing* #f)
             (define (%focused-pane) 0)
@@ -298,9 +367,8 @@ mod tests {
             (define (%release-typing) (set! *typing* #f))
             (define (%os-realpath p) p)"#);
         for name in SHELL {
-            let path = shell_dir().join(format!("{name}.scm"));
-            let src = std::fs::read_to_string(&path).expect("read");
-            interp.eval_named(&src, &path.to_string_lossy()).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (src, path) = shell_source(name).expect("read");
+            interp.eval_named(&src, &path).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
         eval(&mut interp, r#"
             (define ran '())

@@ -174,11 +174,9 @@ impl Session {
         let mut interp = scm::Interp::new().map_err(|e| e.to_string())?;
         super::install(&mut interp, &mut |_| {}).map_err(|e| e.to_string())?;
         install_host_prims(&mut interp).map_err(|e| e.to_string())?;
-        let dir = super::shell_dir();
         let load = |interp: &mut scm::Interp, name: &str| -> Result<(), String> {
-            let path = dir.join(format!("{name}.scm"));
-            let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            interp.eval_named(&src, &path.to_string_lossy()).map(|_| ()).map_err(|e| format!("{name}: {e}"))
+            let (src, path) = super::shell_source(name)?;
+            interp.eval_named(&src, &path).map(|_| ()).map_err(|e| format!("{name}: {e}"))
         };
         load(&mut interp, HOST_PRELUDE)?;
         for name in super::SHELL {
@@ -325,25 +323,8 @@ impl Session {
 mod tests {
     use super::*;
 
-    /// Every form `host/prelude.scm` copies from ray's prelude is still
-    /// ray's text, byte for byte — so a fix to one there turns this red
-    /// until it is carried here.
-    #[test]
-    fn the_host_prelude_is_rays_verbatim() {
-        let dir = super::super::shell_dir();
-        let ours = std::fs::read_to_string(dir.join("host/prelude.scm")).expect("host prelude");
-        let rays = std::fs::read_to_string(dir.join("../../scripts/scm/prelude.scm")).expect("ray's prelude");
-        let mut copied = 0;
-        for form in ours.split("\n\n").filter(|f| f.starts_with("(define")) {
-            // slurp and spit are the modeler's, written here; not ray's.
-            if form.starts_with("(define (slurp") || form.starts_with("(define (spit") {
-                continue;
-            }
-            assert!(rays.contains(form.trim_end()), "not ray's text any more:\n{form}");
-            copied += 1;
-        }
-        assert_eq!(copied, 11, "the eleven definitions 00-base.scm says a host supplies");
-    }
+    // That host/prelude.scm's copies of ray's helpers are still ray's text
+    // is checked in ray (the modeler's tests), which has both files.
 
     /// The centres of the strip's REPL and terminal icons, after a draw.
     fn icons() -> ((f64, f64), (f64, f64), (f64, f64)) {
@@ -368,7 +349,7 @@ mod tests {
         let file = file.to_string_lossy().replace('\\', "/");
         crate::editorpane::set_vi(false);
         app::resize(800, 600, 1.0);
-        let mut s = Session::boot(None, &[file.clone()]).expect("boot");
+        let mut s = Session::boot(None, std::slice::from_ref(&file)).expect("boot");
         // A Scheme file sends to a separate scm by default
         // (`files_default_to_a_separate_scm`); this test is about the
         // editor, so it keeps the file in the editor's image.
@@ -635,13 +616,13 @@ mod tests {
         let root = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
         let a = format!("{root}/a.scm");
         app::resize(1000, 700, 1.0);
-        let mut s = Session::boot(None, &[a.clone()]).expect("boot");
+        let mut s = Session::boot(None, std::slice::from_ref(&a)).expect("boot");
         let rows = |s: &mut Session| -> Vec<String> {
             let n: usize = s.eval_to_string("(%pane-row-count 4)").unwrap().parse().unwrap();
             (0..n)
                 .map(|i| {
                     let t = s.eval_to_string(&format!("(%pane-row-text 4 {i})")).unwrap();
-                    t.trim_matches('"').replace(|c| app::is_icon_mark(c), "").split_whitespace().collect::<Vec<_>>().join(" ")
+                    t.trim_matches('"').replace(app::is_icon_mark, "").split_whitespace().collect::<Vec<_>>().join(" ")
                 })
                 .collect()
         };
@@ -1015,7 +996,7 @@ mod tests {
         let f = dir.join("a.txt");
         std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
         let f = std::fs::canonicalize(&f).unwrap().to_string_lossy().into_owned();
-        let mut s = Session::boot(None, &[f.clone()]).expect("boot");
+        let mut s = Session::boot(None, std::slice::from_ref(&f)).expect("boot");
         s.call("(define quits 0) (set! *ex-quit* (lambda () (set! quits (+ quits 1))))");
         s.call("(focus-scene-editor) (%editor-set-vi 1 1)");
         let ex = |s: &mut Session, line: &str| {

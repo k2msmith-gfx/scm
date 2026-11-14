@@ -34,12 +34,10 @@ prim! {
 
 prim! {
     "%set-clipboard", fn clipboard_set(a0: opt_text) {
-        if let Some(text) = a0 {
-            with_clipboard(|c| c.set_text(text)).map(|r| {
-                if let Err(e) = r {
-                    eprintln!("[clipboard] {e}");
-                }
-            });
+        if let Some(text) = a0
+            && let Some(Err(e)) = with_clipboard(|c| c.set_text(text))
+        {
+            eprintln!("[clipboard] {e}");
         }
         Out::Nil
     }

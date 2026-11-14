@@ -206,74 +206,6 @@ pub fn draw_line_2d(x0: f32, y0: f32, x1: f32, y1: f32, ink: u32, fb: &mut Frame
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resize_reallocates_to_the_new_pixel_count() {
-        let mut fb = Framebuffer::new(4, 3);
-        assert_eq!(fb.pixels.len(), 12);
-        fb.resize(7, 5);
-        assert_eq!((fb.width, fb.height, fb.pixels.len()), (7, 5, 35));
-    }
-
-    fn full(fb: &Framebuffer) -> Rect {
-        Rect { x: 0, y: 0, w: fb.width, h: fb.height }
-    }
-
-    #[test]
-    fn test_pattern_orientation_and_crosshair() {
-        let mut fb = Framebuffer::new(100, 50);
-        fb.fill_test_pattern(full(&fb), [1.0, 1.0, 1.0]);
-        let px = |x: u32, y: u32| fb.pixels[(y * fb.width + x) as usize];
-        // Red grows rightward along the top row, green downward on the left
-        // column (avoiding the center crosshair rows/cols).
-        assert!(px(90, 0) >> 16 > px(10, 0) >> 16, "red should grow with x");
-        assert!(
-            (px(0, 40) >> 8) & 0xff > (px(0, 10) >> 8) & 0xff,
-            "green should grow with y"
-        );
-        // The crosshair: full-white center row and column.
-        assert_eq!(px(3, 25), 0x00ff_ffff);
-        assert_eq!(px(50, 44), 0x00ff_ffff);
-    }
-
-    #[test]
-    fn tint_scales_channels() {
-        let mut fb = Framebuffer::new(100, 50);
-        fb.fill_test_pattern(full(&fb), [1.0, 0.0, 0.0]);
-        let px = |x: u32, y: u32| fb.pixels[(y * fb.width + x) as usize];
-        // Green and blue killed everywhere; red survives; crosshair pure red.
-        assert_eq!(px(90, 10) & 0x00ff_ff, 0, "green/blue should be zeroed");
-        assert!(px(90, 10) >> 16 > 0, "red should survive a red tint");
-        assert_eq!(px(50, 25), 0x00ff_0000, "crosshair should tint too");
-    }
-
-    #[test]
-    fn rect_draws_stay_inside_their_rect() {
-        let mut fb = Framebuffer::new(20, 10);
-        let r = Rect { x: 5, y: 2, w: 8, h: 4 };
-        fb.fill_rect(r, 0x00aa_bbcc);
-        fb.stroke_rect(r, 0x0011_2233);
-        fn px(fb: &Framebuffer, x: u32, y: u32) -> u32 {
-            fb.pixels[(y * fb.width + x) as usize]
-        }
-        assert_eq!(px(&fb, 4, 3), 0, "left of the rect must be untouched");
-        assert_eq!(px(&fb, 13, 3), 0, "right of the rect must be untouched");
-        assert_eq!(px(&fb, 5, 2), 0x0011_2233, "corner carries the border");
-        assert_eq!(px(&fb, 12, 5), 0x0011_2233, "opposite corner too");
-        assert_eq!(px(&fb, 7, 3), 0x00aa_bbcc, "interior carries the fill");
-        // A pattern scoped to the rect leaves the outside black as well.
-        fb.fill_test_pattern(r, [1.0, 1.0, 1.0]);
-        assert_eq!(px(&fb, 4, 3), 0);
-        assert_eq!(px(&fb, 9, 4), 0x00ff_ffff, "crosshair sits at the rect center");
-        // A rect hanging off the buffer clamps instead of panicking.
-        fb.fill_rect(Rect { x: 15, y: 5, w: 50, h: 50 }, 0x1);
-        assert_eq!(px(&fb, 19, 9), 0x1);
-    }
-}
-
 /// An anti-aliased rounded rect blended at `alpha` ([`Framebuffer::round_rect`]
 /// fills opaquely; the glass needs the scene through it), with a 1px ring
 /// of white at `border_alpha` — the ~10% hairline. Clipped to `clip`.
@@ -313,5 +245,73 @@ pub fn glass_rect(fb: &mut Framebuffer, r: Rect, radius: f32, fill: u32, alpha: 
             };
             fb.pixels[idx] = crate::text::blend(fb.pixels[idx], ink, cov * a);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_reallocates_to_the_new_pixel_count() {
+        let mut fb = Framebuffer::new(4, 3);
+        assert_eq!(fb.pixels.len(), 12);
+        fb.resize(7, 5);
+        assert_eq!((fb.width, fb.height, fb.pixels.len()), (7, 5, 35));
+    }
+
+    fn full(fb: &Framebuffer) -> Rect {
+        Rect { x: 0, y: 0, w: fb.width, h: fb.height }
+    }
+
+    #[test]
+    fn test_pattern_orientation_and_crosshair() {
+        let mut fb = Framebuffer::new(100, 50);
+        fb.fill_test_pattern(full(&fb), [1.0, 1.0, 1.0]);
+        let px = |x: u32, y: u32| fb.pixels[(y * fb.width + x) as usize];
+        // Red grows rightward along the top row, green downward on the left
+        // column (avoiding the center crosshair rows/cols).
+        assert!(px(90, 0) >> 16 > px(10, 0) >> 16, "red should grow with x");
+        assert!(
+            (px(0, 40) >> 8) & 0xff > (px(0, 10) >> 8) & 0xff,
+            "green should grow with y"
+        );
+        // The crosshair: full-white center row and column.
+        assert_eq!(px(3, 25), 0x00ff_ffff);
+        assert_eq!(px(50, 44), 0x00ff_ffff);
+    }
+
+    #[test]
+    fn tint_scales_channels() {
+        let mut fb = Framebuffer::new(100, 50);
+        fb.fill_test_pattern(full(&fb), [1.0, 0.0, 0.0]);
+        let px = |x: u32, y: u32| fb.pixels[(y * fb.width + x) as usize];
+        // Green and blue killed everywhere; red survives; crosshair pure red.
+        assert_eq!(px(90, 10) & 0x0000_ffff, 0, "green/blue should be zeroed");
+        assert!(px(90, 10) >> 16 > 0, "red should survive a red tint");
+        assert_eq!(px(50, 25), 0x00ff_0000, "crosshair should tint too");
+    }
+
+    #[test]
+    fn rect_draws_stay_inside_their_rect() {
+        let mut fb = Framebuffer::new(20, 10);
+        let r = Rect { x: 5, y: 2, w: 8, h: 4 };
+        fb.fill_rect(r, 0x00aa_bbcc);
+        fb.stroke_rect(r, 0x0011_2233);
+        fn px(fb: &Framebuffer, x: u32, y: u32) -> u32 {
+            fb.pixels[(y * fb.width + x) as usize]
+        }
+        assert_eq!(px(&fb, 4, 3), 0, "left of the rect must be untouched");
+        assert_eq!(px(&fb, 13, 3), 0, "right of the rect must be untouched");
+        assert_eq!(px(&fb, 5, 2), 0x0011_2233, "corner carries the border");
+        assert_eq!(px(&fb, 12, 5), 0x0011_2233, "opposite corner too");
+        assert_eq!(px(&fb, 7, 3), 0x00aa_bbcc, "interior carries the fill");
+        // A pattern scoped to the rect leaves the outside black as well.
+        fb.fill_test_pattern(r, [1.0, 1.0, 1.0]);
+        assert_eq!(px(&fb, 4, 3), 0);
+        assert_eq!(px(&fb, 9, 4), 0x00ff_ffff, "crosshair sits at the rect center");
+        // A rect hanging off the buffer clamps instead of panicking.
+        fb.fill_rect(Rect { x: 15, y: 5, w: 50, h: 50 }, 0x1);
+        assert_eq!(px(&fb, 19, 9), 0x1);
     }
 }

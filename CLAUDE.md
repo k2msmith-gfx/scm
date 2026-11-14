@@ -31,6 +31,12 @@ not to reopen.
   for the work on ray's side. It lives here, not there, because every stage
   in it is gated on this repository. A bare path in it is this repo; a `ray/`
   prefix is the other. ray keeps a pointer at `docs/scm-port-plan.md`.
+- **`docs/editor-crate-plan.md`** — **`edit/`, the editor**: the text
+  widget, its panes, a Scheme shell (`edit/scm/*.scm`), a standalone
+  program (`cargo run -p edit -- FILE`) and a terminal pane, shared with
+  ray's modeler, which takes the crate from this repo by git. Built in
+  ray, moved here 2026-11-14 with its history. Its plan's "as built"
+  sections and "Still open" list are where to start.
 - **`docs/cl-plan.md`** — **PROPOSED, nothing built, and not this
   language.** A subset of Common Lisp in Rust, scoped to "runs most portable
   CL". It lives here because its C0 decisions are decisions about *this*
@@ -39,6 +45,16 @@ not to reopen.
   move it once the implementation has a repository of its own.
 
 ## Build / run
+
+    cargo run --release -p edit -- FILE    # the editor (edit/), standalone
+
+`edit` reads its shell (`edit/scm/*.scm`) from this tree while the tree is
+there -- an edit takes effect at the next start, no rebuild -- and falls
+back on the copies compiled in (`scm_binding::shell_source`), which is what
+ray's modeler gets from a git checkout in Cargo's cache. A NEW shell file
+goes in `SHELL` and in `EMBEDDED`; `every_shell_file_is_compiled_in` fails
+until it is in both. Changes the modeler needs reach ray as scm's do: push
+here, then `cargo update -p edit` there.
 
     cargo build --release                  # no LLVM needed, ever, by default
     ./target/release/scm                   # REPL
@@ -95,7 +111,7 @@ instead, which is the loop for developing one.
 
 Nothing is done until these pass, and **commit only on green**:
 
-    cargo test                             # ~343 tests
+    cargo test                             # ~343 tests, + edit's 69
     cargo clippy --all-targets             # kept at ZERO warnings
     cargo run --release -p scm-conform -- scm-conform/suites/r7rs-tests.scm out.md
     cargo run --release -p scm-conform --bin scm-fuzz -- --seed 42 --count 2000

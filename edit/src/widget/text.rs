@@ -1,7 +1,7 @@
 //! Minimal kernel text (docs/modeler-plan.md "Draw primitives"): the first
 //! slice of `draw-text`, enough to title the M4 dock placeholders — plus,
 //! since M4.5, the monospace face and grid metrics the text panes
-//! (`textpane.rs`) lay out with. Labels use ray's vendored DejaVu Sans;
+//! (`textpane.rs`) lay out with. Labels use vendored IBM Plex Sans;
 //! text panes use vendored JetBrains Mono (OFL, assets/JetBrainsMono-OFL.txt)
 //! — the terminal aesthetic is the design brief, and monospace makes
 //! wrapping trivial character-grid math (the plan's ropey-vs-cosmic-text
@@ -51,15 +51,15 @@ pub enum TextMode {
     Smooth,
     /// Resolve per display at draw time — [`TextMode::Smooth`] at scale
     /// >= 1.5, [`TextMode::Crisp`] below it. Briefly the default, on the
-    /// theory that unhinted text loses where the em is small: at 13px glyphs
-    /// the unhinted modes swing about three times as many pixels as at 26px.
-    /// Kevin then looked at it and preferred `:smooth` at every scale — a
-    /// pixel diff says how much changed, never whether it improved, and this
-    /// mode mistook the one for the other. Kept, not default, because if a
-    /// genuinely low-DPI screen (the Linux box) ever does read worse, this is
-    /// the fix a config file can't be: `init.scm` is evaluated before the
-    /// window exists, so it cannot know the scale, and resolving per draw
-    /// follows the window between displays. Any explicit mode overrides it.
+    /// > theory that unhinted text loses where the em is small: at 13px glyphs
+    /// > the unhinted modes swing about three times as many pixels as at 26px.
+    /// > Kevin then looked at it and preferred `:smooth` at every scale — a
+    /// > pixel diff says how much changed, never whether it improved, and this
+    /// > mode mistook the one for the other. Kept, not default, because if a
+    /// > genuinely low-DPI screen (the Linux box) ever does read worse, this is
+    /// > the fix a config file can't be: `init.scm` is evaluated before the
+    /// > window exists, so it cannot know the scale, and resolving per draw
+    /// > follows the window between displays. Any explicit mode overrides it.
     Auto,
 }
 
@@ -151,11 +151,11 @@ use crate::framebuffer::Framebuffer;
 /// ray's PNG annotation still embeds DejaVu Sans (`src/film.rs`), so the
 /// workspace keeps that asset; this is a second, smaller vendored face
 /// (200 KB vs 760 KB) rather than a replacement.
-const LABEL_BYTES: &[u8] = include_bytes!("../../../assets/IBMPlexSans-Regular.ttf");
+const LABEL_BYTES: &[u8] = include_bytes!("../../assets/IBMPlexSans-Regular.ttf");
 
 /// JetBrains Mono Regular — the text panes' default terminal face
 /// (replaceable live via `set-text-font`).
-const MONO_BYTES: &[u8] = include_bytes!("../../../assets/JetBrainsMono-Regular.ttf");
+const MONO_BYTES: &[u8] = include_bytes!("../../assets/JetBrainsMono-Regular.ttf");
 
 /// Owns font bytes plus a stable [`CacheKey`], so a fresh [`FontRef`] can be
 /// materialized on demand without minting a new key each time — rebuilding
@@ -298,6 +298,7 @@ pub fn mono_metrics(px: f32) -> (f32, f32) {
 /// one blurs, while a sheared or fattened outline is antialiased by the
 /// rasterizer like any other curve. Hinting is dropped for both, because
 /// hinting snaps stems to the pixel grid and these move them off it again.
+#[allow(clippy::too_many_arguments)]
 fn draw_glyph(
     fb: &mut Framebuffer,
     font: FontRef,
@@ -465,6 +466,7 @@ const BOLD_FRACTION: f32 = 1.0 / 24.0;
 
 /// [`draw_label`] in a second voice — the general form, which [`draw_label`]
 /// itself calls with [`Emphasis::Regular`].
+#[allow(clippy::too_many_arguments)]
 pub fn draw_label_emph(
     fb: &mut Framebuffer,
     x: i32,
@@ -618,17 +620,17 @@ mod tests {
             before,
             "a bad load keeps the face"
         );
-        // DejaVu is the workspace's other vendored face (ray's PNG
-        // annotation); its wider advances prove the face actually changed.
-        let dejavu = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/DejaVuSans.ttf");
-        assert!(set_label_font(dejavu, 0).is_ok());
+        // The crate's other vendored face, the mono one: its advances
+        // differ, which proves the face actually changed.
+        let other = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/JetBrainsMono-Regular.ttf");
+        assert!(set_label_font(other, 0).is_ok());
         assert_ne!(
             measure_label(14.0, "Extrude"),
             before.1,
             "label advances follow the face"
         );
         // Restore the default so sibling tests in this thread see Plex.
-        let plex = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/IBMPlexSans-Regular.ttf");
+        let plex = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/IBMPlexSans-Regular.ttf");
         assert!(set_label_font(plex, 0).is_ok());
         assert_eq!(measure_label(14.0, "Extrude"), before.1, "restored to Plex");
     }
@@ -638,10 +640,10 @@ mod tests {
         let before = mono_metrics(14.0);
         assert!(set_mono_font("/no/such/font.ttf", 0).is_err());
         assert_eq!(mono_metrics(14.0), before, "a bad load keeps the face");
-        // Any parseable font swaps in; the vendored DejaVu differs in
-        // metrics, which proves the face actually changed.
-        let dejavu = concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/DejaVuSans.ttf");
-        assert!(set_mono_font(dejavu, 0).is_ok());
+        // Any parseable font swaps in; the vendored Plex (proportional)
+        // differs in metrics, which proves the face actually changed.
+        let other = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/IBMPlexSans-Regular.ttf");
+        assert!(set_mono_font(other, 0).is_ok());
         assert_ne!(mono_metrics(14.0).0, before.0, "metrics follow the face");
     }
 
