@@ -188,6 +188,20 @@ pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Res
         Ok(scm::Val::Str(shell_dir().join("..").join(rel).to_string_lossy().into_owned()))
     })?;
     installed("%edit-path");
+    // `(%git-root dir)` — the top of the git checkout DIR is in, or #f: where
+    // the file tree (17-files) roots itself, in either host.
+    interp.define_fn("%git-root", |args| {
+        let Some(dir) = val_text(args, 0) else { return Ok(scm::Val::Bool(false)) };
+        let out = std::process::Command::new("git")
+            .args(["-C", &dir, "rev-parse", "--show-toplevel"])
+            .stderr(std::process::Stdio::null())
+            .output();
+        Ok(match out {
+            Ok(o) if o.status.success() => scm::Val::Str(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+            _ => scm::Val::Bool(false),
+        })
+    })?;
+    installed("%git-root");
     for name in editor::install(interp)?
         .into_iter()
         .chain(text::install(interp)?)

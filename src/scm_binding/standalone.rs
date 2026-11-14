@@ -86,18 +86,6 @@ fn install_host_prims(interp: &mut scm::Interp) -> Result<(), scm::EmbedError> {
         Ok(Val::Bool(false))
     })?;
     interp.define_fn("%files-shown?", |_| Ok(Val::Bool(app::files_shown())))?;
-    // `(%git-root dir)` — the top of the git checkout DIR is in, or #f.
-    interp.define_fn("%git-root", |args| {
-        let Some(dir) = val_text(args, 0) else { return Ok(Val::Bool(false)) };
-        let out = std::process::Command::new("git")
-            .args(["-C", &dir, "rev-parse", "--show-toplevel"])
-            .stderr(std::process::Stdio::null())
-            .output();
-        Ok(match out {
-            Ok(o) if o.status.success() => Val::Str(String::from_utf8_lossy(&o.stdout).trim().to_string()),
-            _ => Val::Bool(false),
-        })
-    })?;
     // `(%git-ignored dir)` — what git ignores under DIR, relative to it, an
     // ignored directory once with a trailing `/` (ray's prim of the same
     // name, which a standalone without ray answers itself); () outside git.

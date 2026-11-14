@@ -1026,6 +1026,98 @@ fn draw_code_row(fb: &mut Framebuffer, x: f32, y: f32, px: f32, theme: &crate::t
     }
 }
 
+/// The characters a file-tree row holds where its icon goes: private-use
+/// code points no face draws, so the cells stay blank under the icon. Two
+/// of one make the icon's width; which one says what the row is (17-files
+/// picks it from the name).
+pub const FOLDER_MARK: char = '\u{E000}';
+pub const CODE_MARK: char = '\u{E001}';
+pub const IMAGE_MARK: char = '\u{E002}';
+pub const FILE_MARK: char = '\u{E003}';
+
+/// Whether `c` is one of the file tree's icon marks.
+pub fn is_icon_mark(c: char) -> bool {
+    ('\u{E000}'..='\u{E003}').contains(&c)
+}
+
+/// The file tree's icons, drawn over the mark cells its rows carry, and
+/// its indent guides: a faint rule down from each open folder through the
+/// rows under it, as Zed's project panel draws them. Drawn for any
+/// proportional list pane, so every host's tree has them (the standalone's
+/// and the modeler's).
+#[allow(clippy::too_many_arguments)]
+fn draw_tree_marks(fb: &mut Framebuffer, pane: Rect, theme: &crate::theme::Theme, px: f32, scale: f32, laid: &[LaidRow]) {
+    let (adv, row_h) = text::mono_metrics(px);
+    let pad = PAD * scale;
+    let at = |v: f32| v.max(0.0).round() as u32;
+    let t = scale.round().max(1.0);
+    let dim = text::blend(theme.panel_bg, theme.text_dim, 0.85);
+    let guide = text::blend(theme.panel_bg, theme.text_dim, 0.28);
+    let outline = |fb: &mut Framebuffer, x: f32, y: f32, w: f32, h: f32| {
+        fb.fill_rect(Rect { x: at(x), y: at(y), w: at(w), h: at(t) }, dim);
+        fb.fill_rect(Rect { x: at(x), y: at(y + h - t), w: at(w), h: at(t) }, dim);
+        fb.fill_rect(Rect { x: at(x), y: at(y), w: at(t), h: at(h) }, dim);
+        fb.fill_rect(Rect { x: at(x + w - t), y: at(y), w: at(t), h: at(h) }, dim);
+    };
+    let bottom = (pane.y + pane.h) as f32;
+    for LaidRow { y, text: row, .. } in laid {
+        let y = *y;
+        let Some((col, mark)) = row.chars().enumerate().find(|&(_, c)| is_icon_mark(c)) else { continue };
+        let x = pane.x as f32 + pad + col as f32 * adv;
+        // A row at depth d has its icon at column 2d+2 and sits under every
+        // folder above it: one guide per level, under that folder's marker.
+        let depth = col.saturating_sub(2) / 2;
+        for level in 1..depth {
+            let gx = pane.x as f32 + pad + (2 * level) as f32 * adv + adv * 0.5;
+            let h = row_h.min(bottom - y);
+            if h > 0.0 {
+                fb.fill_rect(Rect { x: at(gx), y: at(y), w: at(t), h: at(h) }, guide);
+            }
+        }
+        match mark {
+            FOLDER_MARK => {
+                let ink = theme.code_number;
+                let (w, h) = (adv * 1.7, row_h * 0.5);
+                let (x0, y0) = (x + adv * 0.1, y + (row_h - h) * 0.55);
+                let tab_h = (h * 0.25).max(1.0);
+                fb.fill_rect(Rect { x: at(x0), y: at(y0), w: at(w * 0.45), h: at(tab_h) }, ink);
+                fb.fill_rect(Rect { x: at(x0), y: at(y0 + tab_h), w: at(w), h: at(h - tab_h) }, ink);
+            }
+            // Source: braces, as Zed marks code.
+            CODE_MARK => {
+                let small = px * 0.85;
+                let dy = text::mono_ascent(px) - text::mono_ascent(small);
+                text::draw_mono_line(fb, x + adv * 0.15, y + dy, small, dim, "{}");
+            }
+            // A picture: a frame, a hill, a sun.
+            IMAGE_MARK => {
+                let (w, h) = (adv * 1.5, row_h * 0.55);
+                let (x0, y0) = (x + adv * 0.2, y + (row_h - h) * 0.5);
+                outline(fb, x0, y0, w, h);
+                let base = y0 + h - t;
+                for i in 0..3 {
+                    let step = h * 0.16 * (i + 1) as f32;
+                    let half = w * (0.38 - 0.11 * i as f32);
+                    let cx = x0 + w * 0.42;
+                    fb.fill_rect(Rect { x: at(cx - half), y: at(base - step), w: at(2.0 * half), h: at(h * 0.16) }, dim);
+                }
+                let s = (h * 0.18).max(t);
+                fb.fill_rect(Rect { x: at(x0 + w * 0.68), y: at(y0 + h * 0.22), w: at(s), h: at(s) }, dim);
+            }
+            // Anything else: a page with lines on it.
+            _ => {
+                let (w, h) = (adv * 1.1, row_h * 0.62);
+                let (x0, y0) = (x + adv * 0.4, y + (row_h - h) * 0.5);
+                outline(fb, x0, y0, w, h);
+                for i in 1..=3 {
+                    let ly = y0 + h * 0.22 * i as f32;
+                    fb.fill_rect(Rect { x: at(x0 + w * 0.25), y: at(ly), w: at(w * 0.5), h: at(t) }, dim);
+                }
+            }
+        }
+    }
+}
+
 /// Draw the pane: background, transcript bottom-anchored above the input
 /// line, input line (when a prompt is set) with a cursor block if armed.
 /// Returns nothing; clamps and clips everywhere.
@@ -1191,6 +1283,10 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
                 }
                 laid.push(LaidRow { y, text: row, cont: false });
                 y += row_h;
+            }
+            // The file tree's icons and indent guides, over its mark cells.
+            if c.proportional {
+                draw_tree_marks(fb, rect, &theme, px, scale, &laid);
             }
             c.laid = laid;
             return;

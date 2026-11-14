@@ -32,6 +32,7 @@
 ; face as Zed Plex Sans); the marks and folder cells stay on the mono grid.
 (%pane-proportional 4 1)
 (set! *files-shown* (lambda (on) (%show-files on)))
+(set! *files-shown?* (lambda () (%files-shown?)))
 (set! *buffers-changed*
   (lambda ()
     (when (%files-shown?)
@@ -391,12 +392,6 @@ the shell's own (edit/scm/)?"
           ((backend-of (%editor-active-buffer id)) :editor)
           (else #f))))
 (set-pane-menu! :terminal (lambda (x y id shift) :terminal))
-; The tree's menu acts on the row under the press, as the outliner's does.
-(set-pane-menu! :files
-  (lambda (x y id shift)
-    (let ((row (%pane-row-at id x y)))
-      (when row (files-select! row)))
-    :files))
 (set-pane-menu! :transcript (lambda (x y id shift) :transcript))
 
 ; ── The mouse's floor: a transcript scrolls ────────────────────────────────

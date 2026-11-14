@@ -4,14 +4,18 @@
 ;## git ignores is hidden unless asked for; the tree follows the buffer on
 ;## screen. The pane is a text pane in list layout; each row carries two
 ;## mark cells the host paints its icon over — a folder, braces for source,
-;## a picture, a page — and the host draws the indent guides (edit's app.rs).
+;## a picture, a page — which the text pane draws, with the indent guides,
+;## in any host (edit's textpane.rs, for a proportional list pane).
 
 ; What the HOST supplies, as FORWARD HOOKS:
-;   *files-pane*   the pane the tree shows in, or #f (the standalone's left
-;                  column)
-;   *files-shown*  show or hide that pane (#t / #f)
+;   *files-pane*    the pane the tree shows in, or #f (the standalone's left
+;                   column; in the modeler, a column of the left dock beside
+;                   the editor)
+;   *files-shown*   show or hide that pane (#t / #f)
+;   *files-shown?*  whether it shows
 (define *files-pane* (lambda () (*pane-id* :files)))
 (define *files-shown* (lambda (on) #f))
+(define *files-shown?* (lambda () #f))
 
 (define (files-mark n) (string (integer->char n) (integer->char n)))
 (define folder-mark (files-mark #xE000))
@@ -232,7 +236,7 @@
 
 (define (toggle-files)
   "Show or hide the file tree — the strip's folder icon."
-  (if (%files-shown?)
+  (if (*files-shown?*)
     (begin (*files-shown* #f) (when (equal? (%typing-pane) (*files-pane*)) (focus-scene-editor)))
     (begin (*files-shown* #t) (unless *files-root* (files-open-root ".")) (files-render))))
 
@@ -285,6 +289,13 @@ gives the keyboard back. Call it once the host's tree pane exists."
     (let ((id (*files-pane*)) (hit (and x y (%pane-at x y))))
       (and id hit (equal? (car hit) id)
            (begin (%pane-scroll id (* 3 (if (positive? d) 1 -1))) #t)))))
+
+; The tree's menu acts on the row under the press, as the outliner's does.
+(set-pane-menu! :files
+  (lambda (x y id shift)
+    (let ((row (%pane-row-at id x y)))
+      (when row (files-select! row)))
+    :files))
 
 (define-menu
   :files
