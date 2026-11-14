@@ -6,8 +6,10 @@
 ;## What the shell leans on from the image beneath it, besides scm's own:
 ;## `list-sort`, `string-split`, `string-prefix?`, `filter`, `append-map` (ray's
 ;## prelude, which the modeler installs first; a standalone host must supply
-;## them — E4; `the_shell_runs_keys_on_a_bare_interpreter` holds the list) and
-;## the kernel prims `%focused-pane` / `%typing-pane`.
+;## them — E4; `the_shell_runs_keys_and_menus_on_a_bare_interpreter` holds the
+;## list) and the kernel prims `%focused-pane`, `%typing-pane`, `%pane-at` and
+;## `%focus-pane` (the pane registry), `%os-clock`, and `%set-pie-delay` (the
+;## marking menu's hold timer is the host's event loop).
 
 ;; Hash tables by their SRFI-125 names — the keymaps are tables, made as
 ;; this loads, before the host's own files import it.
@@ -26,3 +28,51 @@ A name bound to #f answers #f, as an unbound one does when DEFAULT is #f."
   (cond ((keyword? k) (keyword->string k))
         ((symbol? k) (symbol->string k))
         (else k)))
+
+;; The small kit the menus (03-menus) are written in, from the modeler's
+;; 00-helpers (E3b).
+
+(define (%as-list xs)
+  "XS as a list: a vector is converted, a list passes through."
+  (if (vector? xs) (vector->list xs) xs))
+; The modeler's 00-helpers REDEFINES %as-list, with a clause for its Janet
+; data's array records, and its definition is the one every caller then
+; reaches — the menus included, whose items can come back from a session
+; file as one.
+
+(define (%list-ref/default xs i default)
+  "Element I of the list XS, or DEFAULT when I is past either end or is not
+an integer. An index that comes from a click or a stored id may name an
+object that has since gone, and that is an answer, not an error."
+  (if (and (integer? i) (>= i 0))
+      (let loop ((xs xs) (k (exact i)))
+        (cond ((not (pair? xs)) default)
+              ((zero? k) (car xs))
+              (else (loop (cdr xs) (- k 1)))))
+      default))
+
+(define (%text x)
+  "X as text, the way a label or a tip wants it: a string is itself, a
+keyword or symbol its NAME (no colon), a number its digits, #f the empty
+string."
+  (cond ((string? x) x)
+        ((not x) "")
+        ((keyword? x) (keyword->string x))
+        ((symbol? x) (symbol->string x))
+        ((number? x) (number->string x))
+        (else (format "~a" x))))
+
+(define %pi (* 4 (atan 1)))
+
+(define (%make-state . kvs)
+  "A small MUTABLE record — a hash table from alternating keys and values.
+For the in-flight state a gesture edits as it goes (an open menu's
+selection, a pie's armed sector); a record built once and read is an alist."
+  (let ((t (make-hash-table equal?)))
+    (let loop ((p kvs))
+      (unless (or (null? p) (null? (cdr p)))
+        (hash-table-set! t (car p) (cadr p))
+        (loop (cddr p))))
+    t))
+
+(define (%state-ref t k) (hash-table-ref/default t k #f))

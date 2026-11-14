@@ -152,6 +152,7 @@ macro_rules! prim {
 }
 
 mod editor;
+mod menu;
 mod text;
 mod xref;
 
@@ -159,7 +160,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -171,7 +172,12 @@ pub fn shell_dir() -> std::path::PathBuf {
 /// the modeler records them, so its prelude can unwrap the array records
 /// it passes (`99-scheme-only.scm`, `%prim-names`).
 pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Result<(), scm::EmbedError> {
-    for name in editor::install(interp)?.into_iter().chain(text::install(interp)?).chain(xref::install(interp)?) {
+    for name in editor::install(interp)?
+        .into_iter()
+        .chain(text::install(interp)?)
+        .chain(xref::install(interp)?)
+        .chain(menu::install(interp)?)
+    {
         installed(name);
     }
     Ok(())
@@ -220,13 +226,14 @@ mod tests {
 
     /// The shell on a bare interpreter: loads with only what `00-base.scm`
     /// says a host supplies, and runs a key through the chains — a prefix
-    /// sequence, the typing-pane rule, and an error landing in the echo.
+    /// sequence, the typing-pane rule, an error landing in the echo — and a
+    /// menu, by keys and by a right-press through the role registry.
     #[test]
-    fn the_shell_runs_keys_on_a_bare_interpreter() {
+    fn the_shell_runs_keys_and_menus_on_a_bare_interpreter() {
         let mut interp = scm::Interp::new().expect("interp");
         install(&mut interp, &mut |_| {}).expect("install");
         // What a host supplies (00-base.scm's list): ray's list and string
-        // helpers, and the focus prims.
+        // helpers, the focus prims, the pane under a point and a clock.
         eval(&mut interp, r#"
             (import (srfi 1))
             (define (list-sort less? xs)
@@ -248,7 +255,9 @@ mod tests {
                    (string=? p (substring s 0 (string-length p)))))
             (define *typing* #f)
             (define (%focused-pane) 0)
-            (define (%typing-pane) *typing*)"#);
+            (define (%typing-pane) *typing*)
+            (define (%pane-at x y) (list 0 "text"))
+            (define (%os-clock) 0)"#);
         for name in SHELL {
             let path = shell_dir().join(format!("{name}.scm"));
             let src = std::fs::read_to_string(&path).expect("read");
@@ -273,6 +282,26 @@ mod tests {
         // A command that raises reports through the echo, not the stderr log.
         eval(&mut interp, r#"(on-key "C-c")"#);
         assert_eq!(eval(&mut interp, "echoed"), Val::Str("nothing to cancel".into()));
+        // A menu is data; the popup runs the row the keys move to.
+        eval(&mut interp, r#"
+            (define-menu :m (list (list "One" (lambda () (set! ran (cons 'one ran))))
+                                  (list "Two" (lambda () (set! ran (cons 'two ran))))))
+            (show-menu :m 10 10)"#);
+        assert_eq!(eval(&mut interp, "(menu-open?)"), Val::Bool(true));
+        eval(&mut interp, r#"(on-key "down") (on-key "return")"#);
+        assert_eq!(eval(&mut interp, "(car ran)"), Val::Sym("two".into()));
+        assert_eq!(eval(&mut interp, "(menu-open?)"), Val::Bool(false));
+        // A right-press asks the host the pane's role, and the role's entry
+        // names the menu; a quick click (no drag, no hold) posts it linear.
+        eval(&mut interp, r#"
+            (set! *pane-role* (lambda (id kind) :text))
+            (set-pane-menu! :text (lambda (x y id shift) :m))
+            (on-menu-press 5 5) (on-menu-release 5 5)"#);
+        assert_eq!(eval(&mut interp, "(menu-open?)"), Val::Bool(true));
+        eval(&mut interp, r#"(on-key "C-g")"#);
+        // A role the host never named opens nothing.
+        eval(&mut interp, r#"(set! *pane-role* (lambda (id kind) :elsewhere))"#);
+        assert_eq!(eval(&mut interp, "(on-menu-press 5 5)"), Val::Bool(false));
         let keys = eval(&mut interp, "(describe-keys)");
         let Val::Str(keys) = keys else { panic!("{keys:?}") };
         assert!(keys.contains("C-x C-f — "), "{keys}");
