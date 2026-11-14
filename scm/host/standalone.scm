@@ -68,6 +68,75 @@
 (bind-term-keys)
 (bind-key "C-x C-c" (lambda () (%quit)))
 
+; ── The terminal in the lower pane (E5) ────────────────────────────────────
+; Opening one shows it; the strip's terminal icon (src/app.rs) and M-x
+; toggle-terminal swap the lower pane between it and the transcript, the
+; program running on either way — as the modeler's REPL icon opens and
+; closes its dock.
+(set! *term-shown* (lambda (id) (%show-terminal #t)))
+(set! *term-closed* (lambda (id) (%show-terminal #f)))
+
+(define (toggle-terminal)
+  "Show or hide the terminal in the lower pane — the strip's terminal icon.
+  The first show starts your $SHELL; hiding leaves it running and gives the
+  keyboard back to the editor."
+  (cond ((%terminal-showing?)
+          (%show-terminal #f)
+          (when (terminal-typing?) (focus-scene-editor)))
+        ((term-id) (term-focus))
+        (else (term-open))))
+
+; ── Menus: a right-press opens its pane's ──────────────────────────────────
+; A quick click posts the menu as a list; a press held or dragged is the
+; marking menu (the shell's 03-menus). The editor's is the modeler's: the
+; sends around the compass, then describe, copy and paste.
+(set! *pane-role*
+  (lambda (id kind)
+    (case id
+      ((1) :editor)
+      ((2) (if (equal? kind "term") :terminal :transcript))
+      (else #f))))
+
+(define (toggle-markdown-view)
+  "Flip a markdown buffer between its reading and source views — C-c C-v."
+  (let ((r (%editor-toggle-markdown (editor-pane-id))))
+    (cond ((eqv? r 1) (echo "markdown: reading view"))
+          ((eqv? r 0) (echo "markdown: source view"))
+          (else (echo "not a markdown buffer")))))
+(bind-key "C-c C-v" (lambda () (if (editor-focused?) (toggle-markdown-view) #f)))
+
+(define-menu
+  :editor
+  (list (list "send defun" eval-defun)
+        (list "send sexp" eval-last-sexp)
+        (list "send buffer" eval-buffer)
+        (list "send region" eval-region)
+        (list "describe" editor-describe)
+        (list "Copy" scene-editor-copy "s-c")
+        (list "Paste" scene-editor-paste "s-v")))
+(define-menu
+  :help
+  (list (list "back" editor-back) (list "toggle source" toggle-markdown-view)))
+(define-menu
+  :terminal
+  (list (list "back to the editor" focus-scene-editor)
+        (list "send C-c" (lambda () (%term-key 2 "C-c")))
+        (list "hide" toggle-terminal)
+        (list "stop the program" term-close)))
+(define-menu
+  :transcript
+  (list (list "terminal" toggle-terminal)
+        (list "clear" (lambda () (%pane-clear 2)))))
+
+(set-pane-menu! :editor
+  (lambda (x y id shift)
+    (%focus-pane id)
+    (cond ((markdown-buffer?) :help)
+          ((backend-of (%editor-active-buffer id)) :editor)
+          (else #f))))
+(set-pane-menu! :terminal (lambda (x y id shift) :terminal))
+(set-pane-menu! :transcript (lambda (x y id shift) :transcript))
+
 ; ── The mouse's floor: a transcript scrolls ────────────────────────────────
 (add-handler
   *wheel-handlers*
@@ -82,4 +151,5 @@
   "What the transcript says when the editor opens."
   (*transcript-append* "edit — Scheme in this image. C-x C-f opens a file, C-x C-s saves," :dim)
   (*transcript-append* "C-M-x / C-x C-e / C-c C-b send, C-h b lists every key, C-x C-c quits." :dim)
-  (*transcript-append* "M-x term runs a program here instead; C-x o moves between it and the editor." :dim))
+  (*transcript-append* "The icon at the bottom right (or M-x toggle-terminal) shows a terminal here; C-x o moves" :dim)
+  (*transcript-append* "between it and the editor. Right-click a pane for its menu; hold or drag for the marking menu." :dim))

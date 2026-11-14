@@ -32,6 +32,11 @@ struct State {
     dirty: bool,
     quit: bool,
     pie_delay_ms: u64,
+    /// Whether the lower pane shows the terminal (when one runs) rather
+    /// than the transcript — what the strip's terminal icon toggles.
+    term_shown: bool,
+    /// Where that icon was last drawn, for the click.
+    toggle: Rect,
 }
 
 thread_local! {
@@ -44,6 +49,8 @@ thread_local! {
         dirty: true,
         quit: false,
         pie_delay_ms: 200,
+        term_shown: false,
+        toggle: Rect::default(),
     });
 }
 
@@ -52,6 +59,7 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 }
 
 /// The widget's host: answers from [`STATE`].
+#[cfg_attr(test, allow(dead_code))]
 struct AppHost;
 
 impl crate::host::Host for AppHost {
@@ -82,7 +90,13 @@ impl crate::host::Host for AppHost {
 }
 
 /// Make this program the widget's host. Once, before anything draws.
+///
+/// Not under `cargo test`: the host is PROCESS-wide, and the widget's own
+/// tests, on other threads of the same process, answer through the test
+/// host (`host::testing`) — installing this one mid-run took it from under
+/// them. The standalone's tests read `app`'s state directly instead.
 pub fn install_host() {
+    #[cfg(not(test))]
     crate::host::install(&AppHost);
 }
 
@@ -119,7 +133,7 @@ pub fn kind_name(id: u32) -> Option<&'static str> {
     match id {
         EDITOR => Some("editor"),
         // The lower pane is the transcript until a terminal opens in it (E5).
-        TRANSCRIPT if crate::termpane::is_open(id) => Some("term"),
+        TRANSCRIPT if terminal_showing() => Some("term"),
         TRANSCRIPT | MINIBUFFER => Some("text"),
         _ => None,
     }
@@ -202,6 +216,50 @@ pub fn pie_delay_ms() -> u64 {
     with(|s| s.pie_delay_ms)
 }
 
+/// Show the terminal in the lower pane, or the transcript. The program
+/// keeps running either way.
+pub fn show_terminal(on: bool) {
+    with(|s| {
+        s.term_shown = on;
+        s.dirty = true;
+    });
+}
+
+/// Is the lower pane showing a running terminal?
+pub fn terminal_showing() -> bool {
+    with(|s| s.term_shown) && crate::termpane::is_open(TRANSCRIPT)
+}
+
+/// Is a window point on the strip's terminal icon?
+pub fn toggle_at(x: f64, y: f64) -> bool {
+    with(|s| s.toggle.w > 0 && s.toggle.contains(x, y))
+}
+
+/// The terminal icon, right-aligned in the minibuffer strip, Zed-style as
+/// the modeler draws its panel toggles: accent over a faint backing while
+/// the terminal shows, dim otherwise. A window outline, a `>` and a cursor.
+fn draw_toggle(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::theme::Theme) {
+    let size = (15.0 * scale).round();
+    let margin = (8.0 * scale).round();
+    let x = (strip.x + strip.w) as f32 - margin - size;
+    let y = strip.y as f32 + (strip.h as f32 - size) * 0.5;
+    let r = Rect { x: x.max(0.0) as u32, y: y.max(0.0) as u32, w: size as u32, h: size as u32 };
+    let on = terminal_showing();
+    let ink = if on { theme.text_accent } else { theme.text_dim };
+    if on {
+        fb.round_rect(r, 3.0 * scale, theme.panel_bg, theme.panel_bg);
+    }
+    let pad = (3.0 * scale).max(2.0);
+    let (ix, iy, iw, ih) = (r.x as f32 + pad, r.y as f32 + pad, r.w as f32 - 2.0 * pad, r.h as f32 - 2.0 * pad);
+    let px = |v: f32| v.max(0.0).round() as u32;
+    fb.stroke_rect(Rect { x: px(ix), y: px(iy), w: px(iw), h: px(ih) }, ink);
+    let (cx, cy, ch, cw) = (ix + 2.5 * scale, iy + ih * 0.5, ih * 0.2, 2.0 * scale);
+    crate::framebuffer::draw_line_2d(cx, cy - ch, cx + cw, cy, ink, fb, r);
+    crate::framebuffer::draw_line_2d(cx + cw, cy, cx, cy + ch, ink, fb, r);
+    fb.fill_rect(Rect { x: px(cx + cw + 1.5 * scale), y: px(cy - 0.75 * scale), w: px(3.0 * scale), h: px(1.5 * scale) }, ink);
+    with(|s| s.toggle = r);
+}
+
 /// Paint every pane, then whatever floats over them (a popup, a menu).
 pub fn draw(fb: &mut Framebuffer) {
     let theme = crate::theme::Theme::default();
@@ -211,7 +269,7 @@ pub fn draw(fb: &mut Framebuffer) {
         let Some(r) = rect(id) else { continue };
         if id == EDITOR {
             editorpane::draw(id, fb, r, focused == id);
-        } else if crate::termpane::is_open(id) {
+        } else if id == TRANSCRIPT && terminal_showing() {
             crate::termpane::draw(id, fb, r, focused == id);
         } else {
             textpane::draw(id, fb, r, focused == id);
@@ -222,6 +280,7 @@ pub fn draw(fb: &mut Framebuffer) {
     if let Some(r) = rect(MINIBUFFER) {
         let h = with(|s| s.scale).round().max(1.0) as u32;
         fb.fill_rect(Rect { x: r.x, y: r.y, w: r.w, h }, theme.status_bg);
+        draw_toggle(fb, r, with(|s| s.scale), &theme);
     }
     textpane::draw_overlay(fb);
 }

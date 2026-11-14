@@ -63,6 +63,11 @@ fn install_host_prims(interp: &mut scm::Interp) -> Result<(), scm::EmbedError> {
         app::set_pie_delay(val_num(args, 0).max(0.0) as u64);
         Ok(Val::Bool(false))
     })?;
+    interp.define_fn("%show-terminal", |args| {
+        app::show_terminal(!matches!(args.first(), Some(Val::Bool(false)) | None));
+        Ok(Val::Bool(false))
+    })?;
+    interp.define_fn("%terminal-showing?", |_| Ok(Val::Bool(app::terminal_showing())))?;
     interp.define_fn("%quit", |_| {
         app::request_quit();
         Ok(Val::Bool(false))
@@ -262,6 +267,15 @@ mod tests {
         assert_eq!(copied, 11, "the eleven definitions 00-base.scm says a host supplies");
     }
 
+    /// Where the strip's terminal icon is, after a draw.
+    fn with_icon() -> (f64, f64) {
+        let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
+        app::draw(&mut fb);
+        let m = app::rect(app::MINIBUFFER).unwrap();
+        // Right-aligned, 8 px in, 15 px square, centred on the strip.
+        ((m.x + m.w) as f64 - 15.0, m.y as f64 + m.h as f64 / 2.0)
+    }
+
     /// The program without its window: boot the shell over the three panes,
     /// type a form, send it, save the buffer, and draw.
     #[test]
@@ -336,8 +350,38 @@ mod tests {
         assert!(wait("sent-9"), "{:?}", crate::termpane::screen_text(app::TRANSCRIPT));
         let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
         app::draw(&mut fb);
+        // The strip's icon: drawn at the minibuffer's right end; toggling
+        // hides the terminal (the program runs on) and shows it again.
+        let icon = with_icon();
+        assert!(app::toggle_at(icon.0, icon.1), "the icon is where it was drawn");
+        s.call("(toggle-terminal)");
+        assert_eq!(app::kind_name(app::TRANSCRIPT), Some("text"), "hidden");
+        assert!(crate::termpane::is_open(app::TRANSCRIPT), "and still running");
+        s.call("(toggle-terminal)");
+        assert_eq!(app::kind_name(app::TRANSCRIPT), Some("term"), "shown again");
+        assert_eq!(app::typing(), Some(app::TRANSCRIPT));
         s.call("(term-close)");
         assert_eq!(app::kind_name(app::TRANSCRIPT), Some("text"));
+
+        // Menus: a quick right-click on the editor posts its sends; on the
+        // transcript, its own.
+        s.call("(focus-scene-editor)");
+        let menu_at = |s: &mut Session, id: u32| {
+            let r = app::rect(id).unwrap();
+            let (x, y) = (r.x as f64 + 40.0, r.y as f64 + 20.0);
+            s.menu_press(x, y, false);
+            s.menu_release(x, y);
+            let open = s.eval_to_string("(menu-open?)").unwrap();
+            let items = s.eval_to_string("(and *menu* (map car (%state-ref *menu* :items)))").unwrap_or_default();
+            s.call("(on-menu-cancel)");
+            (open, items)
+        };
+        let (open, items) = menu_at(&mut s, app::EDITOR);
+        assert_eq!(open, "#t", "the editor's menu opened");
+        assert!(items.contains("send defun"), "{items}");
+        let (open, items) = menu_at(&mut s, app::TRANSCRIPT);
+        assert_eq!(open, "#t");
+        assert!(items.contains("terminal"), "{items}");
 
         s.key("C-x");
         s.key("C-c");
