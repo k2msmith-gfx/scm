@@ -6,8 +6,9 @@
 ;## etc. in the editor"). Moved from the modeler's 13-outliner and unify.scm.
 
 ; What the HOST supplies, as FORWARD HOOKS — the modeler binds each (unify):
-;   *help-open*          reveal where show-keys prints (the REPL's dock)
-;   *help-append*        (text &opt style) a line of it
+;   *help-open*          reveal where show-keys prints (the REPL's dock); the
+;                        lines themselves go through *transcript-append*
+;                        (07-backend), as a send's do
 ;   *show-keys-extra*    sections that are not bindings: ((heading (k what) …) …)
 ;   *keybindings-words*  the C-h b page's title, and what it says about chords
 ;                        and bare keys: an alist of :title :chords
@@ -15,7 +16,6 @@
 ;   *editor-shown?*      is the editor on screen (so quitting a popup that
 ;                        opened it may hide it again)
 (define *help-open* (lambda () #f))
-(define *help-append* (lambda (text (style #f)) (display text) (newline)))
 (define *show-keys-extra* (lambda () '()))
 (define *keybindings-words* (lambda () '()))
 (define *editor-shown?* (lambda () #t))
@@ -48,32 +48,32 @@
   bound to ? (and f1). Pane-local maps (the REPL's editing keys) are
   grouped under their pane."
   (*help-open*)
-  (*help-append* "── key bindings ──────────────────────────" :accent)
+  (*transcript-append* "── key bindings ──────────────────────────" :accent)
   (let ()
-    (for-each (lambda (b) (*help-append* (string-append "  " (%key-column (car b)) " " (cadr b))))
+    (for-each (lambda (b) (*transcript-append* (string-append "  " (%key-column (car b)) " " (cadr b))))
               (keys-into *keymap* ""))
     (hash-table-walk *pane-keymaps*
       (lambda (id m)
         (unless (zero? (hash-table-size m))
-          (*help-append* (string-append "── pane " (%text (*pane-key* id)) " ──") :accent)
+          (*transcript-append* (string-append "── pane " (%text (*pane-key* id)) " ──") :accent)
           (for-each
             (lambda (b)
               (let* ((k (car b))
                      ;; *editor-key-labels* is 08-editor's hash table.
                      (lf (hash-table-ref/default *editor-key-labels* k #f))
                      (label (cond ((not lf) (cadr b)) ((string? lf) lf) (else (fn-label lf)))))
-                (*help-append* (string-append "  " (%key-column k) " " label) :dim)))
+                (*transcript-append* (string-append "  " (%key-column k) " " label) :dim)))
             (keys-into m "")))))
     ; What the HOST adds that is not a binding — the modeler's mouse
     ; gestures (*show-keys-extra*): (heading (key what) …) sections.
     (for-each
       (lambda (sec)
-        (*help-append* (car sec) :accent)
+        (*transcript-append* (car sec) :accent)
         (for-each
-          (lambda (g) (*help-append* (string-append "  " (%key-column (car g)) " " (cadr g)) :dim))
+          (lambda (g) (*transcript-append* (string-append "  " (%key-column (car g)) " " (cadr g)) :dim))
           (cdr sec)))
       (*show-keys-extra*))
-    (*help-append* "(bind-key \"key\" fn) rebinds — live." :dim)
+    (*transcript-append* "(bind-key \"key\" fn) rebinds — live." :dim)
     #f))
 
 (bind-key "S-/" 'show-keys)
