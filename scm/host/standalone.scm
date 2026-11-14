@@ -9,7 +9,8 @@
   (lambda (key)
     (case key
       ((:editor) 1)
-      ((:transcript :repl) 2)
+      ; The lower pane: the transcript, and the terminal when one runs (E5).
+      ((:transcript :repl :terminal) 2)
       ((:minibuffer) 3)
       (else #f))))
 (set! *pane-key*
@@ -64,6 +65,7 @@
 (bind-editor-pane-keys)
 (bind-editor-completion-keys)
 (bind-editor-keys :minibuffer)
+(bind-term-keys)
 (bind-key "C-x C-c" (lambda () (%quit)))
 
 ; ── The mouse's floor: a transcript scrolls ────────────────────────────────
@@ -79,4 +81,5 @@
 (define (edit-greeting)
   "What the transcript says when the editor opens."
   (*transcript-append* "edit — Scheme in this image. C-x C-f opens a file, C-x C-s saves," :dim)
-  (*transcript-append* "C-M-x / C-x C-e / C-c C-b send, C-h b lists every key, C-x C-c quits." :dim))
+  (*transcript-append* "C-M-x / C-x C-e / C-c C-b send, C-h b lists every key, C-x C-c quits." :dim)
+  (*transcript-append* "M-x term runs a program here instead; C-x o moves between it and the editor." :dim))

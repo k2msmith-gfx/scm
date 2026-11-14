@@ -208,6 +208,11 @@ impl Session {
     /// lets go of the keyboard. Answers whether anything took it.
     pub fn escape(&mut self) -> bool {
         let typing = app::typing();
+        // A terminal's program gets Escape, as every other key (D4): vi in a
+        // terminal needs it. C-x o is how the keyboard leaves.
+        if let Some(t) = typing.filter(|&t| crate::termpane::is_open(t)) {
+            return crate::termpane::key(t, "escape");
+        }
         if crate::textpane::overlay_active() {
             crate::textpane::clear_completions();
             self.call("(begin (editor-comp-cancel) (on-menu-cancel))");
@@ -300,6 +305,39 @@ mod tests {
         app::draw(&mut fb);
         let theme = crate::theme::Theme::default();
         assert!(fb.pixels.iter().filter(|&&p| p == theme.editor_bg).count() > 10_000, "the editor painted");
+
+        // E5: a program in the lower pane takes the keyboard; what is typed
+        // reaches it; C-x o goes back to the editor, and a buffer attached
+        // to the terminal sends its forms there.
+        s.call(r#"(term-open "/bin/sh")"#);
+        assert_eq!(app::typing(), Some(app::TRANSCRIPT));
+        assert_eq!(app::kind_name(app::TRANSCRIPT), Some("term"));
+        for c in "echo typed-$((2+3))".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("return");
+        let wait = |want: &str| {
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < std::time::Duration::from_secs(10) {
+                if crate::termpane::screen_text(app::TRANSCRIPT).iter().any(|l| l == want) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            false
+        };
+        assert!(wait("typed-5"), "{:?}", crate::termpane::screen_text(app::TRANSCRIPT));
+        s.key("C-x");
+        s.key("o");
+        assert_eq!(app::typing(), Some(app::EDITOR), "C-x o left the terminal");
+        s.call("(term-attach)");
+        s.call(r#"(%editor-set-text 1 "echo sent-$((3*3))")"#);
+        s.call("(eval-buffer)");
+        assert!(wait("sent-9"), "{:?}", crate::termpane::screen_text(app::TRANSCRIPT));
+        let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
+        app::draw(&mut fb);
+        s.call("(term-close)");
+        assert_eq!(app::kind_name(app::TRANSCRIPT), Some("text"));
 
         s.key("C-x");
         s.key("C-c");

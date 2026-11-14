@@ -169,7 +169,7 @@
   ;; answers a result — what the forms PRINTED, then the value or the error —
   ;; and what the forms printed goes to the transcript above the value, kept
   ;; when one of them raises — the REPL's own rule (08-editor).
-  (let* ((backend (*buffer-backend* (%editor-active-buffer (editor-pane-id))))
+  (let* ((backend (backend-of (%editor-active-buffer (editor-pane-id))))
          (r ((backend-op backend :eval) run))
          (printed (string-trim-right (%alist-ref r :output ""))))
     (define (failed msg)
@@ -220,7 +220,7 @@ itself on the echo line."
   C-c C-r / C-c C-b). RUN, when given, is what is evaluated in SRC's place
   (the buffer send marks each top-level form); SRC is what the transcript
   shows."
-  (cond ((*buffer-backend* (%editor-active-buffer (editor-pane-id))) (editor-send-local src label run))
+  (cond ((backend-of (%editor-active-buffer (editor-pane-id))) (editor-send-local src label run))
     (else (echo "sends work on .scm buffers only"))))
 
 ; ── What a form owns (docs/modeler-scene-buffers-plan.md, E1) ──────────────
@@ -243,7 +243,7 @@ itself on the echo line."
   added to. A failed run sweeps nothing and keeps both."
   ;; What OWNING means is the host's (*around-send*): the modeler gives what
   ;; the run made to the text at START, replacing what it made last time.
-  (if (not (*buffer-backend* (%editor-active-buffer (editor-pane-id))))
+  (if (not (backend-of (%editor-active-buffer (editor-pane-id))))
     (editor-send src label)
     (*around-send* (lambda () (editor-send src label)) start (+ start (string-length src)))))
 

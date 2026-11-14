@@ -80,4 +80,13 @@ answer from its live bindings."
 ; host does after a send has run (the modeler syncs the scene, refreshes the
 ; outliner, nudges live render).
 (define *buffer-backend* (lambda (buf) (in-process-backend)))
+
+; A buffer may be pointed at ANOTHER backend than the host's choice — a
+; terminal (13-term's term-attach). Every send, completion and describe asks
+; backend-of, which honours that first.
+(define *attached-backends* (make-hash-table equal?))
+
+(define (backend-of buf)
+  "BUF's backend: the one it was attached to, else the host's choice."
+  (or (hash-table-ref/default *attached-backends* buf #f) (*buffer-backend* buf)))
 (define *after-send* (lambda () #f))

@@ -4,6 +4,7 @@
 //! `edit::app` (the panes) and `edit::scm_binding::standalone` (the image).
 //!
 //!     edit [FILE …]                 open each file in a buffer
+//!                                   (M-x term runs a program in the lower pane)
 //!     edit --screenshot OUT [FILE]  draw one frame to OUT.png, no window
 //!
 //! `~/.config/edit/init.scm` is loaded at startup, after the shell, when it
@@ -89,6 +90,12 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    /// A terminal printed something, from its reader thread (E5).
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _wake: ()) {
+        app::mark_dirty();
+        self.redraw();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.display.is_some() {
             return;
@@ -245,8 +252,14 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let event_loop = EventLoop::new().expect("an event loop");
+    let event_loop = EventLoop::<()>::with_user_event().build().expect("an event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
+    // A terminal's output arrives on its reader thread; the window must be
+    // woken to draw it.
+    let proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    edit::termpane::set_waker(Box::new(move || {
+        let _ = proxy.lock().unwrap_or_else(|e| e.into_inner()).send_event(());
+    }));
     let mut app = App {
         session,
         display: None,

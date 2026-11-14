@@ -112,11 +112,14 @@ pub fn rect(id: u32) -> Option<Rect> {
     with(|s| s.rects.get(i).copied())
 }
 
-/// What a pane is, as `%pane-at` names it: "editor", or "text" for a
-/// transcript or the minibuffer.
+/// What a pane is, as `%pane-at` names it: "editor", "term" for the lower
+/// pane while it shows a terminal, or "text" for a transcript or the
+/// minibuffer.
 pub fn kind_name(id: u32) -> Option<&'static str> {
     match id {
         EDITOR => Some("editor"),
+        // The lower pane is the transcript until a terminal opens in it (E5).
+        TRANSCRIPT if crate::termpane::is_open(id) => Some("term"),
         TRANSCRIPT | MINIBUFFER => Some("text"),
         _ => None,
     }
@@ -208,6 +211,8 @@ pub fn draw(fb: &mut Framebuffer) {
         let Some(r) = rect(id) else { continue };
         if id == EDITOR {
             editorpane::draw(id, fb, r, focused == id);
+        } else if crate::termpane::is_open(id) {
+            crate::termpane::draw(id, fb, r, focused == id);
         } else {
             textpane::draw(id, fb, r, focused == id);
         }

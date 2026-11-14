@@ -3,4 +3,5 @@
 pub mod editorpane;
 pub mod framebuffer;
 pub mod text;
+pub mod termpane;
 pub mod textpane;

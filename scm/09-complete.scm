@@ -155,7 +155,7 @@
 NAME's full docstring into the transcript under a `── (doc NAME) ──` rule,
 its signature echoed — as the active buffer's backend answers them (this
 image's, for a .scm buffer). Says so, and answers #f, when there is none."
-  (define backend (*buffer-backend* (%editor-active-buffer (editor-pane-id))))
+  (define backend (backend-of (%editor-active-buffer (editor-pane-id))))
   (define doc-of (or (backend-op backend :doc) %doc-of))
   (define sig-of (or (backend-op backend :signature) signature-of))
   (if (not (sig-of name))
@@ -176,7 +176,7 @@ image's, for a .scm buffer). Says so, and answers #f, when there is none."
   (define tp (editor-text+point))
   (define at-point (editor-token-around (car tp) (cadr tp)))
   (define (head-name) (%text (or (%editor-head (editor-pane-id)) "")))
-  (define backend (*buffer-backend* (%editor-active-buffer (editor-pane-id))))
+  (define backend (backend-of (%editor-active-buffer (editor-pane-id))))
   (define sig-of (or (backend-op backend :signature) signature-of))
   ; A token with no doc (an argument, a number) defers to the form's head:
   ; point on `2` in (add-sphere :at [1 2|) describes add-sphere. (A Scheme

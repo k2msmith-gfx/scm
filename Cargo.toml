@@ -48,6 +48,10 @@ scm-text = { git = "https://github.com/k2msmith-gfx/scm.git", branch = "main" }
 # the framebuffer through softbuffer -- the modeler's two, at its versions.
 winit = "0.30"
 softbuffer = "0.4"
+# The terminal pane (E5): a VT emulator core (the screen grid, scrollback,
+# escape sequences) and the pseudo-terminal it runs a program in, with the
+# thread that reads it -- alacritty's terminal library, without its window.
+alacritty_terminal = "0.26"
 # THE VM, for `scm_binding` — the one file in this crate that names it
 # (`layering.rs`). The package is `schemers`; the library it builds is `scm`.
 schemers = { git = "https://github.com/k2msmith-gfx/scm.git", branch = "main" }

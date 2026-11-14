@@ -91,6 +91,8 @@ pub fn val_textv(args: &[scm::Val], i: usize) -> Vec<String> {
     }
     match args.get(i) {
         Some(scm::Val::List(items)) | Some(scm::Val::Vector(items)) => items.iter().map(one).collect(),
+        // '() is an empty list, not one empty string.
+        Some(scm::Val::Null) => Vec::new(),
         Some(v) => vec![one(v)],
         None => Vec::new(),
     }
@@ -156,6 +158,7 @@ mod clipboard;
 mod editor;
 mod menu;
 pub mod standalone;
+mod term;
 mod text;
 mod xref;
 
@@ -163,7 +166,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -183,6 +186,7 @@ pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Res
         .chain(menu::install(interp)?)
         .chain(clipboard::install(interp)?)
         .chain(breaks::install(interp)?)
+        .chain(term::install(interp)?)
     {
         installed(name);
     }

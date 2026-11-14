@@ -20,7 +20,7 @@ pub mod scm_binding;
 pub mod theme;
 pub mod widget;
 
-pub use widget::{editorpane, framebuffer, text, textpane};
+pub use widget::{editorpane, framebuffer, termpane, text, textpane};
 
 #[cfg(test)]
 mod layering;
