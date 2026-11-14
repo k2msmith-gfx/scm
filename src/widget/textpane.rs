@@ -1165,20 +1165,27 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
                 let row: String = line.chars().take(cols).collect();
                 if c.proportional {
                     // The leading marks on the mono grid; the rest — the
-                    // name — in the label face, on the same baseline.
-                    let split = row
+                    // name — in the label face, on the same baseline. The
+                    // name is cut to the pane by its OWN width, not the mono
+                    // column count, which would cut a narrower face short.
+                    let split = line
                         .char_indices()
-                        .find(|&(_, ch)| !matches!(ch, ' ' | '▸' | '▾' | '\u{E000}'))
-                        .map_or(row.len(), |(i, _)| i);
-                    let (marks, name) = row.split_at(split);
+                        .find(|&(_, ch)| !matches!(ch, ' ' | '▸' | '▾' | '\u{E000}'..='\u{E003}'))
+                        .map_or(line.len(), |(i, _)| i);
+                    let (marks, name) = line.split_at(split);
                     let x0 = rect.x as f32 + pad;
                     text::draw_mono_line(fb, x0, y, px, style.ink(&theme), marks);
                     let nx = x0 + marks.chars().count() as f32 * advance;
                     // A touch above the text size: Plex Sans reads smaller
                     // than a mono face at the same px (Kevin, 2026-11-13).
                     let lpx = px * PROPORTIONAL_SHARE;
+                    let room = rect.x as f32 + rect.w as f32 - pad - nx;
+                    let mut name = name.to_string();
+                    while !name.is_empty() && text::measure_label(lpx, &name) > room {
+                        name.pop();
+                    }
                     let ny = y + text::mono_ascent(px) - text::label_ascent(lpx);
-                    text::draw_label(fb, nx.round() as i32, ny.round() as i32, lpx, style.ink(&theme), 1.0, name);
+                    text::draw_label(fb, nx.round() as i32, ny.round() as i32, lpx, style.ink(&theme), 1.0, &name);
                 } else {
                     text::draw_mono_line(fb, rect.x as f32 + pad, y, px, style.ink(&theme), &row);
                 }

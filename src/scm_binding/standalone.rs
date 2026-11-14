@@ -647,7 +647,7 @@ mod tests {
             (0..n)
                 .map(|i| {
                     let t = s.eval_to_string(&format!("(%pane-row-text 4 {i})")).unwrap();
-                    t.trim_matches('"').replace('\u{E000}', "").split_whitespace().collect::<Vec<_>>().join(" ")
+                    t.trim_matches('"').replace(|c| app::is_icon_mark(c), "").split_whitespace().collect::<Vec<_>>().join(" ")
                 })
                 .collect()
         };
@@ -655,6 +655,11 @@ mod tests {
         let r = rows(&mut s);
         let base = std::path::Path::new(&root).file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(r, vec![format!("▾ {base}"), "▸ src".into(), "a.scm".into()], "folders first; target/ and *.log hidden");
+        // Each row's icon by kind: a folder, braces for source.
+        assert!(s.eval_to_string("(%pane-row-text 4 1)").unwrap().contains(app::FOLDER_MARK));
+        assert!(s.eval_to_string("(%pane-row-text 4 2)").unwrap().contains(app::CODE_MARK));
+        assert_eq!(s.eval_to_string(r#"(files-file-mark "x.PNG")"#).unwrap().trim_matches('"'), format!("{0}{0}", app::IMAGE_MARK));
+        assert_eq!(s.eval_to_string(r#"(files-file-mark "notes.txt")"#).unwrap().trim_matches('"'), format!("{0}{0}", app::FILE_MARK));
         // a.scm, the opened file, is the selection.
         assert_eq!(s.eval_to_string("(files-selected)").unwrap(), format!("\"{a}\""));
 

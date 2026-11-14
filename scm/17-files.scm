@@ -2,8 +2,9 @@
 ;## checkout the editor is working in (Kevin, 2026-11-13). Folders expand and
 ;## collapse; RET or a click opens a file as C-x C-f does (open-path); what
 ;## git ignores is hidden unless asked for; the tree follows the buffer on
-;## screen. The pane is a text pane in list layout; a folder row carries
-;## two FOLDER-MARK cells the host paints a folder icon over (edit's app.rs).
+;## screen. The pane is a text pane in list layout; each row carries two
+;## mark cells the host paints its icon over — a folder, braces for source,
+;## a picture, a page — and the host draws the indent guides (edit's app.rs).
 
 ; What the HOST supplies, as FORWARD HOOKS:
 ;   *files-pane*   the pane the tree shows in, or #f (the standalone's left
@@ -12,7 +13,29 @@
 (define *files-pane* (lambda () (*pane-id* :files)))
 (define *files-shown* (lambda (on) #f))
 
-(define folder-mark (string (integer->char #xE000) (integer->char #xE000)))
+(define (files-mark n) (string (integer->char n) (integer->char n)))
+(define folder-mark (files-mark #xE000))
+
+; Which icon a file shows, by its extension: source as braces, images as a
+; picture, the rest as a page (Kevin, 2026-11-14, after Zed's panel).
+(define *files-code-extensions*
+  '("scm" "ss" "sld" "guile" "janet" "lisp" "el" "rs" "py" "js" "ts" "c" "h"
+    "cpp" "nix" "toml" "json" "sh" "glsl" "wgsl" "lua" "go"))
+(define *files-image-extensions*
+  '("png" "jpg" "jpeg" "gif" "webp" "svg" "exr" "hdr" "tif" "tiff" "bmp"))
+
+(define (files-extension p)
+  (let ((b (files-base p)))
+    (let loop ((k (- (string-length b) 1)))
+      (cond ((<= k 0) "")
+            ((char=? (string-ref b k) #\.) (string-downcase (substring b (+ k 1) (string-length b))))
+            (else (loop (- k 1)))))))
+
+(define (files-file-mark p)
+  (let ((ext (files-extension p)))
+    (files-mark (cond ((member ext *files-code-extensions*) #xE001)
+                      ((member ext *files-image-extensions*) #xE002)
+                      (else #xE003)))))
 
 (define *files-root* #f)                          ; the directory at the top
 (define *files-open* (make-hash-table equal?))    ; expanded folder → #t
@@ -61,7 +84,7 @@
     ((path dir? depth)
       (string-append (make-string (* 2 depth) #\space)
                      (if dir? (if (hash-table-ref/default *files-open* path #f) "▾ " "▸ ") "  ")
-                     (if dir? (string-append folder-mark " ") "   ")
+                     (string-append (if dir? folder-mark (files-file-mark path)) " ")
                      (files-base path)))))
 
 (define (files-collect)
