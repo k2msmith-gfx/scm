@@ -161,7 +161,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -228,14 +228,16 @@ mod tests {
 
     /// The shell on a bare interpreter: loads with only what `00-base.scm`
     /// says a host supplies, and runs a key through the chains — a prefix
-    /// sequence, the typing-pane rule, an error landing in the echo — and a
-    /// menu, by keys and by a right-press through the role registry.
+    /// sequence, the typing-pane rule, an error landing in the echo — a
+    /// menu, by keys and by a right-press through the role registry, and the
+    /// minibuffer, from a prompt to its callback.
     #[test]
-    fn the_shell_runs_keys_and_menus_on_a_bare_interpreter() {
+    fn the_shell_runs_on_a_bare_interpreter() {
         let mut interp = scm::Interp::new().expect("interp");
         install(&mut interp, &mut |_| {}).expect("install");
         // What a host supplies (00-base.scm's list): ray's list and string
-        // helpers, the focus prims, the pane under a point and a clock.
+        // helpers, the focus prims, the pane under a point, a clock, and
+        // the kernel's typing hold.
         eval(&mut interp, r#"
             (import (srfi 1))
             (define (list-sort less? xs)
@@ -259,7 +261,9 @@ mod tests {
             (define (%focused-pane) 0)
             (define (%typing-pane) *typing*)
             (define (%pane-at x y) (list 0 "text"))
-            (define (%os-clock) 0)"#);
+            (define (%os-clock) 0)
+            (define (%hold-typing id) (set! *typing* id))
+            (define (%release-typing) (set! *typing* #f))"#);
         for name in SHELL {
             let path = shell_dir().join(format!("{name}.scm"));
             let src = std::fs::read_to_string(&path).expect("read");
@@ -304,6 +308,22 @@ mod tests {
         // A role the host never named opens nothing.
         eval(&mut interp, r#"(set! *pane-role* (lambda (id kind) :elsewhere))"#);
         assert_eq!(eval(&mut interp, "(on-menu-press 5 5)"), Val::Bool(false));
+        // The minibuffer: a prompt holds typing, text arrives through
+        // on-text, return hands it to the callback, C-g clears the line, and
+        // echo lands in the minibuffer's pane.
+        eval(&mut interp, r#"
+            (set! *pane-id* (lambda (key) (and (eq? key :minibuffer) 7)))
+            (bind-editor-keys :minibuffer)
+            (define answer #f)
+            (read-minibuffer "Name: " (lambda (s) (set! answer s)))"#);
+        assert_eq!(eval(&mut interp, "*typing*"), Val::Int(7), "the prompt holds typing");
+        eval(&mut interp, r#"(set! %focused-pane (lambda () 7))
+                             (on-text "x") (on-key "C-g")
+                             (on-text "a") (on-text "b") (on-key "return")"#);
+        assert_eq!(eval(&mut interp, "answer"), Val::Str("ab".into()));
+        assert_eq!(eval(&mut interp, "*typing*"), Val::Bool(false), "submitting released it");
+        eval(&mut interp, r#"(echo "saved " 3 " files")"#);
+        assert_eq!(eval(&mut interp, "(%pane-row-text 7 0)"), Val::Str("saved 3 files".into()));
         let keys = eval(&mut interp, "(describe-keys)");
         let Val::Str(keys) = keys else { panic!("{keys:?}") };
         assert!(keys.contains("C-x C-f — "), "{keys}");

@@ -6,10 +6,12 @@
 ;## What the shell leans on from the image beneath it, besides scm's own:
 ;## `list-sort`, `string-split`, `string-prefix?`, `filter`, `append-map` (ray's
 ;## prelude, which the modeler installs first; a standalone host must supply
-;## them — E4; `the_shell_runs_keys_and_menus_on_a_bare_interpreter` holds the
+;## them — E4; `the_shell_runs_on_a_bare_interpreter` holds the
 ;## list) and the kernel prims `%focused-pane`, `%typing-pane`, `%pane-at` and
-;## `%focus-pane` (the pane registry), `%os-clock`, and `%set-pie-delay` (the
-;## marking menu's hold timer is the host's event loop).
+;## `%focus-pane` (the pane registry), `%os-clock`, `%set-pie-delay` (the
+;## marking menu's hold timer is the host's event loop), `%hold-typing` /
+;## `%release-typing` (which pane has the keyboard), and for file completion
+;## `%os-dir` / `%os-stat`.
 
 ;; Hash tables by their SRFI-125 names — the keymaps are tables, made as
 ;; this loads, before the host's own files import it.
