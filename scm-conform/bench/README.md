@@ -28,6 +28,12 @@ table of `match`, `let-syntax` and a global macro against the `cond`,
 numbers before and after S29. The suite pins the same thing by counting,
 not timing, in `scm/tests/local_macros.rs`.
 
+**Against other implementations**, by hand: `vs-steel/run.py` races Steel
+on ten small programs; `vs-others/run.py` races Chibi, Guile, Steel and
+Racket CS on the same programs scaled up, each timing itself so startup
+and compilation stay outside the number. docs/vs-steel.md and
+docs/vs-others.md have the results.
+
 ## Outside the declared subset
 
 | program | needs | why not |
