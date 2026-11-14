@@ -8,7 +8,7 @@
 ;## (E4); `the_shell_runs_on_a_bare_interpreter` holds it:
 ;##   from ray's prelude   list-sort, string-split, string-contains,
 ;##                        string-prefix?, string-suffix?, string-trim-both,
-;##                        string-pad-right
+;##                        string-trim-right, string-pad-right
 ;##   from the modeler     spit, slurp
 ;##   kernel prims         %focused-pane, %typing-pane, %focus-pane, %pane-at,
 ;##                        %pane-rect (the pane registry); %hold-typing,

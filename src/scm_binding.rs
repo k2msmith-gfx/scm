@@ -161,7 +161,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -270,6 +270,9 @@ mod tests {
                 (cond ((and (< a b) (char-whitespace? (string-ref s a))) (loop (+ a 1) b))
                       ((and (< a b) (char-whitespace? (string-ref s (- b 1)))) (loop a (- b 1)))
                       (else (substring s a b)))))
+            (define (string-trim-right s)
+              (let loop ((b (string-length s)))
+                (if (and (> b 0) (char-whitespace? (string-ref s (- b 1)))) (loop (- b 1)) (substring s 0 b))))
             (define *typing* #f)
             (define (%focused-pane) 0)
             (define (%typing-pane) *typing*)
@@ -378,6 +381,17 @@ mod tests {
         let doc = eval(&mut interp, "(keybindings-markdown)");
         let Val::Str(doc) = doc else { panic!("{doc:?}") };
         assert!(doc.starts_with("# Key bindings") && doc.contains("`C-x C-f`"), "{doc}");
+        // A send: C-M-x on the second form evaluates it through the
+        // buffer's backend, and its value lands in the transcript.
+        eval(&mut interp, r#"
+            (set! helped '())
+            (visit-buffer (buffer-by-name "*scratch*"))
+            (%editor-set-text 3 "(define (sq x) (* x x))\n(sq 7)")
+            (%editor-goto-line 3 0) (eval-defun)
+            (%editor-goto-line 3 1) (eval-defun)"#);
+        let sent = eval(&mut interp, "(apply string-append helped)");
+        let Val::Str(sent) = sent else { panic!("{sent:?}") };
+        assert!(sent.contains(";; defun: (sq 7)") && sent.contains("=> 49"), "{sent}");
         // The in-process backend answers a RESULT: what the forms printed,
         // the value, or an error as data rather than an unwind.
         eval(&mut interp, r#"(define r (in-process-eval "(display 1) (+ 2 3)"))

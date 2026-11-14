@@ -399,6 +399,9 @@ acts only while the editor holds typing. Call it once the pane exists."
         (%when-typing
           (lambda () (if (positive? (%editor-undo (editor-pane-id))) #f (echo "nothing to undo"))))
         "editor-undo")))
+  ; C-M-x is one chord — safe pane-local (08-sends binds the C-x/C-c sends
+  ; globally, with a focus guard).
+  (bind-key "C-M-x" 'eval-defun :editor)
   :editor)
 
 (define (set-editor-vi on)
