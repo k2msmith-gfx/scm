@@ -262,6 +262,28 @@ impl Session {
         false
     }
 
+    /// Deliver the answers async sends are owed — what the window does when
+    /// a connection's reader wakes it.
+    pub fn poll(&mut self) {
+        self.call("(remote-poll)");
+    }
+
+    /// Poll until every async send has its answer, for at most `secs` —
+    /// what a test does instead of a window's loop.
+    pub fn settle(&mut self, secs: f64) -> bool {
+        let t0 = std::time::Instant::now();
+        loop {
+            self.poll();
+            if self.eval_to_string("(zero? (hash-table-size *remote-callbacks*))").as_deref() == Ok("#t") {
+                return true;
+            }
+            if t0.elapsed().as_secs_f64() > secs {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// The value of `src`, written — for tests.
     pub fn eval_to_string(&mut self, src: &str) -> Result<String, String> {
         let v = self.interp.eval(src).map_err(|e| e.to_string())?;
@@ -542,6 +564,7 @@ mod tests {
             eprintln!("scm is not on the PATH: the separate-process half skipped");
         } else {
             s.call("(%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)");
+            assert!(s.settle(10.0), "scm answers");
             let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
             assert!(t.iter().any(|l| l == "=> 27"), "{t:?}");
             assert_eq!(s.eval_to_string("(%env-ref 'cube #f)").unwrap(), "#f", "not in the editor's image");

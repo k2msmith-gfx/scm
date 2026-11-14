@@ -95,10 +95,14 @@ impl App {
 }
 
 impl ApplicationHandler for App {
-    /// A terminal printed something, from its reader thread (E5).
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _wake: ()) {
+    /// A terminal printed something, or a remote Scheme answered an async
+    /// send — from a reader thread (`edit::wake`): deliver the answers,
+    /// then redraw.
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _wake: ()) {
+        self.session.poll();
         app::mark_dirty();
         self.redraw();
+        self.settle(event_loop);
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -305,10 +309,10 @@ fn main() {
     };
     let event_loop = EventLoop::<()>::with_user_event().build().expect("an event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
-    // A terminal's output arrives on its reader thread; the window must be
-    // woken to draw it.
+    // A terminal's output, and a remote Scheme's answers, arrive on reader
+    // threads; the window must be woken to draw and deliver them.
     let proxy = std::sync::Mutex::new(event_loop.create_proxy());
-    edit::termpane::set_waker(Box::new(move || {
+    edit::wake::set_waker(Box::new(move || {
         let _ = proxy.lock().unwrap_or_else(|e| e.into_inner()).send_event(());
     }));
     let mut app = App {

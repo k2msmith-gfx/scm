@@ -29,7 +29,9 @@
 
 (define (repl-command line backend eval-print)
   "Run a comma LINE at an scm REPL: BACKEND is where the REPL evaluates,
-  EVAL-PRINT what evaluates source there and prints the answer."
+  EVAL-PRINT what evaluates source there and prints the answer — given an
+  optional THEN, run once the answer has printed (it may come later, from
+  another process)."
   (let* ((body (string-trim-both (substring (string-trim-both line) 1 (string-length (string-trim-both line)))))
          (sp (string-contains body " "))
          (word (if sp (substring body 0 sp) body))
@@ -62,8 +64,11 @@
         ((time)
           (needs "an EXPR")
           (unless (string=? arg "")
-            (let* ((t0 (%os-clock)) (r (eval-print arg)) (secs (- (%os-clock) t0)))
-              (*transcript-append* (string-append ";; " (number->string (/ (round (* secs 100000)) 100000.0)) " s") :dim))))
+            (let ((t0 (%os-clock)))
+              (eval-print arg
+                (lambda ()
+                  (let ((secs (- (%os-clock) t0)))
+                    (*transcript-append* (string-append ";; " (number->string (/ (round (* secs 100000)) 100000.0)) " s") :dim)))))))
         ((expand) (needs "a FORM") (unless (string=? arg "") (eval-print (string-append "(macroexpand '" arg ")"))))
         ((expand1) (needs "a FORM") (unless (string=? arg "") (eval-print (string-append "(macroexpand-1 '" arg ")"))))
         ((load) (needs "a FILE") (unless (string=? arg "") (eval-print (string-append "(load " (%written (expand-home arg)) ")"))))

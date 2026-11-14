@@ -11,14 +11,14 @@
 //!
 //! Each terminal is keyed by the PANE that shows it, like every widget here.
 //! The registry is the UI thread's; the reader thread touches only the
-//! shared grid, and wakes the host through [`set_waker`] — a pane's dirty
+//! shared grid, and wakes the host through `crate::wake` — a pane's dirty
 //! flag is the UI thread's, so a terminal that printed something must ask
 //! the window to come round, not set the flag itself.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -36,18 +36,10 @@ use crate::text;
 const PAD: f32 = 6.0;
 
 /// How the host is told a terminal has something new to show — from the
-/// reader thread, so it must reach the window's event loop (winit's proxy).
-static WAKER: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
-
-/// Install the host's wake-up. The first one stays.
-pub fn set_waker(wake: Box<dyn Fn() + Send + Sync>) {
-    let _ = WAKER.set(wake);
-}
-
+/// reader thread, so it must reach the window's event loop: the crate's one
+/// waker (`crate::wake`), which remote connections share.
 fn wake() {
-    if let Some(w) = WAKER.get() {
-        w();
-    }
+    crate::wake::wake();
 }
 
 /// What the reader thread tells us: new output, an answer the terminal owes

@@ -18,6 +18,7 @@ pub mod keys;
 pub mod language;
 pub mod scm_binding;
 pub mod theme;
+pub mod wake;
 pub mod widget;
 
 pub use widget::{editorpane, framebuffer, termpane, text, textpane};

@@ -44,35 +44,72 @@ a buffer sending to it is set to."
 
 (define-scheme! "scm" (lambda () *remote-program*) (lambda () '()) "scheme")
 
+(define (remote-result r)
+  ; The wire's answer (%remote-eval / %remote-poll) as a backend RESULT.
+  ; :value is the printed value — the live one is in the other process —
+  ; and truthy, so the transcript shows it.
+  (if (eq? (%alist-ref r :status #f) 'ok)
+    (list (cons :status 'ok)
+          (cons :value (%alist-ref r :value ""))
+          (cons :printed (%alist-ref r :value ""))
+          (cons :output (%alist-ref r :output ""))
+          (cons :secs 0))
+    (list (cons :status 'error)
+          (cons :message (string-append
+                           (%alist-ref r :message "")
+                           (if (%alist-ref r :host-stopped #f) "  (stopped)" "")))
+          (cons :output (%alist-ref r :output ""))
+          (cons :frames (map remote-frame (%alist-ref r :backtrace '()))))))
+
+(define (failed-result e)
+  (list (cons :status 'error)
+        (cons :message (if (string? e) e (*show-value* e)))
+        (cons :output "")))
+
+; ── Async sends (SLIME's model) ────────────────────────────────────────────
+; A send to another process does not wait: :eval-async returns at once, and
+; the answer arrives later — the connection's reader thread queues it and
+; wakes the host, whose loop calls (remote-poll), which hands each answer to
+; the callback its send left here. The window stays live while a form runs.
+(define *remote-callbacks* (make-hash-table equal?))   ; (conn . request-id) → k
+
+(define (remote-poll)
+  "Deliver every answer an async send is owed: call each send's callback
+with its RESULT. The host calls this when a connection wakes it."
+  (for-each
+    (lambda (row)
+      (match row
+        ((conn rid r)
+          (let ((k (hash-table-ref/default *remote-callbacks* (cons conn rid) #f)))
+            (hash-table-delete! *remote-callbacks* (cons conn rid))
+            (when k (k (remote-result r)))))))
+    (%remote-poll))
+  #f)
+
 (define (remote-backend conn (label "scm"))
   "A backend that asks the image at connection CONN — scm's, or anything
 that speaks its protocol (Guile's serve.scm, 15-guile): sends evaluate
 there, completion and docs answer from its live bindings, and M-. stays
-with this editor's index of the files. LABEL names it."
-  (define (describe name) (guard (e (#t #f)) (%remote-describe conn name)))
+with this editor's index of the files. LABEL names it.
+
+A send is ASYNC (:eval-async): it returns at once and its answer arrives
+through remote-poll, so the window stays live. While a send is running,
+completion and describe answer nothing rather than queue behind it — the
+server does one thing at a time. :eval still waits, for the commands that
+need a value now."
+  (define (idle?) (zero? (%remote-running conn)))
+  (define (describe name) (and (idle?) (guard (e (#t #f)) (%remote-describe conn name))))
   (list (cons :name (string-append label " at " (or (%remote-address conn) "?")))
         (cons :conn conn)
         (cons :eval
               (lambda (src)
-                (guard (e (#t (list (cons :status 'error)
-                                    (cons :message (if (string? e) e (*show-value* e)))
-                                    (cons :output ""))))
-                  (let ((r (%remote-eval conn src #f *remote-timeout*)))
-                    (if (eq? (%alist-ref r :status #f) 'ok)
-                      ; :value is the printed value — the live one is in
-                      ; the other process; truthy, so the transcript shows it.
-                      (list (cons :status 'ok)
-                            (cons :value (%alist-ref r :value ""))
-                            (cons :printed (%alist-ref r :value ""))
-                            (cons :output (%alist-ref r :output ""))
-                            (cons :secs 0))
-                      (list (cons :status 'error)
-                            (cons :message (string-append
-                                             (%alist-ref r :message "")
-                                             (if (%alist-ref r :host-stopped #f) "  (stopped)" "")))
-                            (cons :output (%alist-ref r :output ""))
-                            (cons :frames (map remote-frame (%alist-ref r :backtrace '())))))))))
-        (cons :complete (lambda (prefix) (guard (e (#t '())) (%remote-complete conn prefix))))
+                (guard (e (#t (failed-result e)))
+                  (remote-result (%remote-eval conn src #f *remote-timeout*)))))
+        (cons :eval-async
+              (lambda (src k)
+                (guard (e (#t (k (failed-result e))))
+                  (hash-table-set! *remote-callbacks* (cons conn (%remote-eval-async conn src #f)) k))))
+        (cons :complete (lambda (prefix) (if (idle?) (guard (e (#t '())) (%remote-complete conn prefix)) '())))
         (cons :doc (lambda (name) (let ((d (describe name))) (and d (%alist-ref d :doc #f)))))
         (cons :signature (lambda (name) (let ((d (describe name))) (and d (%alist-ref d :signature #f)))))
         (cons :definition-sites (lambda (name) (definition-sites name)))))
@@ -176,5 +213,9 @@ asks nothing."
     (echo "disconnected")))
 
 (define (remote-interrupt)
-  "Stop what the connected image is evaluating."
-  (when *remote* (%remote-interrupt *remote*)))
+  "Stop what the buffer's other process is evaluating — a send that runs
+  away. Its answer comes back marked (stopped); the process lives on."
+  (let ((b (backend-of (%editor-active-buffer (editor-pane-id)))))
+    (cond ((and b (%alist-ref b :conn #f)) => (lambda (conn) (%remote-interrupt conn) (echo "interrupted")))
+          (*remote* (%remote-interrupt *remote*) (echo "interrupted"))
+          (else (echo "nothing running elsewhere to interrupt")))))

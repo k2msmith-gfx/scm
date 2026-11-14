@@ -165,13 +165,27 @@
   never evaluated, nine checks in `scene_editor` read as broken sends, and
   the scene they were sent to was fine."
   (*transcript-append* (string-append ";; " label ": " (send-shown src)) :accent)
-  ;; Through the buffer's BACKEND (edit/scm/07-backend.scm): this image's
-  ;; answers a result — what the forms PRINTED, then the value or the error —
-  ;; and what the forms printed goes to the transcript above the value, kept
+  ;; Through the buffer's BACKEND (edit/scm/07-backend.scm). One in another
+  ;; process answers LATER (:eval-async, 14-remote): the send returns at
+  ;; once and send-answer runs when the answer comes, so the window stays
+  ;; live while the form runs. This image's answers now.
+  (let ((backend (backend-of (%editor-active-buffer (editor-pane-id)))))
+    (cond ((backend-op backend :eval-async)
+            => (lambda (eval-async)
+                 (echo label ": running in " (%alist-ref backend :name "another process")
+                       " — M-x remote-interrupt stops it")
+                 (eval-async run (lambda (r) (send-answer label src r)))
+                 #f))
+          (else (send-answer label src ((backend-op backend :eval) run))))))
+
+(define (send-answer label src r)
+  "Show a send's RESULT R: what the forms printed, then the value or the
+  error — the error also in the echo, with the calls it raised in kept for
+  C-h e — and the host's *after-send* for one that succeeded. Answers the
+  value."
+  ;; What the forms printed goes to the transcript above the value, kept
   ;; when one of them raises — the REPL's own rule (08-editor).
-  (let* ((backend (backend-of (%editor-active-buffer (editor-pane-id))))
-         (r ((backend-op backend :eval) run))
-         (printed (string-trim-right (%alist-ref r :output ""))))
+  (let ((printed (string-trim-right (%alist-ref r :output ""))))
     (define (failed msg)
       (set! *send-failed* #t)
       (*transcript-append* (string-append "error: " msg) :error)

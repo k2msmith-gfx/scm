@@ -193,11 +193,9 @@ the shell's own (edit/scm/)?"
   (set! *focus-held* #t)
   (edit-start 2 (repl-prompt) repl-submit :history (lambda () *repl-history*)))
 
-(define (repl-eval-print src)
-  "Evaluate SRC where the REPL does and print what it printed, then its
-  value or its error. Answers the result."
-  (let* ((r ((backend-op (repl-backend) :eval) src))
-         (printed (string-trim-right (%alist-ref r :output ""))))
+(define (repl-print src r)
+  ; What a REPL line printed, then its value or its error.
+  (let ((printed (string-trim-right (%alist-ref r :output ""))))
     (unless (string=? printed "") (*transcript-append* printed))
     (if (eq? (%alist-ref r :status #f) 'ok)
       (let ((v (%alist-ref r :printed "")))
@@ -205,8 +203,19 @@ the shell's own (edit/scm/)?"
           (*transcript-append* (string-append "=> " v) :dim)))
       (begin
         (*transcript-append* (string-append "error: " (%alist-ref r :message "")) :error)
-        (note-send-error! "repl" src (%alist-ref r :message "") (%alist-ref r :frames '()))))
-    r))
+        (note-send-error! "repl" src (%alist-ref r :message "") (%alist-ref r :frames '()))))))
+
+(define (repl-eval-print src (then #f))
+  "Evaluate SRC where the REPL does and print what it printed, then its
+  value or its error; THEN, when given, runs after. In another process the
+  line answers LATER (the backend's :eval-async), so the prompt is back at
+  once and the window stays live while it runs."
+  (let ((b (repl-backend)))
+    (cond ((backend-op b :eval-async)
+            => (lambda (eval-async)
+                 (eval-async src (lambda (r) (repl-print src r) (when then (then))))))
+          (else (repl-print src ((backend-op b :eval) src))
+                (when then (then))))))
 
 (define (repl-submit line)
   (let ((src (string-append *repl-pending* line)))
