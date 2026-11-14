@@ -155,6 +155,18 @@ mod editor;
 mod text;
 mod xref;
 
+/// **The editor's shell, in Scheme** (E3): `edit/scm/`, in load order. A host
+/// evaluates these after installing the prims and before its own prelude,
+/// so its files can bind the shell's hooks and add to its chains — never the
+/// other way round.
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap"];
+
+/// Where [`SHELL`]'s files are: read at boot from the tree this binary was
+/// built from, as the modeler's own prelude is.
+pub fn shell_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scm")
+}
+
 /// Install every editor prim into `interp`, telling `installed` each name —
 /// the modeler records them, so its prelude can unwrap the array records
 /// it passes (`99-scheme-only.scm`, `%prim-names`).
@@ -204,5 +216,65 @@ mod tests {
         let Val::List(sites) = eval(&mut interp, r#"(%xref-sites "foo")"#) else { panic!("a list") };
         let Some(Val::List(site)) = sites.first() else { panic!("one site: {sites:?}") };
         assert_eq!(site.get(1), Some(&Val::Int(0)), "line 0");
+    }
+
+    /// The shell on a bare interpreter: loads with only what `00-base.scm`
+    /// says a host supplies, and runs a key through the chains — a prefix
+    /// sequence, the typing-pane rule, and an error landing in the echo.
+    #[test]
+    fn the_shell_runs_keys_on_a_bare_interpreter() {
+        let mut interp = scm::Interp::new().expect("interp");
+        install(&mut interp, &mut |_| {}).expect("install");
+        // What a host supplies (00-base.scm's list): ray's list and string
+        // helpers, and the focus prims.
+        eval(&mut interp, r#"
+            (import (srfi 1))
+            (define (list-sort less? xs)
+              (let loop ((xs xs) (out '()))
+                (if (null? xs) out
+                    (loop (cdr xs)
+                          (let ins ((ys out))
+                            (cond ((null? ys) (list (car xs)))
+                                  ((less? (car xs) (car ys)) (cons (car xs) ys))
+                                  (else (cons (car ys) (ins (cdr ys))))))))))
+            (define (string-split s d)
+              (let loop ((i 0) (start 0) (acc '()))
+                (cond ((= i (string-length s)) (reverse (cons (substring s start i) acc)))
+                      ((char=? (string-ref s i) (string-ref d 0))
+                       (loop (+ i 1) (+ i 1) (cons (substring s start i) acc)))
+                      (else (loop (+ i 1) start acc)))))
+            (define (string-prefix? p s)
+              (and (<= (string-length p) (string-length s))
+                   (string=? p (substring s 0 (string-length p)))))
+            (define *typing* #f)
+            (define (%focused-pane) 0)
+            (define (%typing-pane) *typing*)"#);
+        for name in SHELL {
+            let path = shell_dir().join(format!("{name}.scm"));
+            let src = std::fs::read_to_string(&path).expect("read");
+            interp.eval_named(&src, &path.to_string_lossy()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        eval(&mut interp, r#"
+            (define ran '())
+            (define echoed #f)
+            (set! *echo* (lambda (m) (set! echoed m)))
+            (bind-key "C-x C-f" (lambda () (set! ran (cons 'find-file ran))))
+            (bind-key "q" (lambda () (set! ran (cons 'q ran))))
+            (bind-key "C-c" (lambda () (raise "nothing to cancel")))"#);
+        // A prefix arms on C-x and runs on C-f.
+        eval(&mut interp, r#"(on-key "C-x") (on-key "C-f")"#);
+        assert_eq!(eval(&mut interp, "ran"), Val::List(vec![Val::Sym("find-file".into())]));
+        // While a pane takes typing, a bare key is text, not a command...
+        eval(&mut interp, r#"(set! *typing* 0) (on-key "q")"#);
+        assert_eq!(eval(&mut interp, "(length ran)"), Val::Int(1));
+        // ...and a chorded one still reaches the map.
+        eval(&mut interp, r#"(set! *typing* #f) (on-key "q")"#);
+        assert_eq!(eval(&mut interp, "(car ran)"), Val::Sym("q".into()));
+        // A command that raises reports through the echo, not the stderr log.
+        eval(&mut interp, r#"(on-key "C-c")"#);
+        assert_eq!(eval(&mut interp, "echoed"), Val::Str("nothing to cancel".into()));
+        let keys = eval(&mut interp, "(describe-keys)");
+        let Val::Str(keys) = keys else { panic!("{keys:?}") };
+        assert!(keys.contains("C-x C-f — "), "{keys}");
     }
 }
