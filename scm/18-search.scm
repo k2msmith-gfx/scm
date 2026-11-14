@@ -9,7 +9,8 @@
 ;## letters, as in the replace: n next, p previous, r replace one by one,
 ;## a replace all, q done; any
 ;## other key or a click ends that and does what it always does (Kevin,
-;## 2026-11-14: "show the single key commands", not chords).
+;## 2026-11-14: "show the single key commands", not chords). In vi's normal
+;## mode the same search is / and ?, n and N repeat it, and :s substitutes.
 
 (define *search-last* #f)       ; the last search string
 (define *replace-last* #f)      ; the last replacement
@@ -52,7 +53,7 @@
     ((l s e)
       (%pane-append (mini-id) "accent"
         (string-append (if wrapped "Wrapped: " "") "“" *search-last* "” line " (number->string (+ l 1))
-                       "   [n] next   [p] previous   [r] replace   [a] replace all   [q] done")))
+                       "   [n] next   " (if (vi-normal?) "[N]" "[p]") " previous   [r] replace   [a] replace all   [q] done")))
     (_ #f)))
 
 (define (search-done)
@@ -89,7 +90,7 @@
   ; A key while the search's single keys are live: #f for one it does not
   ; know, which ends the mode and goes on to do what it always does.
   (cond ((member k '("n" "C-s" "s-g")) (search-step *search-last* #t) #t)
-        ((member k '("p" "C-r" "S-s-g")) (search-step *search-last* #f) #t)
+        ((member k '("p" "N" "C-r" "S-s-g")) (search-step *search-last* #f) #t)
         ((equal? k "r") (search-replace) #t)
         ((equal? k "a") (search-replace-all) #t)
         ((member k '("q" "return" "C-g" "escape")) (search-done) #t)
@@ -102,8 +103,10 @@
 
 (define (or-last s last) (if (and (string=? s "") last) last s))
 
-(define (search-prompt forward)
-  (read-minibuffer (with-default (if forward "Search" "Search backward") *search-last*)
+(define (search-prompt forward (vi #f))
+  (read-minibuffer (if vi
+                     (string-append (if forward "/" "?") (if *search-last* (string-append " (" *search-last* ") ") ""))
+                     (with-default (if forward "Search" "Search backward") *search-last*))
                    (lambda (s)
                      (let ((s (or-last s *search-last*)))
                        (unless (string=? s "") (search-step s forward))))))
@@ -298,6 +301,60 @@
   (cond (*query* (query-answer :quit) #t)
         (*search-mode* (search-done) #t)
         (else #f)))
+
+; ── vi: / ? n N and :s ──────────────────────────────────────────────────────
+; In vi's normal mode, / and ? open this search rather than the widget's own
+; (which shows nothing but the modeline), and n / N repeat it — the same
+; prompt, the same single keys on a match.
+
+(define (vi-normal?)
+  (and (editor-typing?) (equal? (%editor-vi-mode (editor-pane-id)) "NORMAL")))
+
+; Above the editor's own text handler (09-complete's, 30), which takes every
+; key the editor is typed.
+(add-handler *text-handlers* 35 :vi-search
+  (lambda (s)
+    (and (vi-normal?)
+         (cond ((equal? s "/") (search-prompt #t #t) #t)
+               ((equal? s "?") (search-prompt #f #t) #t)
+               ((and (equal? s "n") *search-last*) (search-step *search-last* #t) #t)
+               ((and (equal? s "N") *search-last*) (search-step *search-last* #f) #t)
+               (else #f)))))
+
+(define (ex-substitute line)
+  "vi's :s — `s/OLD/NEW/` on this line, `%s/OLD/NEW/` the whole buffer;
+  flag g is how it always works here (every match in the range, not the
+  first per line), and flag c steps through them asking, as M-% does. Any
+  character after the s may stand for the /. #f when LINE is not a :s."
+  (let* ((whole (string-prefix? "%" line))
+         (rest (if whole (substring line 1 (string-length line)) line)))
+    (and (>= (string-length rest) 2)
+         (char=? (string-ref rest 0) #\s)
+         (let* ((delim (string (string-ref rest 1)))
+                (parts (string-split (substring rest 2 (string-length rest)) delim))
+                (from (if (pair? parts) (car parts) ""))
+                (to (if (and (pair? parts) (pair? (cdr parts))) (cadr parts) ""))
+                (flags (if (and (pair? parts) (pair? (cdr parts)) (pair? (cddr parts))) (caddr parts) "")))
+           (cond
+             ((string=? from "") (echo ":s needs something to replace — :%s/old/new/") #t)
+             (else
+               (set! *search-last* from)
+               (set! *replace-last* to)
+               (match (%editor-cursor (editor-pane-id))
+                 ((cl ci)
+                   (cond
+                     ((string-contains flags "c")
+                       ; Step through, from the range's start.
+                       (%editor-goto-line (editor-pane-id) (if whole 0 cl))
+                       (query-replace-run from to))
+                     (else
+                       (let ((n (%editor-replace-all (editor-pane-id) from to (search-fold? from)
+                                                     (if whole 0 cl) 0
+                                                     (if whole 1000000000 (+ cl 1)) 0)))
+                         (echo "replaced " n (if (= n 1) " match" " matches")
+                               (if whole "" " on this line"))))))
+                 (_ #f))
+               #t))))))
 
 ; ── Keys and menu ──────────────────────────────────────────────────────────
 ; Global, acting only while the editor has the keys (as M-g n does), so a

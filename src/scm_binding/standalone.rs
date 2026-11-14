@@ -864,7 +864,8 @@ mod tests {
         s.key("C-s");
         typed(&mut s, "beta");
         assert_eq!(cur(), (0, 10), "first beta selected, cursor at its end");
-        for k in ["[n] next", "[p] previous", "[r] replace", "[a] replace all", "[q] done"] {
+        // (previous is [N] in vi's normal mode, [p] otherwise)
+        for k in ["[n] next", "] previous", "[r] replace", "[a] replace all", "[q] done"] {
             assert!(mini().contains(k), "the prompt names {k}: {}", mini());
         }
         s.text("n");
@@ -961,5 +962,58 @@ mod tests {
         typed(&mut s, "x");
         typed(&mut s, "w");
         assert_eq!(text(&mut s), "w w\nw w");
+    }
+
+    /// vi's normal mode: / and ? open the same search, n and N repeat it,
+    /// and :s / :%s substitute — c stepping through as M-% does.
+    #[test]
+    fn vi_slash_search_and_substitute() {
+        app::resize(1000, 700, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        s.call("(focus-scene-editor) (%editor-set-vi 1 1)");
+        let set = |s: &mut Session, text: &str| {
+            s.call(&format!("(%editor-set-text 1 {}) (%editor-goto-line 1 0)", lit(text)));
+        };
+        let typed = |s: &mut Session, line: &str| {
+            for c in line.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+        };
+        let cur = || crate::editorpane::cursor(app::EDITOR);
+        let text = || crate::editorpane::text(app::EDITOR);
+        set(&mut s, "one two\ntwo three\ntwo");
+        assert_eq!(s.eval_to_string("(%editor-vi-mode 1)").unwrap(), "\"NORMAL\"");
+
+        s.text("/");
+        assert_eq!(app::typing(), Some(app::MINIBUFFER), "/ opens the search prompt");
+        typed(&mut s, "two");
+        assert_eq!(cur(), (0, 7));
+        s.text("n");
+        assert_eq!(cur(), (1, 3), "n: the next");
+        s.text("N");
+        assert_eq!(cur(), (0, 7), "N: the previous");
+        s.text("q");
+        s.text("n");
+        assert_eq!(cur(), (1, 3), "n after the search ended still repeats it, as vi's does");
+        s.text("q");
+        s.text("?");
+        typed(&mut s, "");
+        assert_eq!(cur(), (0, 7), "?: backward, an empty answer the last search");
+        s.text("q");
+
+        // :s on this line, :%s on all of them.
+        let ex = |s: &mut Session, cmd: &str| s.call(&format!("(editor-ex-command {})", lit(cmd)));
+        s.call("(%editor-goto-line 1 1)");
+        ex(&mut s, ":s/two/2/");
+        assert_eq!(text(), "one two\n2 three\ntwo", ":s is this line only");
+        ex(&mut s, ":%s/two/II/g");
+        assert_eq!(text(), "one II\n2 three\nII", ":%s is the whole buffer");
+        ex(&mut s, ":%s#II#x#c");
+        assert_eq!(s.eval_to_string("(if *query* 1 0)").unwrap(), "1", "c steps through, any delimiter");
+        s.text("y");
+        s.text("n");
+        assert_eq!(text(), "one x\n2 three\nII");
+        assert_eq!(s.eval_to_string("(if *query* 1 0)").unwrap(), "0");
     }
 }
