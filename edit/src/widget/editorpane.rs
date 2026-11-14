@@ -88,6 +88,8 @@ struct Doc {
     /// Some when this is an IMAGE buffer (view-only): draw blits it instead
     /// of the text editor, and edits are refused.
     image: Option<ImageBuf>,
+    /// A movie (crate::video): its frames, and which one shows.
+    video: Option<crate::video::Player>,
     /// Some for a MARKDOWN buffer (view-only): the styled spans are baked in
     /// and the lexer is skipped so it can't overwrite them. Edits
     /// refused. Carries the source so the reading-view toggle can re-render.
@@ -262,6 +264,7 @@ impl Doc {
             auto_opened: false,
             tag: String::new(),
             image: None,
+            video: None,
             md: None,
             editor: Editor::new(Buffer::new_empty(Metrics::new(14.0, 14.0 * LEADING))),
             applied_px: 0.0,
@@ -287,6 +290,7 @@ impl Doc {
     fn reads(&self) -> bool {
         self.md.is_none()
             && self.image.is_none()
+            && self.video.is_none()
             && self.path.as_deref().is_none_or(|p| {
                 let p = p.to_ascii_lowercase();
                 [".scm", ".ss", ".sld", ".sls"].iter().any(|ext| p.ends_with(ext))
@@ -408,6 +412,7 @@ pub fn set_text(id: u32, text: &str) {
         pane.editor.set_selection(Selection::None);
         pane.editor.shape_as_needed(fs, false);
         pane.image = None; // a text load turns an image buffer back to text
+        pane.video = None;
         pane.md = None; // ...and out of markdown view-only mode
         pane.dirty = false;
         pane.insert_run = false;
@@ -872,6 +877,90 @@ pub fn set_name(id: u32, name: &str) {
     crate::host::mark_dirty_ui();
 }
 
+/// Turn the active buffer into a view-only MOVIE buffer playing `path`
+/// (crate::video: ffmpeg decodes it in the background, and it starts
+/// playing as the first frame arrives). Always succeeds; a clip that cannot
+/// play says why on its pane.
+pub fn open_video(id: u32, path: &str) -> bool {
+    let player = crate::video::Player::open(path);
+    with_pane(id, |fs, pane, family| {
+        pane.editor.with_buffer_mut(|buffer| {
+            buffer.set_text("", &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
+        });
+        pane.editor.shape_as_needed(fs, false);
+        pane.image = None;
+        pane.md = None;
+        pane.video = Some(player);
+        pane.dirty = false;
+        pane.undo.clear();
+        pane.redo.clear();
+        pane.owners.clear();
+        pane.line_sigs.clear();
+    });
+    crate::host::mark_dirty_ui();
+    true
+}
+
+/// A movie buffer's controls, by name — the menu's and the keys':
+/// "toggle", "play", "pause", "restart", "loop", "step" (+1), "back" (-1),
+/// "end". Answers (frame decoded playing looping), or None when the active
+/// buffer is not a movie.
+pub fn video_control(id: u32, what: &str) -> Option<(usize, usize, bool, bool)> {
+    let out = with_pane(id, |_, pane, _| {
+        let v = pane.video.as_mut()?;
+        match what {
+            "toggle" => v.toggle(),
+            "play" if !v.playing => v.toggle(),
+            "pause" if v.playing => v.toggle(),
+            "restart" => {
+                v.seek(0);
+                v.playing = true;
+            }
+            "loop" => v.looping = !v.looping,
+            "step" => v.step(1),
+            "back" => v.step(-1),
+            "end" => {
+                v.playing = false;
+                v.seek(isize::MAX);
+            }
+            _ => {}
+        }
+        Some((v.frame, v.decoded(), v.playing, v.looping))
+    });
+    if out.is_some() && what != "state" {
+        crate::host::mark_dirty_ui();
+    }
+    out
+}
+
+/// Run every playing movie's clock: whether a shown frame moved (the UI is
+/// marked dirty too), and the earliest time one wants its next frame, for
+/// the host's event loop to sleep until.
+pub fn video_tick() -> (bool, Option<std::time::Instant>) {
+    let now = std::time::Instant::now();
+    let (changed, next) = with_state(|state| {
+        let mut changed = false;
+        let mut next: Option<std::time::Instant> = None;
+        for pane in state.panes.values_mut() {
+            for doc in pane.docs.iter_mut() {
+                if let Some(v) = doc.video.as_mut() {
+                    let (c, n) = v.tick(now);
+                    changed |= c;
+                    next = match (next, n) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                }
+            }
+        }
+        (changed, next)
+    });
+    if changed {
+        crate::host::mark_dirty_ui();
+    }
+    (changed, next)
+}
+
 /// Turn the active buffer into a view-only IMAGE buffer showing `path` (a
 /// PNG or JPEG — `image::open` sniffs the format). Returns whether it decoded.
 /// The text editor is emptied; edits are refused while an image is loaded.
@@ -889,6 +978,7 @@ pub fn open_image(id: u32, path: &str) -> bool {
         });
         pane.editor.shape_as_needed(fs, false);
         pane.image = Some(decoded);
+        pane.video = None;
         pane.dirty = false;
         pane.undo.clear();
         pane.redo.clear();
@@ -1358,6 +1448,7 @@ pub fn open_markdown_text(id: u32, src: &str) {
     let src = src.to_string();
     with_pane(id, |fs, pane, family| {
         pane.image = None;
+        pane.video = None;
         pane.md = Some(Markdown { src, reading: false, applied_px: px });
         md_render(pane, fs, family, px, true);
         pane.dirty = false;
@@ -1466,6 +1557,37 @@ pub fn act(id: u32, kind: &str, arg: Option<&str>, x: f64, y: f64) -> Option<Str
     // family still places and extends a selection, `copy` still reads it back,
     // and `escape` still drops it. An image has no text behind it, so it stays
     // fully inert.
+    // A movie takes the mouse and a few keys for itself: a click plays or
+    // pauses, a drag scrubs, space, the arrows and vi's h/l step.
+    if with_view(id, |pane| pane.doc().video.is_some()) {
+        let width = with_view(id, |pane| pane.doc().video.as_ref().map_or(1.0, |v| v.pane_w));
+        let control = match (kind, arg) {
+            ("click" | "double-click" | "triple-click", _) => {
+                with_pane(id, |_, pane, _| pane.video.as_mut().map(|v| v.press(x)));
+                None
+            }
+            ("drag", _) => {
+                with_pane(id, |_, pane, _| pane.video.as_mut().map(|v| v.drag(x, width)));
+                crate::host::mark_dirty_ui();
+                None
+            }
+            ("release", _) => {
+                with_pane(id, |_, pane, _| pane.video.as_mut().map(|v| v.release()));
+                crate::host::mark_dirty_ui();
+                None
+            }
+            ("insert", Some(" ")) => Some("toggle"),
+            ("insert", Some("l")) | ("right", _) => Some("step"),
+            ("insert", Some("h")) | ("left", _) => Some("back"),
+            ("insert", Some("0")) | ("home" | "buffer-start", _) => Some("restart"),
+            ("end" | "buffer-end", _) => Some("end"),
+            _ => None,
+        };
+        if let Some(c) = control {
+            video_control(id, c);
+        }
+        return None;
+    }
     let (image, md) = with_view(id, |pane| (pane.doc().image.is_some(), pane.doc().md.is_some()));
     let view_only = image || md;
     if image
@@ -1671,6 +1793,8 @@ pub fn act(id: u32, kind: &str, arg: Option<&str>, x: f64, y: f64) -> Option<Str
                 pane.discrete(|e| e.delete_range(cursor, end));
                 Some(killed)
             }
+            // A press ending: text has nothing to do (a movie does, above).
+            "release" => None,
             other => {
                 eprintln!("[editor] unknown action '{other}'");
                 None
@@ -2684,6 +2808,75 @@ fn draw_image(
     draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, theme, name, Some(&dim));
 }
 
+/// A movie buffer: the shown frame scaled to fit (letterboxed, nearest
+/// neighbour, as an image is), a thin bar under it — how far through, and
+/// how much is decoded — and the modeline's play state, frame and time.
+#[allow(clippy::too_many_arguments)]
+fn draw_video(
+    fb: &mut Framebuffer,
+    rect: Rect,
+    scale: f32,
+    pad: f32,
+    ml_h: f32,
+    ml_px: f32,
+    ml_adv: f32,
+    theme: &crate::theme::Theme,
+    v: &crate::video::Player,
+    name: &str,
+) {
+    let avail_w = (rect.w as f32 - 2.0 * pad).max(1.0);
+    let bar_h = (3.0 * scale).round().max(2.0);
+    let avail_h = (rect.h as f32 - 2.0 * pad - ml_h - 2.0 * bar_h).max(1.0);
+    v.with_frame(|w, h, rgb| {
+        if w == 0 || h == 0 {
+            return;
+        }
+        let s = (avail_w / w as f32).min(avail_h / h as f32).max(0.0);
+        let dw = (w as f32 * s).round() as i32;
+        let dh = (h as f32 * s).round() as i32;
+        let ox = rect.x as i32 + pad as i32 + ((avail_w - dw as f32) / 2.0) as i32;
+        let oy = rect.y as i32 + pad as i32 + ((avail_h - dh as f32) / 2.0) as i32;
+        let (fbw, fbh) = (fb.width as i32, fb.height as i32);
+        let xs: Vec<usize> = (0..dw).map(|dx| ((((dx as f32 + 0.5) / s) as u32).min(w - 1)) as usize * 3).collect();
+        for dy in 0..dh {
+            let py = oy + dy;
+            if py < 0 || py >= fbh {
+                continue;
+            }
+            let row = ((((dy as f32 + 0.5) / s) as u32).min(h - 1) * w) as usize * 3;
+            let base = (py as u32 * fb.width) as usize;
+            for (dx, sx) in xs.iter().enumerate() {
+                let px_ = ox + dx as i32;
+                if px_ < 0 || px_ >= fbw {
+                    continue;
+                }
+                let si = row + sx;
+                fb.pixels[base + px_ as usize] =
+                    ((rgb[si] as u32) << 16) | ((rgb[si + 1] as u32) << 8) | rgb[si + 2] as u32;
+            }
+        }
+    });
+    if let Some(e) = v.error() {
+        let ty = rect.y as f32 + pad;
+        crate::text::draw_mono_line(fb, rect.x as f32 + pad, ty, ml_px, theme.text_dim, &format!("cannot play {name}: {e}"));
+    }
+    // The bar, just above the modeline: the track, what is decoded, and how
+    // far the frame shown is through the clip.
+    let ml_top = (rect.y + rect.h) as f32 - ml_h;
+    let by = (ml_top - bar_h - 2.0 * scale).max(rect.y as f32);
+    let (bx, bw) = (rect.x as f32 + pad, avail_w);
+    let seg = |fb: &mut Framebuffer, frac: f32, ink: u32| {
+        let w = (bw * frac.clamp(0.0, 1.0)).round() as u32;
+        if w > 0 {
+            fb.fill_rect(Rect { x: bx as u32, y: by as u32, w, h: bar_h as u32 }.clamped(fb.width, fb.height), ink);
+        }
+    };
+    seg(fb, 1.0, theme.status_bg);
+    seg(fb, v.buffered(), crate::text::blend(theme.status_bg, theme.text_dim, 0.5));
+    seg(fb, v.progress(), theme.text_accent);
+    draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, theme, name, Some(&v.modeline()));
+}
+
 /// The modeline's height in physical pixels at `scale` — what a host's
 /// divider grabs (the standalone's bar between the editor and its panel).
 pub fn modeline_height(scale: f32) -> f32 {
@@ -2723,6 +2916,11 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
         // An image buffer blits its picture instead of the text editor.
         if let Some(img) = &pane.image {
             draw_image(fb, rect, scale, pad, ml_h, ml_px, ml_adv, &theme, img, &pane.name);
+            return;
+        }
+        if let Some(v) = &mut pane.video {
+            v.pane_w = rect.w as f64;
+            draw_video(fb, rect, scale, pad, ml_h, ml_px, ml_adv, &theme, v, &pane.name);
             return;
         }
         pane.editor.with_buffer_mut(|buffer| {
@@ -2988,6 +3186,90 @@ mod tests {
         // A reload is a fresh document.
         set_text(id, "(c)");
         assert!(owners(id).is_empty());
+    }
+
+    /// A movie buffer (Kevin, 2026-11-14): ffmpeg decodes a 12-frame clip,
+    /// the clock plays it, a click pauses, a drag scrubs, the keys step, and
+    /// the draw shows the frame. Skipped where ffmpeg is not installed.
+    #[test]
+    fn a_movie_plays_pauses_scrubs_and_steps() {
+        let dir = std::env::temp_dir().join(format!("edit-movie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x90:rate=12:duration=1"])
+            .args(["-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        }
+        let id = 961;
+        assert!(open_video(id, &clip.to_string_lossy()));
+        let decoded = with_pane(id, |_, pane, _| {
+            let v = pane.video.as_ref().unwrap();
+            v.wait_decoded(std::time::Duration::from_secs(20)) && v.error().is_none()
+        });
+        assert!(decoded, "ffmpeg decoded it");
+        let state = || video_control(id, "state").unwrap();
+        assert_eq!(state(), (0, 12, true, true), "12 frames, playing from the first, looping");
+
+        // The clock: a tick a few frames' time later has moved on.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (moved, next) = video_tick();
+        assert!(moved && next.is_some(), "playing advances and asks to be woken");
+        assert!(state().0 >= 2, "frame {}", state().0);
+
+        // A click that does not move pauses; another plays.
+        act(id, "click", None, 100.0, 50.0);
+        act(id, "release", None, 100.0, 50.0);
+        assert!(!state().2, "a click paused it");
+        assert_eq!(video_tick(), (false, None), "and a paused movie asks for no wake-up");
+        act(id, "click", None, 100.0, 50.0);
+        act(id, "release", None, 100.0, 50.0);
+        assert!(state().2, "and played it");
+        video_control(id, "pause");
+
+        // A drag scrubs: the pane's width spans the clip.
+        with_pane(id, |_, pane, _| pane.video.as_mut().unwrap().pane_w = 120.0);
+        video_control(id, "restart");
+        video_control(id, "pause");
+        act(id, "click", None, 10.0, 50.0);
+        act(id, "drag", None, 70.0, 50.0);
+        assert_eq!(state().0, 6, "half the width is half the clip");
+        act(id, "drag", None, 500.0, 50.0);
+        assert_eq!(state().0, 11, "and it stops at the last frame");
+        act(id, "release", None, 500.0, 50.0);
+        assert!(!state().2, "a scrub is not a click: still paused");
+
+        // Keys: h/l and the arrows step, space plays, 0 restarts.
+        act(id, "insert", Some("h"), 0.0, 0.0);
+        act(id, "left", None, 0.0, 0.0);
+        assert_eq!(state().0, 9);
+        act(id, "right", None, 0.0, 0.0);
+        assert_eq!(state().0, 10);
+        act(id, "insert", Some(" "), 0.0, 0.0);
+        assert!(state().2, "space plays");
+        act(id, "insert", Some("0"), 0.0, 0.0);
+        assert_eq!(state().0, 0, "0 restarts");
+        assert!(text(id).is_empty(), "and nothing was typed into the buffer");
+
+        // Once, not looping: it stops on its last frame.
+        video_control(id, "loop");
+        assert!(!state().3);
+
+        // The draw shows the frame: testsrc is colour bars, not the pane's bg.
+        let mut fb = Framebuffer::new(200, 160);
+        draw(id, &mut fb, Rect { x: 0, y: 0, w: 200, h: 160 }, false);
+        let bg = crate::theme::get().editor_bg;
+        let painted = fb.pixels.iter().filter(|&&p| p != bg).count();
+        assert!(painted > 5000, "the frame is drawn ({painted} px)");
+
+        // A text load turns it back into a text buffer.
+        set_text(id, "(text)");
+        assert_eq!(video_control(id, "state"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

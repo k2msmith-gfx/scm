@@ -106,6 +106,7 @@ the shell's own (edit/scm/)?"
       (visit-buffer (%editor-active-buffer eid)))
     (cond ((string-suffix? ".md" low) (viewer %editor-open-markdown))
           ((any (lambda (e) (string-suffix? e low)) '(".png" ".jpg" ".jpeg")) (viewer %editor-open-image))
+          ((video-path? p) (viewer %editor-open-video))
           (else (visit-file-text p)))))
 
 (define (find-file)
@@ -389,6 +390,7 @@ the shell's own (edit/scm/)?"
   (lambda (x y id shift)
     (%focus-pane id)
     (cond ((markdown-buffer?) :help)
+          ((video-buffer?) :video)
           ((backend-of (%editor-active-buffer id)) :editor)
           (else #f))))
 (set-pane-menu! :terminal (lambda (x y id shift) :terminal))

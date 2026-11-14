@@ -276,10 +276,17 @@ impl ApplicationHandler for App {
         if let Some(at) = self.pie_deadline
             && std::time::Instant::now() >= at {
                 self.pie_deadline = None;
-                event_loop.set_control_flow(ControlFlow::Wait);
                 self.session.menu_hold();
                 self.settle(event_loop);
             }
+        // A playing movie's next frame is a deadline too: show this one,
+        // and sleep until that one is due.
+        let (_, movie) = edit::editorpane::video_tick();
+        self.settle(event_loop);
+        event_loop.set_control_flow(match [self.pie_deadline, movie].into_iter().flatten().min() {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 }
 

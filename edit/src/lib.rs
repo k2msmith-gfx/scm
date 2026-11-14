@@ -21,7 +21,7 @@ pub mod theme;
 pub mod wake;
 pub mod widget;
 
-pub use widget::{editorpane, framebuffer, termpane, text, textpane};
+pub use widget::{editorpane, framebuffer, termpane, text, textpane, video};
 
 #[cfg(test)]
 mod layering;

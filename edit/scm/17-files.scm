@@ -26,7 +26,8 @@
   '("scm" "ss" "sld" "guile" "janet" "lisp" "el" "rs" "py" "js" "ts" "c" "h"
     "cpp" "nix" "toml" "json" "sh" "glsl" "wgsl" "lua" "go"))
 (define *files-image-extensions*
-  '("png" "jpg" "jpeg" "gif" "webp" "svg" "exr" "hdr" "tif" "tiff" "bmp"))
+  '("png" "jpg" "jpeg" "gif" "webp" "svg" "exr" "hdr" "tif" "tiff" "bmp"
+    "mp4" "mov" "m4v" "webm" "mkv" "avi"))
 
 (define (files-extension p)
   (let ((b (files-base p)))

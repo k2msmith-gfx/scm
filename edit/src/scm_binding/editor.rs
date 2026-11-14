@@ -530,6 +530,31 @@ prim! {
 }
 
 prim! {
+    /// `(%editor-open-video id path)` — play PATH (a movie) in the active
+    /// buffer, view-only (crate::video; ffmpeg decodes it). Returns 1: a
+    /// clip that cannot play says why on its pane.
+    "%editor-open-video", fn editor_open_video(id: num, path: opt_text) {
+        let ok = path.map(|p| crate::editorpane::open_video(id as u32, &p)).unwrap_or(false);
+        Out::Num(ok as u8 as f64)
+    }
+}
+
+prim! {
+    /// `(%video-control id what)` — a movie buffer's control by name
+    /// ("toggle" "play" "pause" "restart" "loop" "step" "back" "end", or
+    /// "state" to only ask) → (frame decoded playing looping), 1/0 flags;
+    /// nil when the active buffer is not a movie.
+    "%video-control", fn video_control(id: num, what: opt_text) {
+        match crate::editorpane::video_control(id as u32, &what.unwrap_or_default()) {
+            Some((f, n, playing, looping)) => {
+                Out::nums([f as f64, n as f64, playing as u8 as f64, looping as u8 as f64])
+            }
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
     /// `(%editor-open-image id path)` — load PATH (a PNG) into the active buffer
     /// as a view-only image. Returns 1 on success, 0 if it didn't decode.
     "%editor-open-image", fn editor_open_image(id: num, ok: opt_text) {
@@ -650,6 +675,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         buffer_set_auto_opened_prim::install(interp)?,
         editor_set_name::install(interp)?,
         editor_open_image::install(interp)?,
+        editor_open_video::install(interp)?,
+        video_control::install(interp)?,
         editor_open_markdown::install(interp)?,
         editor_open_markdown_text::install(interp)?,
         editor_toggle_markdown::install(interp)?,

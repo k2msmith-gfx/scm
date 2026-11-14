@@ -18,7 +18,7 @@
 (define *show-status* (lambda (text) #f))
 (define *show-editor* (lambda () #f))
 (define *hide-editor* (lambda () #f))
-(define *writable-path?* (lambda (path) (not (image-path? path))))
+(define *writable-path?* (lambda (path) (not (or (image-path? path) (video-path? path)))))
 (define *after-save* (lambda (path own) #f))
 (define *buffer-killed* (lambda (path) #f))
 (define *save-as-initial* (lambda () #f))
@@ -89,6 +89,51 @@
       (string-suffix? ".png" path)
       (string-suffix? ".jpg" path)
       (string-suffix? ".jpeg" path))))
+
+(define (video-path? path)
+  "A movie the editor can play (.mp4/.mov/.m4v/.webm/.mkv/.avi) — by its
+  suffix, as image-path? goes. ffmpeg decodes it, so any codec it reads plays."
+  (and (string? path)
+       (let ((low (string-downcase path)))
+         (any (lambda (e) (string-suffix? e low)) '(".mp4" ".mov" ".m4v" ".webm" ".mkv" ".avi")))))
+
+(define (video-buffer?)
+  "True when the active editor buffer is a movie."
+  (and (%video-control (editor-pane-id) "state") #t))
+
+(define (video-do what)
+  ; A movie control by name, in the active buffer; says so when it is not one.
+  (or (%video-control (editor-pane-id) what) (begin (echo "not a movie") #f)))
+
+(define (video-play-pause)
+  "Play or pause the movie — a click on it, or space. A movie opened from
+  the file tree or C-x C-f starts playing; a drag across it scrubs, the
+  pane's width spanning the whole clip."
+  (video-do "toggle"))
+(define (video-restart)
+  "Play the movie from its first frame — 0, or Home."
+  (video-do "restart"))
+(define (video-step)
+  "Pause, and show the next frame — l, or the right arrow."
+  (video-do "step"))
+(define (video-step-back)
+  "Pause, and show the frame before — h, or the left arrow."
+  (video-do "back"))
+(define (video-toggle-loop)
+  "Loop the movie, or play it once and stop at its end (the modeline says
+  'once'). Loops by default."
+  (match (video-do "loop")
+    ((_ _ _ looping) (echo (if (= looping 1) "movie: loops" "movie: plays once")))
+    (_ #f)))
+
+; A movie buffer's right-press menu (hosts route to it when video-buffer?).
+(define-menu
+  :video
+  (list (list "play / pause" video-play-pause "SPC")
+        (list "restart" video-restart "0")
+        (list "step forward" video-step "l")
+        (list "step back" video-step-back "h")
+        (list "loop on / off" video-toggle-loop)))
 
 (define (visit-buffer buf)
   "Make BUF the on-screen buffer: switch the kernel (which bumps its MRU) and
@@ -300,7 +345,11 @@
   20
   :editor-select-end
   (lambda (x y)
-    (if *editor-drag* (begin (set! *editor-drag* #f) #t) #f)))
+    ; The press ends: a movie takes it as a click (play/pause) or the end
+    ; of a scrub; text has nothing to do.
+    (if *editor-drag*
+      (begin (set! *editor-drag* #f) (%editor-act (editor-pane-id) "release" #f x y) #t)
+      #f)))
 
 ; Editor keys (pane-local; guarded on typing focus like the REPL's editing?
 ; guard, so a focused-but-released pane leaves bare keys to the global map).
