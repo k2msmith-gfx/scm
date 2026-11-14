@@ -54,8 +54,9 @@ impl Default for Theme {
             text_accent: 0x0061_afef,
             text_error: 0x00e0_6c75,
             popup_bg: 0x003a_3f4b,
-            menu_ink: 0x00d7_dae0,
-            menu_key_ink: 0x00ab_b2bf,
+            // Near-white, as a desktop menu's (Kevin, 2026-11-14).
+            menu_ink: 0x00f5_f7fa,
+            menu_key_ink: 0x00c3_c8d0,
             code_comment: 0x005c_6370,
             code_string: 0x0098_c379,
             code_keyword: 0x00c6_78dd,
