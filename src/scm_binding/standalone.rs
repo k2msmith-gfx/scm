@@ -80,6 +80,42 @@ fn install_host_prims(interp: &mut scm::Interp) -> Result<(), scm::EmbedError> {
             None => Val::Bool(false),
         })
     })?;
+    // `(%show-files on)` / `(%files-shown?)` — the file tree's column.
+    interp.define_fn("%show-files", |args| {
+        app::show_files(!matches!(args.first(), Some(Val::Bool(false)) | None));
+        Ok(Val::Bool(false))
+    })?;
+    interp.define_fn("%files-shown?", |_| Ok(Val::Bool(app::files_shown())))?;
+    // `(%git-root dir)` — the top of the git checkout DIR is in, or #f.
+    interp.define_fn("%git-root", |args| {
+        let Some(dir) = val_text(args, 0) else { return Ok(Val::Bool(false)) };
+        let out = std::process::Command::new("git")
+            .args(["-C", &dir, "rev-parse", "--show-toplevel"])
+            .stderr(std::process::Stdio::null())
+            .output();
+        Ok(match out {
+            Ok(o) if o.status.success() => Val::Str(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+            _ => Val::Bool(false),
+        })
+    })?;
+    // `(%git-ignored dir)` — what git ignores under DIR, relative to it, an
+    // ignored directory once with a trailing `/` (ray's prim of the same
+    // name, which a standalone without ray answers itself); () outside git.
+    interp.define_fn("%git-ignored", |args| {
+        let Some(dir) = val_text(args, 0) else { return Ok(Val::List(Vec::new())) };
+        let out = std::process::Command::new("git")
+            .args(["-C", &dir, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"])
+            .stderr(std::process::Stdio::null())
+            .output();
+        Ok(Val::List(match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(|p| Val::Str(p.to_string()))
+                .collect(),
+            _ => Vec::new(),
+        }))
+    })?;
     // `(%read-status text)` — complete, incomplete or invalid, by scm's
     // reader: whether the REPL's RET submits or continues the form.
     interp.define_fn("%read-status", |args| {
@@ -176,6 +212,7 @@ impl Session {
         }
         let names: Vec<String> = files.iter().map(|f| lit(f)).collect();
         session.call(&format!("(edit-open-panel (list {}))", names.join(" ")));
+        session.call(&format!("(edit-open-files (list {}))", names.join(" ")));
         session.call("(focus-scene-editor)");
         Ok(session)
     }
@@ -316,14 +353,15 @@ mod tests {
     }
 
     /// The centres of the strip's REPL and terminal icons, after a draw.
-    fn icons() -> ((f64, f64), (f64, f64)) {
+    fn icons() -> ((f64, f64), (f64, f64), (f64, f64)) {
         let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
         app::draw(&mut fb);
         let m = app::rect(app::MINIBUFFER).unwrap();
         // Right-aligned 28 px in (clear of the OS resize corner): 15 px
         // squares, 5 px apart, on the strip.
         let (right, y) = ((m.x + m.w) as f64 - 28.0, m.y as f64 + m.h as f64 / 2.0);
-        ((right - 15.0 - 5.0 - 7.5, y), (right - 7.5, y))
+        // Left to right: the file tree's, the REPL's, the terminal's.
+        ((right - 2.0 * (15.0 + 5.0) - 7.5, y), (right - 15.0 - 5.0 - 7.5, y), (right - 7.5, y))
     }
 
     /// The program without its window: boot the shell over the three panes,
@@ -431,9 +469,10 @@ mod tests {
         // The strip's two icons: the terminal's, lit, hides the whole panel
         // (the program runs on) and shows it again; the λ swaps in the REPL.
         assert_eq!(app::panel(), Some(app::Panel::Terminal), "running an attached buffer shows its terminal");
-        let (repl_icon, term_icon) = icons();
-        assert_eq!(app::icon_at(term_icon.0, term_icon.1), Some(app::Panel::Terminal));
-        assert_eq!(app::icon_at(repl_icon.0, repl_icon.1), Some(app::Panel::Repl));
+        let (files_icon, repl_icon, term_icon) = icons();
+        assert_eq!(app::icon_at(term_icon.0, term_icon.1), Some(app::Icon::Terminal));
+        assert_eq!(app::icon_at(repl_icon.0, repl_icon.1), Some(app::Icon::Repl));
+        assert_eq!(app::icon_at(files_icon.0, files_icon.1), Some(app::Icon::Files));
         s.call("(toggle-panel :terminal)");
         assert_eq!(app::panel(), None, "hidden");
         assert!(app::rect(app::TRANSCRIPT).is_none(), "and the editor has the height");
@@ -495,9 +534,10 @@ mod tests {
         // centre follows the pointer and the panel grows to meet it.
         let top = app::rect(app::TRANSCRIPT).unwrap().y as f64;
         let half = crate::editorpane::modeline_height(1.0) as f64 / 2.0;
-        assert!(app::divider_at(100.0, top - half), "the bar's centre line");
-        assert!(!app::divider_at(100.0, top + 6.0), "not the panel's own text below it");
-        app::drag_divider(top - half - 100.0);
+        let mid = { let e = app::rect(app::EDITOR).unwrap(); e.x as f64 + e.w as f64 / 2.0 };
+        assert_eq!(app::divider_at(mid, top - half), Some(app::Divider::Panel), "the bar's centre line");
+        assert_eq!(app::divider_at(mid, top + 6.0), None, "not the panel's own text below it");
+        app::drag_divider(app::Divider::Panel, mid, top - half - 100.0);
         let (ed, panel) = (app::rect(app::EDITOR).unwrap(), app::rect(app::TRANSCRIPT).unwrap());
         assert!((panel.y as f64 - (top - 100.0)).abs() <= 1.0, "the bar moved with the pointer");
         assert_eq!(ed.y + ed.h, panel.y, "the editor ends where the panel starts");
@@ -572,6 +612,95 @@ mod tests {
             assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"scm λ > \"", "the REPL says where it is");
         }
         super::super::remote::close_all();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file tree: rooted at the git checkout, folders first, what git
+    /// ignores hidden; expand, collapse, collapse all; RET opens a file;
+    /// the tree follows the buffer on screen; its menu shows its keys.
+    #[test]
+    fn the_file_tree_shows_the_checkout_and_opens_files() {
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(dir).args(args).output().is_ok_and(|o| o.status.success())
+        };
+        let dir = std::env::temp_dir().join(format!("edit-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/deep")).unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "target/\n*.log\n").unwrap();
+        std::fs::write(dir.join("a.scm"), "(a)\n").unwrap();
+        std::fs::write(dir.join("noise.log"), "x").unwrap();
+        std::fs::write(dir.join("src/b.scm"), "(b)\n").unwrap();
+        std::fs::write(dir.join("src/deep/c.scm"), "(c)\n").unwrap();
+        std::fs::write(dir.join("target/out"), "x").unwrap();
+        if !git(&dir, &["init", "-q"]) {
+            eprintln!("git is not on the PATH: skipped");
+            return;
+        }
+        let root = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        let a = format!("{root}/a.scm");
+        app::resize(1000, 700, 1.0);
+        let mut s = Session::boot(None, &[a.clone()]).expect("boot");
+        let rows = |s: &mut Session| -> Vec<String> {
+            let n: usize = s.eval_to_string("(%pane-row-count 4)").unwrap().parse().unwrap();
+            (0..n)
+                .map(|i| {
+                    let t = s.eval_to_string(&format!("(%pane-row-text 4 {i})")).unwrap();
+                    t.trim_matches('"').replace('\u{E000}', "").split_whitespace().collect::<Vec<_>>().join(" ")
+                })
+                .collect()
+        };
+        assert_eq!(s.eval_to_string("*files-root*").unwrap(), format!("\"{root}\""), "rooted at the checkout");
+        let r = rows(&mut s);
+        let base = std::path::Path::new(&root).file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(r, vec![format!("▾ {base}"), "▸ src".into(), "a.scm".into()], "folders first; target/ and *.log hidden");
+        // a.scm, the opened file, is the selection.
+        assert_eq!(s.eval_to_string("(files-selected)").unwrap(), format!("\"{a}\""));
+
+        // Expand src, then src/deep; collapse all closes both.
+        s.call("(files-select! 1) (files-expand)");
+        assert_eq!(rows(&mut s)[1..4].to_vec(), vec!["▾ src", "▸ deep", "b.scm"]);
+        s.call("(files-select! 2) (files-expand)");
+        assert!(rows(&mut s).contains(&"c.scm".to_string()));
+        s.call("(files-collapse-all)");
+        assert_eq!(rows(&mut s).len(), 3);
+        // Ignored files on demand.
+        s.call("(files-toggle-ignored)");
+        assert!(rows(&mut s).contains(&"noise.log".to_string()) && rows(&mut s).contains(&"▸ target".to_string()));
+        s.call("(files-toggle-ignored)");
+
+        // RET on a file opens it in the editor, keyboard there.
+        s.call("(files-select! 1) (files-expand) (files-select! 3) (files-activate)");
+        assert_eq!(s.eval_to_string("(buffer-path (%editor-active-buffer 1))").unwrap(), format!("\"{root}/src/b.scm\""));
+        assert_eq!(app::typing(), Some(app::EDITOR));
+        // The tree follows the buffer on screen: back to a.scm by name.
+        s.call(&format!("(visit-buffer (buffer-for-file \"{a}\"))"));
+        assert_eq!(s.eval_to_string("(files-selected)").unwrap(), format!("\"{a}\""));
+        // Revealing a deep file opens the folders above it.
+        s.call(&format!("(files-reveal \"{root}/src/deep/c.scm\")"));
+        assert_eq!(s.eval_to_string("(files-selected)").unwrap(), format!("\"{root}/src/deep/c.scm\""));
+
+        // The menu has the folder commands, with their keys.
+        let labels = s.eval_to_string("(%item-labels (hash-table-ref *menus* :files))").unwrap();
+        for want in ["expand\\t+", "collapse\\t-", "collapse all", "open\\tRET"] {
+            assert!(labels.contains(want), "{want} in {labels}");
+        }
+        // The tree's own keys reach it when it has the focus.
+        s.call("(files-focus) (files-select! 0)");
+        s.key("down");
+        assert_eq!(s.eval_to_string("*files-sel*").unwrap(), "1");
+
+        // Its edge drags; its icon hides it, and the editor takes the width.
+        let f = app::rect(app::FILES).unwrap();
+        assert_eq!(app::divider_at((f.x + f.w) as f64, 100.0), Some(app::Divider::Files));
+        app::drag_divider(app::Divider::Files, 300.0, 100.0);
+        assert_eq!(app::rect(app::EDITOR).unwrap().x, 300);
+        s.call("(toggle-files)");
+        assert!(app::rect(app::FILES).is_none());
+        assert_eq!(app::rect(app::EDITOR).unwrap().x, 0);
+        s.call("(toggle-files)");
+        let mut fb = crate::framebuffer::Framebuffer::new(1000, 700);
+        app::draw(&mut fb);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

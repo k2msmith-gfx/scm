@@ -13,6 +13,7 @@
       ; The bottom panel: the REPL's transcript, or the terminal (E5).
       ((:transcript :repl :terminal) 2)
       ((:minibuffer) 3)
+      ((:files) 4)
       (else #f))))
 (set! *pane-key*
   (lambda (id)
@@ -20,7 +21,18 @@
       ((1) :editor)
       ((2) :transcript)
       ((3) :minibuffer)
+      ((4) :files)
       (else #f))))
+
+; ── The file tree: the left column (17-files) ──────────────────────────────
+; Rooted at the git checkout the editor was started in, laid out as a list,
+; and following the buffer on screen.
+(%pane-top-anchor 4 1)
+(set! *files-shown* (lambda (on) (%show-files on)))
+(set! *buffers-changed*
+  (lambda ()
+    (when (%files-shown?)
+      (files-reveal (buffer-path (%editor-active-buffer (editor-pane-id)))))))
 
 ; A prompt that closes gives the keyboard back to the editor.
 (set! *prompt-closed* (lambda () (focus-scene-editor)))
@@ -111,6 +123,7 @@ the shell's own (edit/scm/)?"
 (bind-editor-keys :minibuffer)
 (bind-editor-keys :repl)
 (bind-term-keys)
+(bind-files-keys)
 (bind-key "C-x C-c" (lambda () (%quit)))
 
 ; ── The bottom panel: a terminal or the REPL ───────────────────────────────
@@ -259,6 +272,19 @@ the shell's own (edit/scm/)?"
         ((%panel) (show-panel (%panel)))
         (else (echo "the panel is hidden — C-c C-z shows the REPL"))))
 
+(define (edit-open-files files)
+  "The file tree at startup: rooted at the git checkout the first FILE is
+  in — or the one the editor was started in — showing that file."
+  (files-open-root (if (pair? files) (let ((d (files-dir-of (car files)))) d) "."))
+  (when (pair? files) (files-reveal (car files))))
+
+(define (files-dir-of p)
+  ; The directory P names, or the one it is in.
+  (let ((rp (or (real-file p) p)))
+    (if (files-dir? rp) rp
+        (let loop ((k (- (string-length rp) 1)))
+          (cond ((< k 0) ".") ((char=? (string-ref rp k) #\/) (if (zero? k) "/" (substring rp 0 k))) (else (loop (- k 1))))))))
+
 (define (edit-open-panel files)
   "The panel at startup: the REPL when one of FILES is Scheme — you came to
   run it — else a terminal running your $SHELL."
@@ -277,6 +303,7 @@ the shell's own (edit/scm/)?"
     (case id
       ((1) :editor)
       ((2) (if (equal? kind "term") :terminal :transcript))
+      ((4) :files)
       (else #f))))
 
 (define (toggle-markdown-view)
@@ -321,6 +348,12 @@ the shell's own (edit/scm/)?"
           ((backend-of (%editor-active-buffer id)) :editor)
           (else #f))))
 (set-pane-menu! :terminal (lambda (x y id shift) :terminal))
+; The tree's menu acts on the row under the press, as the outliner's does.
+(set-pane-menu! :files
+  (lambda (x y id shift)
+    (let ((row (%pane-row-at id x y)))
+      (when row (files-select! row)))
+    :files))
 (set-pane-menu! :transcript (lambda (x y id shift) :transcript))
 
 ; ── The mouse's floor: a transcript scrolls ────────────────────────────────

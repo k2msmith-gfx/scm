@@ -201,6 +201,27 @@ prim! {
 }
 
 
+prim! {
+    /// `(%pane-row-at id x y)` — the row of text pane ID under a window
+    /// point, or #f: what a click on a list (the file tree) hits.
+    "%pane-row-at", fn pane_row_at(id: num, x: num, y: num) {
+        match crate::textpane::row_at(id as u32, x, y) {
+            Some(r) => Out::Num(r as f64),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
+    /// `(%pane-top-anchor id on)` — lay text pane ID out as a LIST, rows
+    /// from the top down (the file tree, an outliner), rather than as a
+    /// transcript anchored at its bottom.
+    "%pane-top-anchor", fn pane_top_anchor(id: num, on: num) {
+        crate::textpane::set_top_anchor(id as u32, on != 0.0);
+        Out::Nil
+    }
+}
+
 /// This module's prims, installed; answers their names.
 pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm::EmbedError> {
     Ok(vec![
@@ -219,5 +240,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         pane_remove_row::install(interp)?,
         pane_reveal_row::install(interp)?,
         pane_set_input::install(interp)?,
+        pane_row_at::install(interp)?,
+        pane_top_anchor::install(interp)?,
     ])
 }

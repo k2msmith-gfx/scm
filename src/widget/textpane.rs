@@ -44,7 +44,7 @@ pub fn set_font_px(px: f32) -> f32 {
 }
 
 /// Inner padding between the pane border and the character grid.
-const PAD: f32 = 8.0;
+pub const PAD: f32 = 8.0;
 
 /// A line's ink, by role. The theme maps each to a color at draw time.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1139,14 +1139,19 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
             let max_scroll = c.lines.len().saturating_sub(visible);
             c.scroll = c.scroll.min(max_scroll);
             let mut y = top;
+            // Where the rows land, as the transcript records them: a host
+            // that draws over a row (the file tree's folder icons) reads it.
+            let mut laid: Vec<LaidRow> = Vec::new();
             for (style, line) in c.lines.iter().skip(c.scroll) {
                 if y + row_h > rect.y as f32 + rect.h as f32 {
                     break;
                 }
                 let row: String = line.chars().take(cols).collect();
                 text::draw_mono_line(fb, rect.x as f32 + pad, y, px, style.ink(&theme), &row);
+                laid.push(LaidRow { y, text: row, cont: false });
                 y += row_h;
             }
+            c.laid = laid;
             return;
         }
 

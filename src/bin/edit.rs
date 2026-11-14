@@ -44,10 +44,11 @@ struct App {
     held: Option<MouseButton>,
     /// When the right button's marking menu reveals itself.
     pie_deadline: Option<std::time::Instant>,
-    /// The divider between the editor and the panel is being dragged.
-    dragging_divider: bool,
-    /// Whether the pointer shows the resize arrow (set only on change).
-    resize_cursor: bool,
+    /// The divider being dragged: the panel's bar, or the file tree's edge.
+    dragging_divider: Option<app::Divider>,
+    /// Which divider the pointer shows the resize arrow for (set only on
+    /// change).
+    resize_cursor: Option<app::Divider>,
 }
 
 impl App {
@@ -147,17 +148,18 @@ impl ApplicationHandler for App {
                 self.held = (state == ElementState::Pressed).then_some(button);
                 match (state, button) {
                     // The divider and the strip's icons are chrome, not panes.
-                    (ElementState::Pressed, MouseButton::Left) if app::divider_at(x, y) => {
+                    (ElementState::Pressed, MouseButton::Left) if app::divider_at(x, y).is_some() => {
                         self.held = None;
-                        self.dragging_divider = true;
+                        self.dragging_divider = app::divider_at(x, y);
                     }
-                    (ElementState::Released, MouseButton::Left) if self.dragging_divider => {
-                        self.dragging_divider = false;
+                    (ElementState::Released, MouseButton::Left) if self.dragging_divider.is_some() => {
+                        self.dragging_divider = None;
                     }
                     (ElementState::Pressed, MouseButton::Left) if app::icon_at(x, y).is_some() => {
                         self.held = None;
                         self.session.call(match app::icon_at(x, y) {
-                            Some(app::Panel::Terminal) => "(toggle-panel :terminal)",
+                            Some(app::Icon::Terminal) => "(toggle-panel :terminal)",
+                            Some(app::Icon::Files) => "(toggle-files)",
                             _ => "(toggle-panel :repl)",
                         });
                     }
@@ -185,8 +187,8 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = (position.x, position.y);
-                if self.dragging_divider {
-                    app::drag_divider(y);
+                if let Some(d) = self.dragging_divider {
+                    app::drag_divider(d, x, y);
                     self.cursor = Some((x, y));
                     self.redraw();
                     return;
@@ -195,10 +197,10 @@ impl ApplicationHandler for App {
                 if over != self.resize_cursor {
                     self.resize_cursor = over;
                     if let Some(d) = &self.display {
-                        d.window.set_cursor(if over {
-                            winit::window::CursorIcon::NsResize
-                        } else {
-                            winit::window::CursorIcon::Default
+                        d.window.set_cursor(match over {
+                            Some(app::Divider::Panel) => winit::window::CursorIcon::NsResize,
+                            Some(app::Divider::Files) => winit::window::CursorIcon::EwResize,
+                            None => winit::window::CursorIcon::Default,
                         });
                     }
                 }
@@ -323,8 +325,8 @@ fn main() {
         cursor: None,
         held: None,
         pie_deadline: None,
-        dragging_divider: false,
-        resize_cursor: false,
+        dragging_divider: None,
+        resize_cursor: None,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("edit: {e}");
