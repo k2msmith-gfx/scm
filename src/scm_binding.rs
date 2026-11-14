@@ -155,6 +155,7 @@ mod breaks;
 mod clipboard;
 mod editor;
 mod menu;
+pub mod standalone;
 mod text;
 mod xref;
 
@@ -254,53 +255,12 @@ mod tests {
         let mut interp = scm::Interp::new().expect("interp");
         install(&mut interp, &mut |_| {}).expect("install");
         // What a host supplies (00-base.scm's list): ray's list and string
-        // helpers, the focus prims, the pane under a point, a clock, the
-        // kernel's typing hold, a file writer and a path resolver.
+        // helpers and the file I/O — host/prelude.scm, as the standalone
+        // program loads them — then the focus prims, the pane under a point,
+        // a clock, the kernel's typing hold and a path resolver.
+        let host = shell_dir().join("host/prelude.scm");
+        interp.eval_named(&std::fs::read_to_string(&host).expect("host prelude"), &host.to_string_lossy()).expect("host prelude loads");
         eval(&mut interp, r#"
-            (import (srfi 1))
-            (define (list-sort less? xs)
-              (let loop ((xs xs) (out '()))
-                (if (null? xs) out
-                    (loop (cdr xs)
-                          (let ins ((ys out))
-                            (cond ((null? ys) (list (car xs)))
-                                  ((less? (car xs) (car ys)) (cons (car xs) ys))
-                                  (else (cons (car ys) (ins (cdr ys))))))))))
-            (define (string-split s d)
-              (let loop ((i 0) (start 0) (acc '()))
-                (cond ((= i (string-length s)) (reverse (cons (substring s start i) acc)))
-                      ((char=? (string-ref s i) (string-ref d 0))
-                       (loop (+ i 1) (+ i 1) (cons (substring s start i) acc)))
-                      (else (loop (+ i 1) start acc)))))
-            (define (string-prefix? p s)
-              (and (<= (string-length p) (string-length s))
-                   (string=? p (substring s 0 (string-length p)))))
-            (define (string-pad-right s n)
-              (if (>= (string-length s) n) (substring s 0 n)
-                  (string-append s (make-string (- n (string-length s)) #\space))))
-            (define (string-contains s p . start) (apply %string-search s p start))
-            (define (string-suffix? x s)
-              (and (<= (string-length x) (string-length s))
-                   (string=? x (substring s (- (string-length s) (string-length x)) (string-length s)))))
-            (define (string-trim-both s)
-              (let loop ((a 0) (b (string-length s)))
-                (cond ((and (< a b) (char-whitespace? (string-ref s a))) (loop (+ a 1) b))
-                      ((and (< a b) (char-whitespace? (string-ref s (- b 1)))) (loop a (- b 1)))
-                      (else (substring s a b)))))
-            (define (string-trim-right s)
-              (let loop ((b (string-length s)))
-                (if (and (> b 0) (char-whitespace? (string-ref s (- b 1)))) (loop (- b 1)) (substring s 0 b))))
-            (define-syntax when-let
-              (syntax-rules ()
-                ((_ () body ...) (let () body ...))
-                ((_ ((name expr) more ...) body ...)
-                 (let ((name expr)) (if name (when-let (more ...) body ...) #f)))))
-            (define-syntax if-let
-              (syntax-rules ()
-                ((_ bindings then) (if-let bindings then #f))
-                ((_ () then else) then)
-                ((_ ((name expr) more ...) then else)
-                 (let ((name expr)) (if name (if-let (more ...) then else) else)))))
             (define *typing* #f)
             (define (%focused-pane) 0)
             (define (%typing-pane) *typing*)
@@ -308,15 +268,7 @@ mod tests {
             (define (%os-clock) 0)
             (define (%hold-typing id) (set! *typing* id))
             (define (%release-typing) (set! *typing* #f))
-            (define (%os-realpath p) p)
-            (define (slurp path)
-              (and (file-exists? path)
-                   (call-with-input-file path
-                     (lambda (in) (let loop ((acc '()))
-                                    (let ((s (read-string 4096 in)))
-                                      (if (eof-object? s) (apply string-append (reverse acc)) (loop (cons s acc)))))))))
-            (define (spit path text)
-              (call-with-output-file path (lambda (out) (write-string text out))))"#);
+            (define (%os-realpath p) p)"#);
         for name in SHELL {
             let path = shell_dir().join(format!("{name}.scm"));
             let src = std::fs::read_to_string(&path).expect("read");

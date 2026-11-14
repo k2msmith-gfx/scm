@@ -43,6 +43,11 @@ arboard = "3"
 # modeler's `M-.` index and `scm-lsp` use, so a fix to how Scheme is read
 # reaches all three. Text only: it does not link the interpreter.
 scm-text = { git = "https://github.com/k2msmith-gfx/scm.git", branch = "main" }
+# The window (E4): `keys` names a winit key press for the keymap, for both
+# hosts, and the standalone program opens its window with winit and presents
+# the framebuffer through softbuffer -- the modeler's two, at its versions.
+winit = "0.30"
+softbuffer = "0.4"
 # THE VM, for `scm_binding` — the one file in this crate that names it
 # (`layering.rs`). The package is `schemers`; the library it builds is `scm`.
 schemers = { git = "https://github.com/k2msmith-gfx/scm.git", branch = "main" }

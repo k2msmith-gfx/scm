@@ -12,7 +12,9 @@
 //! what Scheme reaches it through is [`scm_binding`] (E2), the one module
 //! that names the VM.
 
+pub mod app;
 pub mod host;
+pub mod keys;
 pub mod language;
 pub mod scm_binding;
 pub mod theme;
