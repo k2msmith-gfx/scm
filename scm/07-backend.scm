@@ -21,7 +21,7 @@
 ;                        (in-process); :printed is what to show either way
 ;   :complete (prefix) → candidate names
 ;   :doc (name)        → a docstring, or #f
-;   :signature (name)  → a signature line, or #f       (E3e-3)
+;   :signature (name)  → a signature line, or #f
 ;   :definition-sites (name) → ((path line column form) …)   (E3e-4)
 (define (backend-op backend key)
   "BACKEND's procedure for KEY, or #f when it offers none."
@@ -54,7 +54,8 @@ answer from its live bindings."
               (lambda (prefix)
                 (filter (lambda (n) (string-prefix? prefix n))
                         (map symbol->string (apropos)))))
-        (cons :doc %doc-of)))
+        (cons :doc %doc-of)
+        (cons :signature (lambda (name) (signature-of name)))))
 
 ; Which backend a BUFFER sends to, or #f for none — the host's choice, as a
 ; FORWARD HOOK (the modeler: this image, for a Scheme buffer). And what the

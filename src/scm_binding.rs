@@ -161,7 +161,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -392,6 +392,17 @@ mod tests {
         let sent = eval(&mut interp, "(apply string-append helped)");
         let Val::Str(sent) = sent else { panic!("{sent:?}") };
         assert!(sent.contains(";; defun: (sq 7)") && sent.contains("=> 49"), "{sent}");
+        // Describe: on an argument, the form's head is described, from the
+        // buffer's backend.
+        eval(&mut interp, r#"
+            (define (twice x) "(twice x)\n\nDoubles X." (* 2 x))
+            (set! helped '())
+            (%editor-set-text 3 "(twice 4")
+            (%editor-act 3 "buffer-end")
+            (editor-describe)"#);
+        let described = eval(&mut interp, "(apply string-append helped)");
+        let Val::Str(described) = described else { panic!("{described:?}") };
+        assert!(described.contains("── (doc twice)") && described.contains("Doubles X."), "{described}");
         // The in-process backend answers a RESULT: what the forms printed,
         // the value, or an error as data rather than an unwind.
         eval(&mut interp, r#"(define r (in-process-eval "(display 1) (+ 2 3)"))
@@ -400,7 +411,7 @@ mod tests {
         assert_eq!(eval(&mut interp, "(%alist-ref r :value #f)"), Val::Int(5));
         assert_eq!(eval(&mut interp, "(%alist-ref r :output #f)"), Val::Str("1".into()));
         assert_eq!(eval(&mut interp, "(%alist-ref e :status #f)"), Val::Sym("error".into()));
-        assert_eq!(eval(&mut interp, "(backend-op (in-process-backend) :signature)"), Val::Bool(false), "not offered yet");
+        assert_eq!(eval(&mut interp, "(backend-op (in-process-backend) :definition-sites)"), Val::Bool(false), "not offered yet");
         let keys = eval(&mut interp, "(describe-keys)");
         let Val::Str(keys) = keys else { panic!("{keys:?}") };
         assert!(keys.contains("C-x C-f — "), "{keys}");
