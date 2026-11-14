@@ -1161,4 +1161,23 @@ mod tests {
         assert!(wait(&|t| t.iter().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| l.trim_end().ends_with("echo"))), "Tab completed ech to echo");
         s.call("(term-close)");
     }
+
+    /// Every command menu's labels are drawn with each word capitalised
+    /// (Kevin, 2026-11-14); a list of names keeps its spelling.
+    #[test]
+    fn menu_labels_are_drawn_in_title_case() {
+        app::resize(1000, 700, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        let get = |s: &mut Session, f: &str| s.eval_to_string(f).unwrap();
+        assert_eq!(get(&mut s, r#"(title-case "send C-c to the REPL")"#), "\"Send C-c To The REPL\"");
+        assert_eq!(get(&mut s, r#"(title-case "show/hide ignored")"#), "\"Show/Hide Ignored\"");
+        assert_eq!(get(&mut s, r#"(title-case "clear + send buffer")"#), "\"Clear + Send Buffer\"");
+        // A named menu, as drawn: labels titled, the key column as it was.
+        let drawn = get(&mut s, "(%item-labels (hash-table-ref *menus* :files) #t)");
+        assert!(drawn.contains("Collapse All") && drawn.contains("Show/Hide Ignored\\ti"), "{drawn}");
+        // The data the menu holds is unchanged — commands and tests name it.
+        assert!(get(&mut s, "(%item-labels (hash-table-ref *menus* :files))").contains("collapse all"));
+        // A list of names posted without TITLE keeps its spelling.
+        assert!(get(&mut s, r#"(%item-labels (list (list "a.txt" #f)))"#).contains("a.txt"));
+    }
 }

@@ -243,7 +243,7 @@
               (list "Replace all the rest" (lambda () (query-answer :all)) "a")
               (list "Replace this one and stop" (lambda () (query-answer :this-and-stop)) ".")
               (list "Quit" (lambda () (query-answer :quit)) "q"))
-        x y 0 #t))
+        x y 0 #t #t))
     (_ (query-help))))
 
 (define (query-done)

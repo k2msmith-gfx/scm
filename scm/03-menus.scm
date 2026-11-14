@@ -29,20 +29,37 @@
 ;it once the keymap's labels exist; a menu drawn before then shows none.
 (define *menu-key-hint* (lambda (action) #f))
 
-(define (%item-text it)
+(define (title-case s)
+  "S with the first letter of each word capitalised — a word starts the
+  string or follows a space or a /. The rest is left as written, so REPL
+  and C-c stay as they are. How a command menu's labels are drawn (Kevin,
+  2026-11-14: \"first letter capitalized of each word\")."
+  (let loop ((cs (string->list s)) (start #t) (acc '()))
+    (if (null? cs)
+      (list->string (reverse acc))
+      (let ((c (car cs)))
+        (loop (cdr cs)
+              (and (memv c '(#\space #\/)) #t)
+              (cons (if (and start (char-alphabetic? c)) (char-upcase c) c) acc))))))
+
+(define (%item-text it (title #f))
   "IT's label as drawn: the label, then a TAB and the key that runs the same
   command — a third element of the item when it has one, else looked up in
   the live keymap, so a rebinding shows in the menu. The kernel draws the key
-  in its own column and ink (theme slot :menu-key-ink)."
+  in its own column and ink (theme slot :menu-key-ink). TITLE draws the label
+  in title case (a command menu's; a list of buffers or objects keeps its
+  names as they are)."
   (let* ((parts (%as-list it))
-         (label (%text (%item-label it)))
+         (label (let ((l (%text (%item-label it)))) (if title (title-case l) l)))
          (key (if (> (length parts) 2) (caddr parts) (*menu-key-hint* (cadr parts)))))
     (if key (string-append label "\t" key) label)))
 
-(define (%item-labels items)
+(define (%item-labels items (title #f))
   "ITEMS' labels as the one newline-joined string the kernel draws, each
-  with its key beside it (`%item-text`)."
-  (string-join (map %item-text (%as-list items)) "\n"))
+  with its key beside it (`%item-text`); TITLE in title case, as every
+  named menu (define-menu) is drawn — the data lists show-menu-items posts
+  are not."
+  (string-join (map (lambda (it) (%item-text it title)) (%as-list items)) "\n"))
 
 ;Drag distance (px) below which no sector is armed — releasing inside
 ;it either posts the linear menu (quick click) or cancels (after hold).
@@ -84,19 +101,21 @@
     (if items
         (begin
           (set! *menu* (%make-state :items items :sel 0))
-          (%show-menu (%item-labels items) 0 x y))
+          (%show-menu (%item-labels items #t) 0 x y))
         (begin (display (format "unknown menu ~s — see *menus*" name)) (newline) #f))))
 
-(define (show-menu-items items x y (sel 0) (opaque #f))
+(define (show-menu-items items x y (sel 0) (opaque #f) (title #f))
   "Open a popup of [label fn] items built right now, at window point (x, y) —
   where (show-menu) opens one that was DEFINED. For a menu whose items are the
   situation rather than the vocabulary: the objects under an ambiguous click,
   say. Same widget, same dismissal, no entry in *menus*. SEL is the row
-  highlighted first; OPAQUE draws it solid, for a popup over text."
+  highlighted first; OPAQUE draws it solid, for a popup over text. TITLE
+  draws the labels in title case, as a named menu's are: for a menu of
+  commands, not of names (buffers, objects), which keep their spelling."
   (if (pair? (%as-list items))
     (begin
       (set! *menu* (%make-state :items items :sel sel))
-      (%show-menu (%item-labels items) sel x y (if opaque 1 0)))
+      (%show-menu (%item-labels items title) sel x y (if opaque 1 0)))
     #f))
 
 ; ── The marking-menu gesture (the optional radial layer, over the SAME
@@ -118,7 +137,7 @@
 (define (pie-draw)
   (let ((at (%state-ref *pie* :at)))
     (%show-pie
-      (%item-labels (%state-ref *pie* :items))
+      (%item-labels (%state-ref *pie* :items) #t)
       (or (%state-ref *pie* :sel) -1)
       (car at)
       (cadr at)
@@ -246,7 +265,7 @@ selects the object it opens a menu for. Replaces ROLE's entry."
           (let ((at (%state-ref p :at)))
             (set! *menu* (%make-state :items (%state-ref p :items) :sel 0))
             (%show-menu
-              (%item-labels (%state-ref p :items))
+              (%item-labels (%state-ref p :items) #t)
               0
               (car at)
               (cadr at)
