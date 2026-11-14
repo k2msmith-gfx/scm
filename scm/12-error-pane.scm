@@ -34,7 +34,10 @@
         (*transcript-append*
           (string-append "   C-h e: the " (number->string (length frames))
                          (if (= 1 (length frames)) " call" " calls")
-                         " it raised in, with their locals")
+                         " it raised in"
+                         ; A remote image's calls come over the wire, without
+                         ; their locals.
+                         (if (any (lambda (f) (pair? (caddr f))) frames) ", with their locals" ""))
           :dim)))))
 
 (define (md-code s)
