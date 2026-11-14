@@ -9,8 +9,11 @@
 ;   *term-pane*    the pane a terminal shows in, or #f for none (the
 ;                  standalone: its lower pane; the modeler: a dock pane)
 ;   *term-shown*   make that pane visible (the modeler opens its dock)
+;   *term-closed*  the terminal is gone (the modeler gives the dock back to
+;                  its REPL)
 (define *term-pane* (lambda () (*pane-id* :terminal)))
 (define *term-shown* (lambda (id) #f))
+(define *term-closed* (lambda (id) #f))
 
 ; THE KEYS THE EDITOR KEEPS while a terminal has the keyboard (D4, Emacs
 ; vterm's choice): the C-x and C-c prefixes and M-x, so C-x o leaves, C-x b
@@ -68,6 +71,7 @@ there is stopped first. C-x o leaves the terminal; C-c C-c sends it a C-c."
   (when-let ((id (term-id)))
     (%term-close id)
     (when (equal? (%typing-pane) id) (%release-typing))
+    (*term-closed* id)
     (echo "terminal closed")))
 
 (define (other-pane)
