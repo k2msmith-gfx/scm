@@ -1,15 +1,16 @@
 ;## host/standalone.scm — the standalone editor's side of the shell's hooks
 ;## (docs/editor-crate-plan.md, E4), loaded after the shell and before the
-;## user's ~/.config/edit/init.scm. Three panes, fixed: the editor, a
-;## transcript under it, the minibuffer at the bottom (src/app.rs). What the
-;## modeler's 05-panes, 08-editor and unify do for the shell, for these.
+;## user's ~/.config/edit/init.scm. Three panes, fixed: the editor, the
+;## bottom PANEL under it — a terminal or the REPL, or hidden — and the
+;## minibuffer (src/app.rs). What the modeler's 05-panes, 08-editor and
+;## unify do for the shell, for these.
 
 ; ── The panes, by key ──────────────────────────────────────────────────────
 (set! *pane-id*
   (lambda (key)
     (case key
       ((:editor) 1)
-      ; The lower pane: the transcript, and the terminal when one runs (E5).
+      ; The bottom panel: the REPL's transcript, or the terminal (E5).
       ((:transcript :repl :terminal) 2)
       ((:minibuffer) 3)
       (else #f))))
@@ -65,26 +66,128 @@
 (bind-editor-pane-keys)
 (bind-editor-completion-keys)
 (bind-editor-keys :minibuffer)
+(bind-editor-keys :repl)
 (bind-term-keys)
 (bind-key "C-x C-c" (lambda () (%quit)))
 
-; ── The terminal in the lower pane (E5) ────────────────────────────────────
-; Opening one shows it; the strip's terminal icon (src/app.rs) and M-x
-; toggle-terminal swap the lower pane between it and the transcript, the
-; program running on either way — as the modeler's REPL icon opens and
-; closes its dock.
-(set! *term-shown* (lambda (id) (%show-terminal #t)))
-(set! *term-closed* (lambda (id) (%show-terminal #f)))
+; ── The bottom panel: a terminal or the REPL ───────────────────────────────
+; Kevin, 2026-11-13: two icons at the strip's right end (src/app.rs), one
+; for each, mutually exclusive — the panel shows one or the other, and the
+; lit icon clicked again hides the whole panel, as the modeler's dock
+; toggles do. The terminal runs your $SHELL; the REPL is a prompt over the
+; image this editor's sends go to, so what C-M-x defined, it can see.
+
+(define (show-panel kind)
+  "Show the bottom panel with KIND in it — :terminal or :repl — and give
+  it the keyboard. The terminal's first show starts your $SHELL."
+  (case kind
+    ((:terminal) (%show-panel :terminal) (if (term-id) (term-focus) (term-open)))
+    ((:repl) (%show-panel :repl) (repl-focus))))
+
+(define (toggle-panel kind)
+  "The strip icon for KIND (:terminal or :repl): show the panel with KIND,
+  or, when it already shows KIND, hide the panel. A terminal's program runs
+  on while it is hidden."
+  (if (equal? (%panel) kind)
+    (begin (%show-panel #f) (focus-scene-editor))
+    (show-panel kind)))
 
 (define (toggle-terminal)
-  "Show or hide the terminal in the lower pane — the strip's terminal icon.
-  The first show starts your $SHELL; hiding leaves it running and gives the
-  keyboard back to the editor."
-  (cond ((%terminal-showing?)
-          (%show-terminal #f)
-          (when (terminal-typing?) (focus-scene-editor)))
-        ((term-id) (term-focus))
-        (else (term-open))))
+  "Show or hide the terminal in the bottom panel — the strip's terminal icon."
+  (toggle-panel :terminal))
+
+(define (toggle-repl)
+  "Show or hide the REPL in the bottom panel — the strip's λ icon."
+  (toggle-panel :repl))
+
+(define (repl)
+  "Show the REPL and give it the keyboard — C-c C-z, SLIME's switch to the
+  REPL."
+  (show-panel :repl))
+(bind-key "C-c C-z" 'repl)
+
+; A terminal that opens shows; one that closes leaves the REPL.
+(set! *term-shown* (lambda (id) (%show-panel :terminal)))
+(set! *term-closed* (lambda (id) (%show-panel :repl)))
+(set! *term-showing?* (lambda (id) (equal? (%panel) :terminal)))
+; What prints to the transcript — a send's answer, show-keys, describe —
+; is the REPL's, so it shows the REPL when it was hidden. A terminal on
+; show stays: a C-M-x's value is on the echo line too.
+(set! *help-open* (lambda () (unless (%panel) (%show-panel :repl))))
+
+; ── The REPL: the transcript with a prompt ─────────────────────────────────
+; It evaluates where this editor's sends do — this image, or the scm image
+; remote-start / remote-connect attached (14-remote) — so the two always
+; agree. RET submits a form the reader says is complete and continues one
+; that is not; up and down walk the history.
+(define *repl-history* '())
+(define *repl-pending* "")
+
+(define (repl-prompt) (if (string=? *repl-pending* "") "scheme λ > " "         > "))
+
+(define (repl-backend)
+  ; Where the REPL's forms go: the socket image while one is connected.
+  (if *remote* (remote-backend *remote*) (in-process-backend)))
+
+(define (repl-focus)
+  "Give the REPL's prompt the keyboard."
+  (%focus-pane 2)
+  (set! *focus-held* #t)
+  (edit-start 2 (repl-prompt) repl-submit :history (lambda () *repl-history*)))
+
+(define (repl-submit line)
+  (let ((src (string-append *repl-pending* line)))
+    (*transcript-append* (string-append (repl-prompt) line) :accent)
+    (if (eq? (%read-status src) 'incomplete)
+      (set! *repl-pending* (string-append src "\n"))
+      (begin
+        (set! *repl-pending* "")
+        (set! *repl-history* (cons src *repl-history*))
+        (let* ((r ((backend-op (repl-backend) :eval) src))
+               (printed (string-trim-right (%alist-ref r :output ""))))
+          (unless (string=? printed "") (*transcript-append* printed))
+          (if (eq? (%alist-ref r :status #f) 'ok)
+            (let ((v (%alist-ref r :printed "")))
+              (unless (or (string=? v "") (string=? v "#<unspecified>"))
+                (*transcript-append* (string-append "=> " v) :dim)))
+            (begin
+              (*transcript-append* (string-append "error: " (%alist-ref r :message "")) :error)
+              (note-send-error! "repl" src (%alist-ref r :message "") (%alist-ref r :frames '())))))))
+    (repl-focus)))
+
+; A click in the REPL's pane gives it the keyboard.
+(add-handler
+  *click-handlers*
+  50
+  :repl-focus
+  (lambda (x y . _)
+    (let ((hit (%pane-at x y)))
+      (and hit (equal? (car hit) 2) (equal? (cadr hit) "text")
+           (begin (repl-focus) #t)))))
+
+; Running a FILE is loading it, and the panel shows where its answers land
+; (Kevin: "if you load a scene, then it should load a repl"): the REPL, or
+; the terminal for a buffer attached to one. A one-form send leaves the panel
+; as it is; its value is on the echo line.
+(set! *before-run-file*
+  (lambda ()
+    (let ((b (backend-of (%editor-active-buffer (editor-pane-id)))))
+      (%show-panel (if (and b (equal? (%alist-ref b :name #f) "the terminal")) :terminal :repl)))))
+
+(define (other-pane)
+  "Move the keyboard between the editor and the bottom panel — C-x o."
+  (cond ((not (equal? (%typing-pane) (editor-pane-id))) (focus-scene-editor))
+        ((%panel) (show-panel (%panel)))
+        (else (echo "the panel is hidden — C-c C-z shows the REPL"))))
+
+(define (edit-open-panel files)
+  "The panel at startup: the REPL when one of FILES is Scheme — you came to
+  run it — else a terminal running your $SHELL."
+  (if (any (lambda (f)
+             (any (lambda (e) (string-suffix? e (string-downcase f))) '(".scm" ".ss" ".sld" ".sls")))
+           files)
+    (show-panel :repl)
+    (show-panel :terminal)))
 
 ; ── Menus: a right-press opens its pane's ──────────────────────────────────
 ; A quick click posts the menu as a list; a press held or dragged is the
@@ -104,6 +207,7 @@
           ((eqv? r 0) (echo "markdown: source view"))
           (else (echo "not a markdown buffer")))))
 (bind-key "C-c C-v" (lambda () (if (editor-focused?) (toggle-markdown-view) #f)))
+(hash-table-set! *editor-key-labels* "C-c C-v" "toggle-markdown-view")
 
 (define-menu
   :editor
@@ -119,13 +223,16 @@
   (list (list "back" editor-back) (list "toggle source" toggle-markdown-view)))
 (define-menu
   :terminal
-  (list (list "back to the editor" focus-scene-editor)
-        (list "send C-c" (lambda () (%term-key 2 "C-c")))
+  (list (list "back to the editor" focus-scene-editor "C-x o")
+        (list "send C-c" (lambda () (%term-key 2 "C-c")) "C-c C-c")
+        (list "REPL" repl)
         (list "hide" toggle-terminal)
         (list "stop the program" term-close)))
 (define-menu
   :transcript
-  (list (list "terminal" toggle-terminal)
+  (list (list "back to the editor" focus-scene-editor "C-x o")
+        (list "terminal" toggle-terminal)
+        (list "hide" toggle-repl)
         (list "clear" (lambda () (%pane-clear 2)))))
 
 (set-pane-menu! :editor
@@ -151,5 +258,5 @@
   "What the transcript says when the editor opens."
   (*transcript-append* "edit — Scheme in this image. C-x C-f opens a file, C-x C-s saves," :dim)
   (*transcript-append* "C-M-x / C-x C-e / C-c C-b send, C-h b lists every key, C-x C-c quits." :dim)
-  (*transcript-append* "The icon at the bottom right (or M-x toggle-terminal) shows a terminal here; C-x o moves" :dim)
-  (*transcript-append* "between it and the editor. Right-click a pane for its menu; hold or drag for the marking menu." :dim))
+  (*transcript-append* "This is the REPL (C-c C-z). The icons at the bottom right swap it for a terminal, or hide" :dim)
+  (*transcript-append* "the panel; C-x o moves the keyboard. Right-click a pane for its menu, hold or drag for the pie." :dim))

@@ -137,10 +137,13 @@ impl ApplicationHandler for App {
                 let (shift, ctrl) = (self.modifiers.shift_key(), self.modifiers.control_key());
                 self.held = (state == ElementState::Pressed).then_some(button);
                 match (state, button) {
-                    // The strip's terminal icon is chrome, not a pane.
-                    (ElementState::Pressed, MouseButton::Left) if app::toggle_at(x, y) => {
+                    // The strip's two icons are chrome, not panes.
+                    (ElementState::Pressed, MouseButton::Left) if app::icon_at(x, y).is_some() => {
                         self.held = None;
-                        self.session.call("(toggle-terminal)");
+                        self.session.call(match app::icon_at(x, y) {
+                            Some(app::Panel::Terminal) => "(toggle-panel :terminal)",
+                            _ => "(toggle-panel :repl)",
+                        });
                     }
                     (ElementState::Pressed, MouseButton::Left) => self.session.click(x, y, shift, ctrl),
                     (ElementState::Released, MouseButton::Left) => self.session.release(x, y),

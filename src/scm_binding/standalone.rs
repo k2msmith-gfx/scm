@@ -63,11 +63,35 @@ fn install_host_prims(interp: &mut scm::Interp) -> Result<(), scm::EmbedError> {
         app::set_pie_delay(val_num(args, 0).max(0.0) as u64);
         Ok(Val::Bool(false))
     })?;
-    interp.define_fn("%show-terminal", |args| {
-        app::show_terminal(!matches!(args.first(), Some(Val::Bool(false)) | None));
+    // `(%show-panel :terminal / :repl / #f)` — what the bottom panel shows,
+    // or hide it; `(%panel)` answers which, or #f.
+    interp.define_fn("%show-panel", |args| {
+        app::show_panel(match val_text(args, 0).as_deref() {
+            Some("terminal") => Some(app::Panel::Terminal),
+            Some("repl") => Some(app::Panel::Repl),
+            _ => None,
+        });
         Ok(Val::Bool(false))
     })?;
-    interp.define_fn("%terminal-showing?", |_| Ok(Val::Bool(app::terminal_showing())))?;
+    interp.define_fn("%panel", |_| {
+        Ok(match app::panel() {
+            Some(app::Panel::Terminal) => Val::Keyword("terminal".into()),
+            Some(app::Panel::Repl) => Val::Keyword("repl".into()),
+            None => Val::Bool(false),
+        })
+    })?;
+    // `(%read-status text)` — complete, incomplete or invalid, by scm's
+    // reader: whether the REPL's RET submits or continues the form.
+    interp.define_fn("%read-status", |args| {
+        Ok(Val::Sym(
+            match scm::parse_status(&val_text(args, 0).unwrap_or_default()) {
+                scm::ParseStatus::Complete => "complete",
+                scm::ParseStatus::Incomplete => "incomplete",
+                scm::ParseStatus::Invalid(_) => "invalid",
+            }
+            .into(),
+        ))
+    })?;
     interp.define_fn("%quit", |_| {
         app::request_quit();
         Ok(Val::Bool(false))
@@ -150,6 +174,8 @@ impl Session {
         for f in files {
             session.call(&format!("(visit-file-text {})", lit(f)));
         }
+        let names: Vec<String> = files.iter().map(|f| lit(f)).collect();
+        session.call(&format!("(edit-open-panel (list {}))", names.join(" ")));
         session.call("(focus-scene-editor)");
         Ok(session)
     }
@@ -267,13 +293,14 @@ mod tests {
         assert_eq!(copied, 11, "the eleven definitions 00-base.scm says a host supplies");
     }
 
-    /// Where the strip's terminal icon is, after a draw.
-    fn with_icon() -> (f64, f64) {
+    /// The centres of the strip's REPL and terminal icons, after a draw.
+    fn icons() -> ((f64, f64), (f64, f64)) {
         let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
         app::draw(&mut fb);
         let m = app::rect(app::MINIBUFFER).unwrap();
-        // Right-aligned, 8 px in, 15 px square, centred on the strip.
-        ((m.x + m.w) as f64 - 15.0, m.y as f64 + m.h as f64 / 2.0)
+        // Right-aligned 8 px in: 15 px squares, 5 px apart, on the strip.
+        let (right, y) = ((m.x + m.w) as f64 - 8.0, m.y as f64 + m.h as f64 / 2.0);
+        ((right - 15.0 - 5.0 - 7.5, y), (right - 7.5, y))
     }
 
     /// The program without its window: boot the shell over the three panes,
@@ -350,18 +377,38 @@ mod tests {
         assert!(wait("sent-9"), "{:?}", crate::termpane::screen_text(app::TRANSCRIPT));
         let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
         app::draw(&mut fb);
-        // The strip's icon: drawn at the minibuffer's right end; toggling
-        // hides the terminal (the program runs on) and shows it again.
-        let icon = with_icon();
-        assert!(app::toggle_at(icon.0, icon.1), "the icon is where it was drawn");
-        s.call("(toggle-terminal)");
-        assert_eq!(app::kind_name(app::TRANSCRIPT), Some("text"), "hidden");
-        assert!(crate::termpane::is_open(app::TRANSCRIPT), "and still running");
-        s.call("(toggle-terminal)");
+        // The strip's two icons: the terminal's, lit, hides the whole panel
+        // (the program runs on) and shows it again; the λ swaps in the REPL.
+        assert_eq!(app::panel(), Some(app::Panel::Terminal), "running an attached buffer shows its terminal");
+        let (repl_icon, term_icon) = icons();
+        assert_eq!(app::icon_at(term_icon.0, term_icon.1), Some(app::Panel::Terminal));
+        assert_eq!(app::icon_at(repl_icon.0, repl_icon.1), Some(app::Panel::Repl));
+        s.call("(toggle-panel :terminal)");
+        assert_eq!(app::panel(), None, "hidden");
+        assert!(app::rect(app::TRANSCRIPT).is_none(), "and the editor has the height");
+        assert!(crate::termpane::is_open(app::TRANSCRIPT), "the program runs on");
+        s.call("(toggle-panel :terminal)");
         assert_eq!(app::kind_name(app::TRANSCRIPT), Some("term"), "shown again");
         assert_eq!(app::typing(), Some(app::TRANSCRIPT));
-        s.call("(term-close)");
+        s.call("(toggle-panel :repl)");
+        assert_eq!(app::panel(), Some(app::Panel::Repl), "the REPL instead");
         assert_eq!(app::kind_name(app::TRANSCRIPT), Some("text"));
+        // The REPL: a complete form answers; an open one continues.
+        for c in "(* 6 7)".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("return");
+        for line in ["(+ 1", "2)"] {
+            for c in line.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+        }
+        let transcript: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+        assert!(transcript.iter().any(|l| l == "=> 42"), "{transcript:?}");
+        assert!(transcript.iter().any(|l| l == "=> 3"), "a form over two lines: {transcript:?}");
+        s.call("(term-close)");
+        assert_eq!(app::panel(), Some(app::Panel::Repl), "a closed terminal leaves the REPL");
 
         // Menus: a quick right-click on the editor posts its sends; on the
         // transcript, its own.
@@ -376,6 +423,12 @@ mod tests {
             s.call("(on-menu-cancel)");
             (open, items)
         };
+        // Every item that has a key shows it, the sends' guarded lambdas
+        // included (the shell labels them).
+        let labels = s.eval_to_string("(%item-labels (hash-table-ref *menus* :editor))").unwrap();
+        for key in ["C-M-x", "C-x C-e", "C-c C-b", "C-c C-r", "C-c C-d d", "s-c", "s-v"] {
+            assert!(labels.contains(&format!("\\t{key}")), "{key} missing: {labels}");
+        }
         let (open, items) = menu_at(&mut s, app::EDITOR);
         assert_eq!(open, "#t", "the editor's menu opened");
         assert!(items.contains("send defun"), "{items}");

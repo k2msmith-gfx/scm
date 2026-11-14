@@ -422,6 +422,7 @@ acts only while the editor holds typing. Call it once the pane exists."
 ; pane-local C-x prefix would shadow C-x C-f/C-x i while typing there).
 (define (editor-focused?) (equal? (%focused-pane) (editor-pane-id)))
 (bind-key "C-x C-s" (lambda () (if (editor-focused?) (save-buffer) #f)))
+(hash-table-set! *editor-key-labels* "C-x C-s" "save-buffer")   ; the lambda names nothing
 
 ; ── The buffer verbs (C-x b / C-x k / C-x C-b) ─────────────────────────────
 

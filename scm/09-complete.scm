@@ -296,4 +296,6 @@ once the pane exists."
 ; SLIME's documentation prefix: C-c C-d d (or C-c C-d C-d) describes.
 (bind-key "C-c C-d d" (lambda () (if (editor-focused?) (editor-describe) #f)))
 (bind-key "C-c C-d C-d" (lambda () (if (editor-focused?) (editor-describe) #f)))
+(hash-table-set! *editor-key-labels* "C-c C-d d" "editor-describe")   ; the lambdas name nothing
+(hash-table-set! *editor-key-labels* "C-c C-d C-d" "editor-describe")
 

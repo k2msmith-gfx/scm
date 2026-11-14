@@ -4,7 +4,10 @@
 //! and `scm_binding::standalone` the Scheme session; this module names
 //! neither winit nor the VM, so a test drives it with no window at all.
 //!
-//! The layout is fixed — the editor over a transcript over a minibuffer —
+//! The layout is fixed — the editor over the bottom PANEL over a minibuffer
+//! — and the panel shows a terminal or the REPL (the transcript with a
+//! prompt), never both, or is hidden: the two icons at the strip's right end
+//! choose, as the modeler's dock toggles do.
 //! rather than the modeler's docking `panes.rs`, which is tangled with its
 //! 3D panes. A shared layout is extracted only if the two start to
 //! duplicate each other.
@@ -19,7 +22,14 @@ pub const EDITOR: u32 = 1;
 pub const TRANSCRIPT: u32 = 2;
 pub const MINIBUFFER: u32 = 3;
 
-/// The transcript's share of the height under the editor.
+/// What the bottom panel shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Panel {
+    Terminal,
+    Repl,
+}
+
+/// The panel's share of the height under the editor.
 const TRANSCRIPT_SHARE: f32 = 0.25;
 
 struct State {
@@ -32,11 +42,11 @@ struct State {
     dirty: bool,
     quit: bool,
     pie_delay_ms: u64,
-    /// Whether the lower pane shows the terminal (when one runs) rather
-    /// than the transcript — what the strip's terminal icon toggles.
-    term_shown: bool,
-    /// Where that icon was last drawn, for the click.
-    toggle: Rect,
+    /// What the bottom panel shows, or `None` when it is hidden and the
+    /// editor has the height.
+    panel: Option<Panel>,
+    /// Where the strip's two icons were last drawn, for the click.
+    icons: [(Panel, Rect); 2],
 }
 
 thread_local! {
@@ -49,8 +59,8 @@ thread_local! {
         dirty: true,
         quit: false,
         pie_delay_ms: 200,
-        term_shown: false,
-        toggle: Rect::default(),
+        panel: Some(Panel::Repl),
+        icons: [(Panel::Repl, Rect::default()), (Panel::Terminal, Rect::default())],
     });
 }
 
@@ -101,13 +111,14 @@ pub fn install_host() {
 }
 
 /// Lay the panes out in a `w`×`h` window at `scale`: the minibuffer one
-/// text row high at the bottom, the transcript a quarter of what is above
-/// it, the editor the rest.
+/// text row high at the bottom, the panel (when shown) a quarter of what is
+/// above it, the editor the rest.
 pub fn resize(w: u32, h: u32, scale: f32) {
     let row = (crate::text::mono_metrics(textpane::font_px() * scale).1 + 8.0 * scale).ceil() as u32;
     let mini = row.min(h);
     let above = h - mini;
-    let transcript = (above as f32 * TRANSCRIPT_SHARE).round() as u32;
+    let shown = with(|s| s.panel.is_some());
+    let transcript = if shown { (above as f32 * TRANSCRIPT_SHARE).round() as u32 } else { 0 };
     let editor = above - transcript;
     with(|s| {
         s.size = (w, h);
@@ -123,16 +134,15 @@ pub fn resize(w: u32, h: u32, scale: f32) {
 
 pub fn rect(id: u32) -> Option<Rect> {
     let i = (id as usize).checked_sub(1)?;
-    with(|s| s.rects.get(i).copied())
+    with(|s| s.rects.get(i).copied()).filter(|r| r.h > 0)
 }
 
-/// What a pane is, as `%pane-at` names it: "editor", "term" for the lower
-/// pane while it shows a terminal, or "text" for a transcript or the
+/// What a pane is, as `%pane-at` names it: "editor", "term" for the panel
+/// while it shows a terminal, or "text" for the REPL's transcript or the
 /// minibuffer.
 pub fn kind_name(id: u32) -> Option<&'static str> {
     match id {
         EDITOR => Some("editor"),
-        // The lower pane is the transcript until a terminal opens in it (E5).
         TRANSCRIPT if terminal_showing() => Some("term"),
         TRANSCRIPT | MINIBUFFER => Some("text"),
         _ => None,
@@ -216,48 +226,74 @@ pub fn pie_delay_ms() -> u64 {
     with(|s| s.pie_delay_ms)
 }
 
-/// Show the terminal in the lower pane, or the transcript. The program
-/// keeps running either way.
-pub fn show_terminal(on: bool) {
-    with(|s| {
-        s.term_shown = on;
-        s.dirty = true;
+/// Show the panel with `panel` in it, or hide it (`None`); the layout
+/// follows. A terminal's program runs on while the panel is hidden or shows
+/// the REPL.
+pub fn show_panel(panel: Option<Panel>) {
+    let (w, h, scale) = with(|s| {
+        s.panel = panel;
+        (s.size.0, s.size.1, s.scale)
     });
+    resize(w, h, scale);
 }
 
-/// Is the lower pane showing a running terminal?
+pub fn panel() -> Option<Panel> {
+    with(|s| s.panel)
+}
+
+/// Is the panel showing a running terminal?
 pub fn terminal_showing() -> bool {
-    with(|s| s.term_shown) && crate::termpane::is_open(TRANSCRIPT)
+    panel() == Some(Panel::Terminal) && crate::termpane::is_open(TRANSCRIPT)
 }
 
-/// Is a window point on the strip's terminal icon?
-pub fn toggle_at(x: f64, y: f64) -> bool {
-    with(|s| s.toggle.w > 0 && s.toggle.contains(x, y))
+/// Which of the strip's icons a window point is on.
+pub fn icon_at(x: f64, y: f64) -> Option<Panel> {
+    with(|s| s.icons.iter().find(|(_, r)| r.w > 0 && r.contains(x, y)).map(|(p, _)| *p))
 }
 
-/// The terminal icon, right-aligned in the minibuffer strip, Zed-style as
-/// the modeler draws its panel toggles: accent over a faint backing while
-/// the terminal shows, dim otherwise. A window outline, a `>` and a cursor.
-fn draw_toggle(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::theme::Theme) {
+/// The strip's two icons, right-aligned, Zed-style as the modeler draws its
+/// dock toggles: the one whose content the panel shows reads in accent over
+/// a faint backing, the other dim. The REPL is a λ; the terminal a window
+/// with a `>` and a cursor.
+fn draw_icons(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::theme::Theme) {
     let size = (15.0 * scale).round();
+    let gap = (5.0 * scale).round();
     let margin = (8.0 * scale).round();
-    let x = (strip.x + strip.w) as f32 - margin - size;
-    let y = strip.y as f32 + (strip.h as f32 - size) * 0.5;
-    let r = Rect { x: x.max(0.0) as u32, y: y.max(0.0) as u32, w: size as u32, h: size as u32 };
-    let on = terminal_showing();
-    let ink = if on { theme.text_accent } else { theme.text_dim };
-    if on {
-        fb.round_rect(r, 3.0 * scale, theme.panel_bg, theme.panel_bg);
-    }
-    let pad = (3.0 * scale).max(2.0);
-    let (ix, iy, iw, ih) = (r.x as f32 + pad, r.y as f32 + pad, r.w as f32 - 2.0 * pad, r.h as f32 - 2.0 * pad);
     let px = |v: f32| v.max(0.0).round() as u32;
-    fb.stroke_rect(Rect { x: px(ix), y: px(iy), w: px(iw), h: px(ih) }, ink);
-    let (cx, cy, ch, cw) = (ix + 2.5 * scale, iy + ih * 0.5, ih * 0.2, 2.0 * scale);
-    crate::framebuffer::draw_line_2d(cx, cy - ch, cx + cw, cy, ink, fb, r);
-    crate::framebuffer::draw_line_2d(cx + cw, cy, cx, cy + ch, ink, fb, r);
-    fb.fill_rect(Rect { x: px(cx + cw + 1.5 * scale), y: px(cy - 0.75 * scale), w: px(3.0 * scale), h: px(1.5 * scale) }, ink);
-    with(|s| s.toggle = r);
+    let y = strip.y as f32 + (strip.h as f32 - size) * 0.5;
+    let mut x = (strip.x + strip.w) as f32 - margin - 2.0 * size - gap;
+    let shown = panel();
+    let mut placed = [(Panel::Repl, Rect::default()), (Panel::Terminal, Rect::default())];
+    for (i, which) in [Panel::Repl, Panel::Terminal].into_iter().enumerate() {
+        let r = Rect { x: px(x), y: px(y), w: size as u32, h: size as u32 };
+        let on = shown == Some(which);
+        let ink = if on { theme.text_accent } else { theme.text_dim };
+        if on {
+            fb.round_rect(r, 3.0 * scale, theme.panel_bg, theme.panel_bg);
+        }
+        let pad = (3.0 * scale).max(2.0);
+        let (ix, iy, iw, ih) = (r.x as f32 + pad, r.y as f32 + pad, r.w as f32 - 2.0 * pad, r.h as f32 - 2.0 * pad);
+        match which {
+            Panel::Repl => {
+                let lpx = ih * 1.25;
+                let adv = crate::text::mono_metrics(lpx).0;
+                crate::text::draw_mono_line(fb, ix + (iw - adv) * 0.5, iy - ih * 0.2, lpx, ink, "λ");
+            }
+            Panel::Terminal => {
+                fb.stroke_rect(Rect { x: px(ix), y: px(iy), w: px(iw), h: px(ih) }, ink);
+                let (cx, cy, ch, cw) = (ix + 2.5 * scale, iy + ih * 0.5, ih * 0.2, 2.0 * scale);
+                crate::framebuffer::draw_line_2d(cx, cy - ch, cx + cw, cy, ink, fb, r);
+                crate::framebuffer::draw_line_2d(cx + cw, cy, cx, cy + ch, ink, fb, r);
+                fb.fill_rect(
+                    Rect { x: px(cx + cw + 1.5 * scale), y: px(cy - 0.75 * scale), w: px(3.0 * scale), h: px(1.5 * scale) },
+                    ink,
+                );
+            }
+        }
+        placed[i] = (which, r);
+        x += size + gap;
+    }
+    with(|s| s.icons = placed);
 }
 
 /// Paint every pane, then whatever floats over them (a popup, a menu).
@@ -280,7 +316,7 @@ pub fn draw(fb: &mut Framebuffer) {
     if let Some(r) = rect(MINIBUFFER) {
         let h = with(|s| s.scale).round().max(1.0) as u32;
         fb.fill_rect(Rect { x: r.x, y: r.y, w: r.w, h }, theme.status_bg);
-        draw_toggle(fb, r, with(|s| s.scale), &theme);
+        draw_icons(fb, r, with(|s| s.scale), &theme);
     }
     textpane::draw_overlay(fb);
 }

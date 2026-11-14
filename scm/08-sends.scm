@@ -300,10 +300,16 @@ itself on the echo line."
 ;; them INTO THE SCENE, every top-level form owning what it made, and its
 ;; unify.scm defines both again, replacing these.
 
+; Running a whole file is LOADING it, which a host may want to answer — the
+; standalone shows the panel the answers land in. A FORWARD HOOK, called
+; before eval-buffer and eval-file run.
+(define *before-run-file* (lambda () #f))
+
 (define (eval-buffer)
   "Run this buffer's text — C-c C-b. Runs the text as it stands, unsaved
   edits included, through the buffer's backend; what it builds belongs to
   it, as with C-M-x."
+  (*before-run-file*)
   (eval-owning (%editor-text (editor-pane-id)) 0 "buffer"))
 
 (define (eval-file)
@@ -312,6 +318,7 @@ itself on the echo line."
   (read-minibuffer
     "Run file: "
     (lambda (p)
+      (*before-run-file*)
       (if (file-exists? p)
         (editor-send-local (slurp p) "file")
         (echo "no such file: " p)))
@@ -325,3 +332,8 @@ itself on the echo line."
 (bind-key "C-c C-r" (lambda () (if (editor-focused?) (eval-region) #f)))
 (bind-key "C-c C-b" (lambda () (if (editor-focused?) (eval-buffer) #f)))
 (bind-key "C-c C-l" 'eval-file)
+; The focus-guarded keys above are lambdas, which name no command: label
+; them, so C-h b, C-h k and a menu's key column can say what each runs.
+(for-each (lambda (row) (hash-table-set! *editor-key-labels* (car row) (cadr row)))
+          '(("C-c C-c" "eval-defun") ("C-x C-e" "eval-last-sexp")
+            ("C-c C-r" "eval-region") ("C-c C-b" "eval-buffer")))

@@ -11,9 +11,13 @@
 ;   *term-shown*   make that pane visible (the modeler opens its dock)
 ;   *term-closed*  the terminal is gone (the modeler gives the dock back to
 ;                  its REPL)
+;   *term-showing?* is pane ID showing its terminal now? (the standalone's
+;                  panel shows the REPL in the same pane while its terminal
+;                  runs on; the modeler's terminal has a pane of its own)
 (define *term-pane* (lambda () (*pane-id* :terminal)))
 (define *term-shown* (lambda (id) #f))
 (define *term-closed* (lambda (id) #f))
+(define *term-showing?* (lambda (id) #t))
 
 ; THE KEYS THE EDITOR KEEPS while a terminal has the keyboard (D4, Emacs
 ; vterm's choice): the C-x and C-c prefixes and M-x, so C-x o leaves, C-x b
@@ -29,7 +33,7 @@
 
 (define (terminal-typing?)
   (let ((t (%typing-pane)))
-    (and t (positive? (%term-open? t)))))
+    (and t (positive? (%term-open? t)) (*term-showing?* t))))
 
 (define (term-focus)
   "Give the terminal pane the keyboard."
