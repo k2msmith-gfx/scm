@@ -2505,6 +2505,12 @@ fn read_datum(e: &mut Engine, a: &[Value]) -> PResult {
     // benchmark: 85 s). So: a window, cut at whitespace so no token is
     // split, doubled whenever the reader says the datum is incomplete or
     // sees nothing but a comment before the cut.
+    //
+    // The window starts small and its read is the answer. It used to start
+    // at 1024 characters, pass through a `String`, and be read twice (a
+    // probe, then the real read) -- ~4000 characters of setup per datum,
+    // which made ray's `%read-numbers`, a `read` per vertex coordinate, 83%
+    // of loading a scene of saved meshes.
     let base = match e.obj(r) {
         Obj::Port {
             kind: PortKind::StringIn { pos, .. },
@@ -2512,30 +2518,31 @@ fn read_datum(e: &mut Engine, a: &[Value]) -> PResult {
         } => *pos,
         _ => return Err(err("read: not a textual input port")),
     };
-    let mut window = 1024usize;
-    let text = loop {
+    let mut window = 64usize;
+    let (reader, result) = loop {
         let Obj::Port { kind: PortKind::StringIn { chars, .. }, .. } = e.obj(r) else {
             unreachable!("checked above")
         };
         let rest = &chars[base..];
-        if window >= rest.len() {
-            break rest.iter().collect::<String>();
-        }
-        let mut end = window;
-        while end < rest.len() && !rest[end].is_whitespace() {
-            end += 1;
-        }
-        let text: String = rest[..=end.min(rest.len() - 1)].iter().collect();
-        let mut probe = crate::reader::Reader::new(&text);
-        match probe.read(e) {
-            Ok(Some(_)) => break text,
+        let whole = window >= rest.len();
+        let text: Vec<char> = if whole {
+            rest.to_vec()
+        } else {
+            let mut end = window;
+            while end < rest.len() && !rest[end].is_whitespace() {
+                end += 1;
+            }
+            rest[..=end.min(rest.len() - 1)].to_vec()
+        };
+        let mut reader = crate::reader::Reader::from_chars(text, Default::default());
+        let result = reader.read(e);
+        match result {
             // Incomplete, or only a comment before the cut: widen.
-            Ok(None) | Err(crate::reader::ReadError::Incomplete) => window *= 2,
-            Err(_) => break text,
+            Ok(None) | Err(crate::reader::ReadError::Incomplete) if !whole => window *= 2,
+            _ => break (reader, result),
         }
     };
-    let mut reader = crate::reader::Reader::new(&text);
-    match reader.read(e) {
+    match result {
         Ok(None) => Ok(Value::Eof),
         Ok(Some(datum)) => {
             let consumed = reader.consumed();

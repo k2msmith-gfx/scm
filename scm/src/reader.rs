@@ -18,6 +18,7 @@
 //! multi-line entry and the editor panes' paren handling both rest on being
 //! able to tell "keep typing" from "that is wrong".
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -76,8 +77,10 @@ pub struct Reader {
     source: Rc<str>,
     /// Character offsets where each line begins, built once on first use so
     /// a location is a binary search rather than a rescan. Without it,
-    /// recording a location per form would make reading quadratic.
-    line_starts: Vec<usize>,
+    /// recording a location per form would make reading quadratic. Built
+    /// lazily: `read` from a port makes a reader per datum, and a number
+    /// (no location) should not pay a scan of its window.
+    line_starts: OnceCell<Vec<usize>>,
     /// `#N=` labels seen so far, for `#N#` to refer back to.
     ///
     /// Per *datum*, not per reader: R7RS scopes a label to the datum it
@@ -102,19 +105,18 @@ impl Reader {
     }
 
     pub fn with_options(src: &str, opts: ReaderOptions) -> Self {
-        let chars: Vec<char> = src.chars().collect();
-        let mut line_starts = vec![0usize];
-        for (i, c) in chars.iter().enumerate() {
-            if *c == '\n' {
-                line_starts.push(i + 1);
-            }
-        }
+        Self::from_chars(src.chars().collect(), opts)
+    }
+
+    /// Over characters the caller already has, so a port-backed `read`
+    /// does not round-trip its window through a `String`.
+    pub fn from_chars(src: Vec<char>, opts: ReaderOptions) -> Self {
         Self {
-            src: chars,
+            src,
             pos: 0,
             opts,
             source: Rc::from("<input>"),
-            line_starts,
+            line_starts: OnceCell::new(),
             labels: HashMap::new(),
             fold_case: false,
         }
@@ -122,15 +124,20 @@ impl Reader {
 
     /// The 1-based line and column of a character offset.
     fn loc_at(&self, offset: usize) -> Loc {
+        let starts = self.line_starts.get_or_init(|| {
+            let mut v = vec![0usize];
+            v.extend(self.src.iter().enumerate().filter(|(_, c)| **c == '\n').map(|(i, _)| i + 1));
+            v
+        });
         // The last line start at or before `offset`.
-        let line = match self.line_starts.binary_search(&offset) {
+        let line = match starts.binary_search(&offset) {
             Ok(i) => i,
             Err(i) => i - 1,
         };
         Loc {
             source: Rc::clone(&self.source),
             line: line as u32 + 1,
-            col: (offset - self.line_starts[line]) as u32 + 1,
+            col: (offset - starts[line]) as u32 + 1,
         }
     }
 

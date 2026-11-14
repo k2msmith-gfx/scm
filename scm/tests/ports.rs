@@ -33,6 +33,30 @@ fn reading_datums_from_a_string_port() {
 }
 
 #[test]
+fn reading_from_a_port_widens_past_its_window() {
+    // `read` on a string port reads a window that starts at 64 characters
+    // and doubles while the datum is incomplete or the window holds only a
+    // comment. Every datum here crosses at least one doubling.
+    let long_str = "x".repeat(300);
+    let long_list = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join(" ");
+    let comment = ";".repeat(200);
+    let src = format!(
+        "\"{long_str}\" ({long_list}) {comment}\n sym #| {comment} |# 42 #;({long_list}) last"
+    );
+    let prog = format!(
+        r#"(let ([p (open-input-string {src:?})])
+             (let loop ([acc '()])
+               (let ([x (read p)])
+                 (if (eof-object? x)
+                     (reverse acc)
+                     (loop (cons (if (string? x) (string-length x)
+                                     (if (pair? x) (length x) x))
+                                 acc))))))"#
+    );
+    assert_eq!(eval(&prog), "(300 100 sym 42 last)");
+}
+
+#[test]
 fn reading_characters_and_lines() {
     assert_eq!(
         eval(r#"(let ([p (open-input-string "ab")])
