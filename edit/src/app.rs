@@ -367,6 +367,11 @@ pub fn drag_divider(d: Divider, x: f64, y: f64) {
 /// the terminal, whichever the panel shows: the pane it started in, or
 /// `None` (the point is elsewhere — the press is an ordinary click).
 pub fn begin_select(x: f64, y: f64) -> Option<u32> {
+    // A press on an open menu picks its row; selecting the text beneath
+    // would clear the selection that the menu's Copy is about to copy.
+    if textpane::overlay_hit(x, y).is_some() {
+        return None;
+    }
     let id = pane_at(x, y)?;
     match kind_name(id) {
         Some("term") => crate::termpane::begin_select(id, x, y).then_some(id),
