@@ -195,6 +195,11 @@ impl ApplicationHandler for App {
                 }
                 self.settle(event_loop);
             }
+            WindowEvent::CursorLeft { .. } => {
+                if app::hover_icon(-1.0, -1.0) {
+                    self.redraw();
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = (position.x, position.y);
                 if let Some(d) = self.dragging_divider {
@@ -202,6 +207,10 @@ impl ApplicationHandler for App {
                     self.cursor = Some((x, y));
                     self.redraw();
                     return;
+                }
+                // An icon's tip shows while the pointer is on it.
+                if app::hover_icon(x, y) {
+                    self.redraw();
                 }
                 let over = app::divider_at(x, y);
                 if over != self.resize_cursor {

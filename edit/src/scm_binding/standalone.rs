@@ -449,6 +449,21 @@ mod tests {
         assert_eq!(app::icon_at(term_icon.0, term_icon.1), Some(app::Icon::Terminal));
         assert_eq!(app::icon_at(repl_icon.0, repl_icon.1), Some(app::Icon::Repl));
         assert_eq!(app::icon_at(files_icon.0, files_icon.1), Some(app::Icon::Files));
+        // Hover help: on an icon its tip floats above it, and leaving clears it.
+        let frame = || {
+            let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
+            app::draw(&mut fb);
+            fb.pixels
+        };
+        let plain = frame();
+        assert!(app::hover_icon(term_icon.0, term_icon.1), "the pointer arrived on an icon");
+        assert_eq!(app::hovered_icon().map(app::Icon::tip), Some("terminal"));
+        let tipped = frame();
+        let changed: Vec<usize> = (0..plain.len()).filter(|&i| plain[i] != tipped[i]).collect();
+        assert!(changed.len() > 200, "a tip is drawn ({} px)", changed.len());
+        assert!(changed.iter().all(|&i| ((i / 800) as f64) < term_icon.1 - 7.0), "above the icon");
+        assert!(app::hover_icon(-1.0, -1.0), "and left");
+        assert_eq!(frame(), plain, "taking the tip with it");
         s.call("(toggle-panel :terminal)");
         assert_eq!(app::panel(), None, "hidden");
         assert!(app::rect(app::TRANSCRIPT).is_none(), "and the editor has the height");

@@ -411,6 +411,24 @@ pub fn draw_mono_line(fb: &mut Framebuffer, x: f32, y: f32, px: f32, ink: u32, t
     });
 }
 
+/// Hover help: `text` in a glass tag centred above `anchor` (up is toward
+/// the panes), kept inside the buffer — the modeler's toolbox tag, so a tip
+/// reads the same in both programs (Kevin, 2026-11-14).
+pub fn draw_tip(fb: &mut Framebuffer, anchor: crate::framebuffer::Rect, text: &str, scale: f32) {
+    let theme = crate::theme::get();
+    let px = 12.0 * scale;
+    let (w, h) = (measure_label(px, text) + 14.0 * scale, label_height(px) + 6.0 * scale);
+    let x = (anchor.x as f32 + anchor.w as f32 / 2.0 - w / 2.0)
+        .min(fb.width as f32 - w - 4.0 * scale)
+        .max(0.0);
+    let y = (anchor.y as f32 - 6.0 * scale - h).max(0.0);
+    let tag = crate::framebuffer::Rect { x: x as u32, y: y as u32, w: w.ceil() as u32, h: h.ceil() as u32 };
+    let full = crate::framebuffer::Rect { x: 0, y: 0, w: fb.width, h: fb.height };
+    crate::framebuffer::glass_rect(fb, tag, 8.0 * scale, theme.popup_bg, 0.88, 0.10, full);
+    let top = label_center_top(px, tag.y as f32, tag.h as f32);
+    draw_label(fb, (tag.x as f32 + 7.0 * scale) as i32, top as i32, px, theme.menu_ink, 1.0, text);
+}
+
 /// Draw `text` with its top-left near (x, y), `px` tall, blending `ink`
 /// over whatever the buffer holds. `alpha` scales the whole label's opacity
 /// (1.0 = solid; the viewport HUD draws at a fraction so the scene shows

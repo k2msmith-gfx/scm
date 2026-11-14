@@ -407,6 +407,10 @@ enum OverlayKind {
 /// (Kevin, 2026-09-23). Completion lists stay opaque: they sit over source
 /// you are reading letter by letter.
 const MENU_ALPHA_DEFAULT: f32 = 0.38;
+/// A menu over a TEXT pane: nearly solid, so the text under it cannot fight
+/// its labels (Kevin, 2026-09-28), but a little see-through, so it still reads
+/// as floating over the pane (Kevin, 2026-11-14: "a bit of transparency").
+const TEXT_MENU_ALPHA: f32 = 0.88;
 thread_local! {
     static MENU_ALPHA: std::cell::Cell<f32> = const { std::cell::Cell::new(MENU_ALPHA_DEFAULT) };
 }
@@ -742,7 +746,15 @@ pub fn draw_overlay(fb: &mut Framebuffer) {
     // 1.0 for a completion list; the menu glass for a menu. The SELECTED row
     // is lifted toward solid — a highlight you can see through stops reading
     // as "this one", which is the only thing the highlight is for.
-    let a = if glass { MENU_ALPHA.with(|m| m.get()) } else { 1.0 };
+    // A menu over a text pane is nearly solid; a completion list (the one
+    // overlay in the monospace face) is solid.
+    let a = if glass {
+        MENU_ALPHA.with(|m| m.get())
+    } else if proportional {
+        TEXT_MENU_ALPHA
+    } else {
+        1.0
+    };
     let a_sel = (a * 0.5 + 0.5).min(1.0);
     let full = Rect { x: 0, y: 0, w: fb.width, h: fb.height };
 
@@ -791,7 +803,7 @@ pub fn draw_overlay(fb: &mut Framebuffer) {
             crate::framebuffer::glass_rect(
                 fb,
                 b,
-                5.0 * scale,
+                8.0 * scale,
                 bg,
                 if armed { a_sel } else { a },
                 0.10 * a,
@@ -813,10 +825,10 @@ pub fn draw_overlay(fb: &mut Framebuffer) {
     if bx.w == 0 || bx.h == 0 {
         return;
     }
-    if glass {
-        crate::framebuffer::glass_rect(fb, bx, 6.0 * scale, theme.popup_bg, a, 0.10 * a, full);
+    if a < 1.0 {
+        crate::framebuffer::glass_rect(fb, bx, 9.0 * scale, theme.popup_bg, a, 0.10 * a, full);
     } else {
-        fb.round_rect(bx, 6.0 * scale, theme.popup_bg, theme.border_focused);
+        fb.round_rect(bx, 9.0 * scale, theme.popup_bg, theme.border_focused);
     }
 
     // Center each row's text in its (possibly padded) row height.
@@ -849,11 +861,11 @@ pub fn draw_overlay(fb: &mut Framebuffer) {
                 h: row_h as u32,
             };
             let sel = sel.clamped(fb.width, fb.height);
-            if glass {
+            if a < 1.0 {
                 crate::framebuffer::glass_rect(
-                    fb, sel, 3.0 * scale, theme.text_accent, a_sel, 0.0, full);
+                    fb, sel, 5.0 * scale, theme.text_accent, a_sel, 0.0, full);
             } else {
-                fb.round_rect(sel, 3.0 * scale, theme.text_accent, theme.text_accent);
+                fb.round_rect(sel, 5.0 * scale, theme.text_accent, theme.text_accent);
             }
             draw_row(fb, bx.x as f32 + pad, ly, theme.status_bg, theme.status_bg, line);
         } else if proportional {

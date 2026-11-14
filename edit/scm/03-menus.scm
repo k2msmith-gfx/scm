@@ -149,8 +149,8 @@
   Over a 3D pane the glass is the point: the model stays visible under the
   labels, which is what lets you aim a flick at what you can see. Over a text
   pane there is nothing to see through to and the text underneath fights every
-  label, so those menus are solid (Kevin, 2026-09-28: the agent, REPL and dock
-  menus). Stated as \"not 3D\" rather than as a list of panes, so a menu on a
+  label, so those menus are nearly solid — 0.88, a little see-through so they
+  still float (Kevin, 2026-09-28: the agent, REPL and dock menus; 2026-11-14). Stated as \"not 3D\" rather than as a list of panes, so a menu on a
   pane that has none yet — the outliner — is right the day it gets one."
   (let ((hit (%pane-at x y)))
     (if hit (not (equal? (cadr hit) "3d")) #t)))
@@ -167,6 +167,8 @@ label boxes, both renderers of the same data.
 
   · the SELECTED row is drawn nearer solid whatever this is: a highlight you
     can see through stops saying \"this one\", which is all it is for.
+  · a menu over a TEXT pane is not affected either: it stays at 0.88, nearly
+    solid (menu-opaque?).
   · COMPLETION popups are not affected. They share the renderer but not the
     job — they sit over source you are reading letter by letter.
   · a preference, so it belongs in ~/.config/modeler/init.scm."

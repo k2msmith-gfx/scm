@@ -71,6 +71,8 @@ struct State {
     panel: Option<Panel>,
     /// Where the strip's icons were last drawn, for the click.
     icons: [(Icon, Rect); 3],
+    /// The icon the pointer is over, whose tip shows above it.
+    hover: Option<Icon>,
     /// The panel's share of the height above the minibuffer, which dragging
     /// the divider sets.
     share: f32,
@@ -93,6 +95,7 @@ thread_local! {
         // asked for (an icon, C-c C-z, running a file).
         panel: None,
         icons: [(Icon::Files, Rect::default()), (Icon::Repl, Rect::default()), (Icon::Terminal, Rect::default())],
+        hover: None,
         share: TRANSCRIPT_SHARE,
         files: true,
         files_share: FILES_SHARE,
@@ -407,6 +410,33 @@ pub fn icon_at(x: f64, y: f64) -> Option<Icon> {
     with(|s| s.icons.iter().find(|(_, r)| r.w > 0 && r.contains(x, y)).map(|(i, _)| *i))
 }
 
+impl Icon {
+    /// Its hover help: the modeler's words for the same toggles.
+    pub fn tip(self) -> &'static str {
+        match self {
+            Icon::Files => "file tree",
+            Icon::Repl => "REPL",
+            Icon::Terminal => "terminal",
+        }
+    }
+}
+
+/// Pointer motion: note which icon is under it. True when that changed, and
+/// a repaint has been asked for — the tip floats over the panes.
+pub fn hover_icon(x: f64, y: f64) -> bool {
+    let over = icon_at(x, y);
+    let changed = with(|s| std::mem::replace(&mut s.hover, over)) != over;
+    if changed {
+        mark_dirty();
+    }
+    changed
+}
+
+/// The icon the pointer is over, if any.
+pub fn hovered_icon() -> Option<Icon> {
+    with(|s| s.hover)
+}
+
 /// The strip's icons, right-aligned, Zed-style as the modeler draws its
 /// dock toggles: lit in accent over a faint backing while what it shows is
 /// shown, dim otherwise. The file tree is a folder; the REPL a λ; the
@@ -497,4 +527,10 @@ pub fn draw(fb: &mut Framebuffer) {
         draw_icons(fb, r, with(|s| s.scale), &theme);
     }
     textpane::draw_overlay(fb);
+    // Last, so a tip is over everything — it is transient.
+    if let Some(icon) = hovered_icon()
+        && let Some((_, r)) = with(|s| s.icons).into_iter().find(|(i, r)| *i == icon && r.w > 0)
+    {
+        crate::text::draw_tip(fb, r, icon.tip(), with(|s| s.scale));
+    }
 }
