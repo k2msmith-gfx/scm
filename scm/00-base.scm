@@ -3,20 +3,27 @@
 ;## host loads before its own prelude: the modeler after its vocabulary
 ;## baseline and before 00-data, so these are its names too.
 ;##
-;## What the shell leans on from the image beneath it, besides scm's own:
-;## `list-sort`, `string-split`, `string-prefix?`, `filter`, `append-map` (ray's
-;## prelude, which the modeler installs first; a standalone host must supply
-;## them — E4; `the_shell_runs_on_a_bare_interpreter` holds the
-;## list) and the kernel prims `%focused-pane`, `%typing-pane`, `%pane-at` and
-;## `%focus-pane` (the pane registry), `%os-clock`, `%set-pie-delay` (the
-;## marking menu's hold timer is the host's event loop), `%hold-typing` /
-;## `%release-typing` (which pane has the keyboard), for file completion
-;## `%os-dir` / `%os-stat`, and for buffers `spit`, `slurp`, `%os-realpath`
-;## and `%pane-rect` (C-x C-b opens over the minibuffer).
+;## What the shell leans on from the image beneath it, besides scm's own
+;## (its R7RS, SRFI 1, 2, 125 and 204) — the list a standalone host supplies
+;## (E4); `the_shell_runs_on_a_bare_interpreter` holds it:
+;##   from ray's prelude   list-sort, string-split, string-contains,
+;##                        string-prefix?, string-suffix?, string-trim-both,
+;##                        string-pad-right
+;##   from the modeler     spit, slurp
+;##   kernel prims         %focused-pane, %typing-pane, %focus-pane, %pane-at,
+;##                        %pane-rect (the pane registry); %hold-typing,
+;##                        %release-typing (the keyboard); %set-pie-delay (the
+;##                        marking menu's hold timer is the host's loop);
+;##                        %os-clock, %os-dir, %os-stat, %os-realpath
 
 ;; Hash tables by their SRFI-125 names — the keymaps are tables, made as
 ;; this loads, before the host's own files import it.
 (import (srfi 125))
+
+;; `match` (SRFI 204) and `and-let*` (SRFI 2): scm's own libraries, imported
+;; here rather than left to the host (ray's prelude imports them too), since
+;; the help screens take bindings apart with them.
+(import (srfi 2) (srfi 204))
 
 (define (%env-ref name default)
   "The value NAME is bound to in the live environment, or DEFAULT when it is

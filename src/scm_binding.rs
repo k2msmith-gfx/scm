@@ -161,7 +161,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -230,8 +230,8 @@ mod tests {
     /// says a host supplies, and runs a key through the chains — a prefix
     /// sequence, the typing-pane rule, an error landing in the echo — a
     /// menu, by keys and by a right-press through the role registry, the
-    /// minibuffer from a prompt to its callback, and buffers from a scratch
-    /// to a saved file and back.
+    /// minibuffer from a prompt to its callback, buffers from a scratch to a
+    /// saved file and back, and the help screens.
     #[test]
     fn the_shell_runs_on_a_bare_interpreter() {
         let mut interp = scm::Interp::new().expect("interp");
@@ -258,6 +258,18 @@ mod tests {
             (define (string-prefix? p s)
               (and (<= (string-length p) (string-length s))
                    (string=? p (substring s 0 (string-length p)))))
+            (define (string-pad-right s n)
+              (if (>= (string-length s) n) (substring s 0 n)
+                  (string-append s (make-string (- n (string-length s)) #\space))))
+            (define (string-contains s p . start) (apply %string-search s p start))
+            (define (string-suffix? x s)
+              (and (<= (string-length x) (string-length s))
+                   (string=? x (substring s (- (string-length s) (string-length x)) (string-length s)))))
+            (define (string-trim-both s)
+              (let loop ((a 0) (b (string-length s)))
+                (cond ((and (< a b) (char-whitespace? (string-ref s a))) (loop (+ a 1) b))
+                      ((and (< a b) (char-whitespace? (string-ref s (- b 1)))) (loop a (- b 1)))
+                      (else (substring s a b)))))
             (define *typing* #f)
             (define (%focused-pane) 0)
             (define (%typing-pane) *typing*)
@@ -348,6 +360,24 @@ mod tests {
         eval(&mut interp, "(kill-buffer) (kill-buffer)");
         assert_eq!(eval(&mut interp, "(buffer-names)"), Val::List(vec![Val::Str("*scratch*".into())]));
         let _ = std::fs::remove_file(&path);
+        // Help: show-keys lists the bindings and the host's extra sections;
+        // C-h k then a sequence opens the command's page in a view-only
+        // buffer; C-h b is the whole keymap as a document.
+        eval(&mut interp, r#"
+            (define helped '())
+            (set! *help-append* (lambda (text (style #f)) (set! helped (cons text helped))))
+            (set! *show-keys-extra* (lambda () (list (cons "── mouse" '(("drag" "select"))))))
+            (show-keys)"#);
+        let helped = eval(&mut interp, "(apply string-append helped)");
+        let Val::Str(helped) = helped else { panic!("{helped:?}") };
+        assert!(helped.contains("C-x C-f") && helped.contains("── mouse"), "{helped}");
+        eval(&mut interp, r#"(describe-key) (on-key "C-x") (on-key "C-f")"#);
+        assert_eq!(eval(&mut interp, "(%editor-markdown? 3)"), Val::Int(1), "the page is a view-only buffer");
+        assert!(eval(&mut interp, r#"(buffer-by-name "*describe-key*")"#) != Val::Bool(false));
+        assert_eq!(eval(&mut interp, "(length ran)"), Val::Int(3), "described, not run");
+        let doc = eval(&mut interp, "(keybindings-markdown)");
+        let Val::Str(doc) = doc else { panic!("{doc:?}") };
+        assert!(doc.starts_with("# Key bindings") && doc.contains("`C-x C-f`"), "{doc}");
         let keys = eval(&mut interp, "(describe-keys)");
         let Val::Str(keys) = keys else { panic!("{keys:?}") };
         assert!(keys.contains("C-x C-f — "), "{keys}");
