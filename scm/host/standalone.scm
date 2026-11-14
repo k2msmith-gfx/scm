@@ -285,14 +285,10 @@ the shell's own (edit/scm/)?"
         (let loop ((k (- (string-length rp) 1)))
           (cond ((< k 0) ".") ((char=? (string-ref rp k) #\/) (if (zero? k) "/" (substring rp 0 k))) (else (loop (- k 1))))))))
 
-(define (edit-open-panel files)
-  "The panel at startup: the REPL when one of FILES is Scheme — you came to
-  run it — else a terminal running your $SHELL."
-  (if (any (lambda (f)
-             (any (lambda (e) (string-suffix? e (string-downcase f))) '(".scm" ".ss" ".sld" ".sls")))
-           files)
-    (show-panel :repl)
-    (show-panel :terminal)))
+; The panel starts HIDDEN (Kevin, 2026-11-13: neither the REPL nor a
+; terminal at startup): the editor has the height, and no shell starts until
+; asked for. It shows when wanted — its icons, C-c C-z, running a file,
+; a help screen that prints into the transcript.
 
 ; ── Menus: a right-press opens its pane's ──────────────────────────────────
 ; A quick click posts the menu as a list; a press held or dragged is the

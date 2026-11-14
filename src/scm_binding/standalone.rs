@@ -211,7 +211,6 @@ impl Session {
             session.call(&format!("(open-path {})", lit(f)));
         }
         let names: Vec<String> = files.iter().map(|f| lit(f)).collect();
-        session.call(&format!("(edit-open-panel (list {}))", names.join(" ")));
         session.call(&format!("(edit-open-files (list {}))", names.join(" ")));
         session.call("(focus-scene-editor)");
         Ok(session)
@@ -381,6 +380,8 @@ mod tests {
         // editor, so it keeps the file in the editor's image.
         s.call("(run-in-editor-image)");
         assert_eq!(app::typing(), Some(app::EDITOR), "the editor has the keyboard");
+        assert_eq!(app::panel(), None, "no REPL or terminal at startup");
+        assert!(!crate::termpane::is_open(app::TRANSCRIPT), "and no shell started");
         assert_eq!(s.eval_to_string("(%editor-text 1)").unwrap(), "\"(define greeting \\\"hi\\\")\\n\"");
 
         // Type at the end and send the form before point: C-x C-e.

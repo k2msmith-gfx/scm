@@ -89,7 +89,9 @@ thread_local! {
         dirty: true,
         quit: false,
         pie_delay_ms: 200,
-        panel: Some(Panel::Repl),
+        // Hidden at startup: the editor has the height until the panel is
+        // asked for (an icon, C-c C-z, running a file).
+        panel: None,
         icons: [(Icon::Files, Rect::default()), (Icon::Repl, Rect::default()), (Icon::Terminal, Rect::default())],
         share: TRANSCRIPT_SHARE,
         files: true,
