@@ -172,7 +172,7 @@ impl Session {
             ));
         }
         for f in files {
-            session.call(&format!("(visit-file-text {})", lit(f)));
+            session.call(&format!("(open-path {})", lit(f)));
         }
         let names: Vec<String> = files.iter().map(|f| lit(f)).collect();
         session.call(&format!("(edit-open-panel (list {}))", names.join(" ")));
@@ -298,8 +298,9 @@ mod tests {
         let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
         app::draw(&mut fb);
         let m = app::rect(app::MINIBUFFER).unwrap();
-        // Right-aligned 8 px in: 15 px squares, 5 px apart, on the strip.
-        let (right, y) = ((m.x + m.w) as f64 - 8.0, m.y as f64 + m.h as f64 / 2.0);
+        // Right-aligned 28 px in (clear of the OS resize corner): 15 px
+        // squares, 5 px apart, on the strip.
+        let (right, y) = ((m.x + m.w) as f64 - 28.0, m.y as f64 + m.h as f64 / 2.0);
         ((right - 15.0 - 5.0 - 7.5, y), (right - 7.5, y))
     }
 
@@ -409,6 +410,15 @@ mod tests {
         assert!(transcript.iter().any(|l| l == "=> 3"), "a form over two lines: {transcript:?}");
         s.call("(term-close)");
         assert_eq!(app::panel(), Some(app::Panel::Repl), "a closed terminal leaves the REPL");
+
+        // The divider: grabbed at the panel's top edge, dragged up, the
+        // panel grows and the editor shrinks to meet it.
+        let top = app::rect(app::TRANSCRIPT).unwrap().y as f64;
+        assert!(app::divider_at(100.0, top + 2.0) && !app::divider_at(100.0, top + 40.0));
+        app::drag_divider(top - 100.0);
+        let (ed, panel) = (app::rect(app::EDITOR).unwrap(), app::rect(app::TRANSCRIPT).unwrap());
+        assert!((panel.y as f64 - (top - 100.0)).abs() <= 1.0, "the panel's top follows the drag");
+        assert_eq!(ed.y + ed.h, panel.y, "the editor ends where the panel starts");
 
         // Menus: a quick right-click on the editor posts its sends; on the
         // transcript, its own.

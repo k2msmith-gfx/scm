@@ -47,6 +47,9 @@ struct State {
     panel: Option<Panel>,
     /// Where the strip's two icons were last drawn, for the click.
     icons: [(Panel, Rect); 2],
+    /// The panel's share of the height above the minibuffer, which dragging
+    /// the divider sets.
+    share: f32,
 }
 
 thread_local! {
@@ -61,6 +64,7 @@ thread_local! {
         pie_delay_ms: 200,
         panel: Some(Panel::Repl),
         icons: [(Panel::Repl, Rect::default()), (Panel::Terminal, Rect::default())],
+        share: TRANSCRIPT_SHARE,
     });
 }
 
@@ -117,8 +121,8 @@ pub fn resize(w: u32, h: u32, scale: f32) {
     let row = (crate::text::mono_metrics(textpane::font_px() * scale).1 + 8.0 * scale).ceil() as u32;
     let mini = row.min(h);
     let above = h - mini;
-    let shown = with(|s| s.panel.is_some());
-    let transcript = if shown { (above as f32 * TRANSCRIPT_SHARE).round() as u32 } else { 0 };
+    let (shown, share) = with(|s| (s.panel.is_some(), s.share));
+    let transcript = if shown { (above as f32 * share).round() as u32 } else { 0 };
     let editor = above - transcript;
     with(|s| {
         s.size = (w, h);
@@ -246,6 +250,38 @@ pub fn terminal_showing() -> bool {
     panel() == Some(Panel::Terminal) && crate::termpane::is_open(TRANSCRIPT)
 }
 
+/// Half the height of the divider's grab strip, in logical pixels: the bar
+/// is the editor's modeline edge, so the strip straddles it.
+const DIVIDER_GRAB: f32 = 4.0;
+
+/// Is a window point on the divider between the editor and the panel?
+pub fn divider_at(x: f64, y: f64) -> bool {
+    let _ = x;
+    match rect(TRANSCRIPT) {
+        Some(r) => {
+            let grab = (DIVIDER_GRAB * with(|s| s.scale)) as f64;
+            (y - r.y as f64).abs() <= grab
+        }
+        None => false,
+    }
+}
+
+/// Drag the divider to window height `y`: the panel takes what is below
+/// it, kept between a few rows and most of the window.
+pub fn drag_divider(y: f64) {
+    let Some(mini) = rect(MINIBUFFER) else { return };
+    let above = mini.y as f64;
+    if above <= 0.0 {
+        return;
+    }
+    let share = ((above - y) / above).clamp(0.08, 0.85) as f32;
+    let (w, h, scale) = with(|s| {
+        s.share = share;
+        (s.size.0, s.size.1, s.scale)
+    });
+    resize(w, h, scale);
+}
+
 /// Which of the strip's icons a window point is on.
 pub fn icon_at(x: f64, y: f64) -> Option<Panel> {
     with(|s| s.icons.iter().find(|(_, r)| r.w > 0 && r.contains(x, y)).map(|(p, _)| *p))
@@ -258,7 +294,8 @@ pub fn icon_at(x: f64, y: f64) -> Option<Panel> {
 fn draw_icons(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::theme::Theme) {
     let size = (15.0 * scale).round();
     let gap = (5.0 * scale).round();
-    let margin = (8.0 * scale).round();
+    // Clear of the window's corner, where the OS keeps its resize handle.
+    let margin = (28.0 * scale).round();
     let px = |v: f32| v.max(0.0).round() as u32;
     let y = strip.y as f32 + (strip.h as f32 - size) * 0.5;
     let mut x = (strip.x + strip.w) as f32 - margin - 2.0 * size - gap;

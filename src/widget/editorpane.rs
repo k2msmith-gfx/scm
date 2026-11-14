@@ -34,7 +34,7 @@ const PAD: f32 = 8.0;
 
 /// Line height as a multiple of the font px (cosmic-text lays out with real
 /// leading, unlike the transcript's char-grid).
-const LEADING: f32 = 1.4;
+pub const LEADING: f32 = 1.4;
 
 /// Undo depth per pane — plenty for a scene file, bounded for sanity.
 const MAX_UNDO: usize = 500;
@@ -2463,7 +2463,9 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
     let typing = crate::host::typing() == Some(id);
     // Modeline: a status bar across the pane's bottom (buffer name + vi mode).
     // Text lays out above it, so reserve its height.
-    let ml_px = px * 0.8;
+    // The modeline reads at the text's own size (Kevin, 2026-11-13: the
+    // status line in the editor's font); it was 0.8 of it.
+    let ml_px = px;
     let (ml_adv, ml_row) = crate::text::mono_metrics(ml_px);
     let ml_h = ml_row + 4.0 * scale;
 

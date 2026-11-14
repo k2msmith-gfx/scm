@@ -358,8 +358,10 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
     let scale = crate::host::ui_scale();
     let px = crate::textpane::font_px() * scale;
     let pad = PAD * scale;
-    let (advance, row_h) = text::mono_metrics(px);
-    let row_h = row_h.ceil();
+    // The editor's line spacing, so a terminal under the editor reads as
+    // the same text.
+    let advance = text::mono_metrics(px).0;
+    let row_h = (px * crate::editorpane::LEADING).round();
     let cols = (((rect.w as f32 - 2.0 * pad) / advance).floor() as usize).max(2);
     let rows = (((rect.h as f32 - 2.0 * pad) / row_h).floor() as usize).max(1);
     let typing = crate::host::typing() == Some(id);

@@ -40,6 +40,21 @@
 ; ── Files ──────────────────────────────────────────────────────────────────
 (define *last-open-path* #f)
 
+(define (open-path p)
+  "Open the file at P in a buffer, as C-x C-f does: markdown in the reading
+  view, a .png/.jpg as a picture, anything else as text. Runs nothing. The
+  files named on the command line open this way too."
+  (let ((eid (editor-pane-id))
+        (low (string-downcase p)))
+    (define (viewer open)
+      (%editor-buffer-new eid)
+      (open eid p)
+      (register-buffer (%editor-active-buffer eid) p)
+      (visit-buffer (%editor-active-buffer eid)))
+    (cond ((string-suffix? ".md" low) (viewer %editor-open-markdown))
+          ((any (lambda (e) (string-suffix? e low)) '(".png" ".jpg" ".jpeg")) (viewer %editor-open-image))
+          (else (visit-file-text p)))))
+
 (define (find-file)
   "Open a file in a buffer — C-x C-f. Runs nothing. Markdown opens in the
   reading view and a .png/.jpg as a picture; anything else is text. TAB
@@ -48,16 +63,7 @@
     "Find file: "
     (lambda (p)
       (set! *last-open-path* p)
-      (let ((eid (editor-pane-id))
-            (low (string-downcase p)))
-        (define (viewer open)
-          (%editor-buffer-new eid)
-          (open eid p)
-          (register-buffer (%editor-active-buffer eid) p)
-          (visit-buffer (%editor-active-buffer eid)))
-        (cond ((string-suffix? ".md" low) (viewer %editor-open-markdown))
-              ((any (lambda (e) (string-suffix? e low)) '(".png" ".jpg" ".jpeg")) (viewer %editor-open-image))
-              (else (visit-file-text p)))))
+      (open-path p))
     :files
     *last-open-path*))
 

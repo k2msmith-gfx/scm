@@ -5,7 +5,8 @@
 //!
 //!     edit [FILE …]                 open each file in a buffer
 //!                                   (M-x term runs a program in the lower pane)
-//!     edit --screenshot OUT [FILE]  draw one frame to OUT.png, no window
+//!     edit --screenshot OUT [--scale N] [FILE]
+//!                                   draw one frame to OUT.png, no window
 //!
 //! `~/.config/edit/init.scm` is loaded at startup, after the shell, when it
 //! exists.
@@ -43,6 +44,10 @@ struct App {
     held: Option<MouseButton>,
     /// When the right button's marking menu reveals itself.
     pie_deadline: Option<std::time::Instant>,
+    /// The divider between the editor and the panel is being dragged.
+    dragging_divider: bool,
+    /// Whether the pointer shows the resize arrow (set only on change).
+    resize_cursor: bool,
 }
 
 impl App {
@@ -137,7 +142,14 @@ impl ApplicationHandler for App {
                 let (shift, ctrl) = (self.modifiers.shift_key(), self.modifiers.control_key());
                 self.held = (state == ElementState::Pressed).then_some(button);
                 match (state, button) {
-                    // The strip's two icons are chrome, not panes.
+                    // The divider and the strip's icons are chrome, not panes.
+                    (ElementState::Pressed, MouseButton::Left) if app::divider_at(x, y) => {
+                        self.held = None;
+                        self.dragging_divider = true;
+                    }
+                    (ElementState::Released, MouseButton::Left) if self.dragging_divider => {
+                        self.dragging_divider = false;
+                    }
                     (ElementState::Pressed, MouseButton::Left) if app::icon_at(x, y).is_some() => {
                         self.held = None;
                         self.session.call(match app::icon_at(x, y) {
@@ -169,6 +181,23 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = (position.x, position.y);
+                if self.dragging_divider {
+                    app::drag_divider(y);
+                    self.cursor = Some((x, y));
+                    self.redraw();
+                    return;
+                }
+                let over = app::divider_at(x, y);
+                if over != self.resize_cursor {
+                    self.resize_cursor = over;
+                    if let Some(d) = &self.display {
+                        d.window.set_cursor(if over {
+                            winit::window::CursorIcon::NsResize
+                        } else {
+                            winit::window::CursorIcon::Default
+                        });
+                    }
+                }
                 match (self.held, self.cursor) {
                     (Some(MouseButton::Left), Some((lx, ly))) => {
                         let (alt, shift) = (self.modifiers.alt_key(), self.modifiers.shift_key());
@@ -233,16 +262,30 @@ fn main() {
         args.drain(i..(i + 2).min(args.len()));
         out
     });
+    // `--scale N` (screenshot only): draw as a display at N× does — 2 for
+    // retina — so a frame shows what the window shows.
+    let scale = args.iter().position(|a| a == "--scale").map(|i| {
+        let n = args.get(i + 1).and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+        args.drain(i..(i + 2).min(args.len()));
+        n
+    });
     let init = init_path();
     if let Some(out) = screenshot {
         // One frame, no window: what a test or a README picture wants.
-        app::resize(1200, 800, 1.0);
+        let scale = scale.unwrap_or(1.0);
+        let (w, h) = ((1200.0 * scale) as u32, (800.0 * scale) as u32);
+        app::resize(w, h, scale);
         let session = Session::boot(init.as_deref(), &args);
         if let Err(e) = session {
             eprintln!("edit: {e}");
             std::process::exit(1);
         }
-        let mut fb = Framebuffer::new(1200, 800);
+        // A terminal's first output arrives on its own thread: give it a
+        // moment, so the frame shows the shell's prompt and not a blank.
+        if app::terminal_showing() {
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+        }
+        let mut fb = Framebuffer::new(w, h);
         app::draw(&mut fb);
         if let Err(e) = fb.save_png(&out) {
             eprintln!("edit: {out}: {e}");
@@ -276,6 +319,8 @@ fn main() {
         cursor: None,
         held: None,
         pie_deadline: None,
+        dragging_divider: false,
+        resize_cursor: false,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("edit: {e}");
