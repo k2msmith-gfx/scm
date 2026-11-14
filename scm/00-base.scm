@@ -10,8 +10,9 @@
 ;## list) and the kernel prims `%focused-pane`, `%typing-pane`, `%pane-at` and
 ;## `%focus-pane` (the pane registry), `%os-clock`, `%set-pie-delay` (the
 ;## marking menu's hold timer is the host's event loop), `%hold-typing` /
-;## `%release-typing` (which pane has the keyboard), and for file completion
-;## `%os-dir` / `%os-stat`.
+;## `%release-typing` (which pane has the keyboard), for file completion
+;## `%os-dir` / `%os-stat`, and for buffers `spit`, `slurp`, `%os-realpath`
+;## and `%pane-rect` (C-x C-b opens over the minibuffer).
 
 ;; Hash tables by their SRFI-125 names — the keymaps are tables, made as
 ;; this loads, before the host's own files import it.

@@ -161,7 +161,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -229,15 +229,16 @@ mod tests {
     /// The shell on a bare interpreter: loads with only what `00-base.scm`
     /// says a host supplies, and runs a key through the chains — a prefix
     /// sequence, the typing-pane rule, an error landing in the echo — a
-    /// menu, by keys and by a right-press through the role registry, and the
-    /// minibuffer, from a prompt to its callback.
+    /// menu, by keys and by a right-press through the role registry, the
+    /// minibuffer from a prompt to its callback, and buffers from a scratch
+    /// to a saved file and back.
     #[test]
     fn the_shell_runs_on_a_bare_interpreter() {
         let mut interp = scm::Interp::new().expect("interp");
         install(&mut interp, &mut |_| {}).expect("install");
         // What a host supplies (00-base.scm's list): ray's list and string
-        // helpers, the focus prims, the pane under a point, a clock, and
-        // the kernel's typing hold.
+        // helpers, the focus prims, the pane under a point, a clock, the
+        // kernel's typing hold, a file writer and a path resolver.
         eval(&mut interp, r#"
             (import (srfi 1))
             (define (list-sort less? xs)
@@ -263,7 +264,10 @@ mod tests {
             (define (%pane-at x y) (list 0 "text"))
             (define (%os-clock) 0)
             (define (%hold-typing id) (set! *typing* id))
-            (define (%release-typing) (set! *typing* #f))"#);
+            (define (%release-typing) (set! *typing* #f))
+            (define (%os-realpath p) p)
+            (define (spit path text)
+              (call-with-output-file path (lambda (out) (write-string text out))))"#);
         for name in SHELL {
             let path = shell_dir().join(format!("{name}.scm"));
             let src = std::fs::read_to_string(&path).expect("read");
@@ -324,6 +328,26 @@ mod tests {
         assert_eq!(eval(&mut interp, "*typing*"), Val::Bool(false), "submitting released it");
         eval(&mut interp, r#"(echo "saved " 3 " files")"#);
         assert_eq!(eval(&mut interp, "(%pane-row-text 7 0)"), Val::Str("saved 3 files".into()));
+        // Buffers: a scratch is named, saved as a file, switched away from
+        // and back by name, and killing the last one leaves a fresh scratch.
+        let path = std::env::temp_dir().join(format!("edit-shell-test-{}.scm", std::process::id()));
+        let path = path.to_string_lossy().replace('\\', "/");
+        eval(&mut interp, &format!(r#"
+            (set! *pane-id* (lambda (key) (case key ((:minibuffer) 7) ((:editor) 3) (else #f))))
+            (register-buffer (%editor-active-buffer 3) #f)
+            (%editor-set-text 3 "(define x 1)")
+            (save-buffer "{path}")"#));
+        assert_eq!(std::fs::read_to_string(&path).ok().as_deref(), Some("(define x 1)"));
+        let base = std::path::Path::new(&path).file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(eval(&mut interp, "(buffer-names)"), Val::List(vec![Val::Str(base.clone())]));
+        eval(&mut interp, r#"(let ((b (%editor-buffer-new 3)))
+                               (register-buffer b #f) (visit-buffer b))"#);
+        assert_eq!(eval(&mut interp, "(buffer-name (%editor-active-buffer 3))"), Val::Str("*scratch*".into()));
+        eval(&mut interp, &format!(r#"(visit-buffer (buffer-by-name "{base}"))"#));
+        assert_eq!(eval(&mut interp, "(%editor-text 3)"), Val::Str("(define x 1)".into()));
+        eval(&mut interp, "(kill-buffer) (kill-buffer)");
+        assert_eq!(eval(&mut interp, "(buffer-names)"), Val::List(vec![Val::Str("*scratch*".into())]));
+        let _ = std::fs::remove_file(&path);
         let keys = eval(&mut interp, "(describe-keys)");
         let Val::Str(keys) = keys else { panic!("{keys:?}") };
         assert!(keys.contains("C-x C-f — "), "{keys}");
