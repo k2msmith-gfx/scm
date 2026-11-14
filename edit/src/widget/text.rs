@@ -411,22 +411,50 @@ pub fn draw_mono_line(fb: &mut Framebuffer, x: f32, y: f32, px: f32, ink: u32, t
     });
 }
 
-/// Hover help: `text` in a glass tag centred above `anchor` (up is toward
-/// the panes), kept inside the buffer — the modeler's toolbox tag, so a tip
-/// reads the same in both programs (Kevin, 2026-11-14).
-pub fn draw_tip(fb: &mut Framebuffer, anchor: crate::framebuffer::Rect, text: &str, scale: f32) {
+/// A hover tip's footprint for `text`: (w, h) in physical px.
+pub fn tip_size(text: &str, scale: f32) -> (f32, f32) {
+    let px = 12.0 * scale;
+    (measure_label(px, text) + 14.0 * scale, label_height(px) + 6.0 * scale)
+}
+
+/// Hover help: `text` in a glass tag with its top-left at (x, y), clipped
+/// to `clip`, at `fade` (0..1, for one that fades in). Every tip in edit
+/// and the modeler is this object — the strip's icons, the modeler's
+/// toggles and its toolbox (Kevin, 2026-11-14). Returns the tag's rect.
+pub fn draw_tip_at(
+    fb: &mut Framebuffer,
+    x: f32,
+    y: f32,
+    text: &str,
+    scale: f32,
+    fade: f32,
+    clip: crate::framebuffer::Rect,
+) -> crate::framebuffer::Rect {
     let theme = crate::theme::get();
     let px = 12.0 * scale;
-    let (w, h) = (measure_label(px, text) + 14.0 * scale, label_height(px) + 6.0 * scale);
+    let (w, h) = tip_size(text, scale);
+    let tag = crate::framebuffer::Rect {
+        x: x.max(0.0) as u32,
+        y: y.max(0.0) as u32,
+        w: w.ceil() as u32,
+        h: h.ceil() as u32,
+    };
+    crate::framebuffer::glass_rect(fb, tag, 8.0 * scale, theme.popup_bg, 0.88 * fade, 0.10 * fade, clip);
+    let top = label_center_top(px, tag.y as f32, tag.h as f32);
+    draw_label(fb, (tag.x as f32 + 7.0 * scale) as i32, top as i32, px, theme.menu_ink, fade, text);
+    tag
+}
+
+/// [`draw_tip_at`] centred above `anchor` (up is toward the panes), kept
+/// inside the buffer — a status-strip icon's tip.
+pub fn draw_tip(fb: &mut Framebuffer, anchor: crate::framebuffer::Rect, text: &str, scale: f32) {
+    let (w, h) = tip_size(text, scale);
     let x = (anchor.x as f32 + anchor.w as f32 / 2.0 - w / 2.0)
         .min(fb.width as f32 - w - 4.0 * scale)
         .max(0.0);
     let y = (anchor.y as f32 - 6.0 * scale - h).max(0.0);
-    let tag = crate::framebuffer::Rect { x: x as u32, y: y as u32, w: w.ceil() as u32, h: h.ceil() as u32 };
     let full = crate::framebuffer::Rect { x: 0, y: 0, w: fb.width, h: fb.height };
-    crate::framebuffer::glass_rect(fb, tag, 8.0 * scale, theme.popup_bg, 0.88, 0.10, full);
-    let top = label_center_top(px, tag.y as f32, tag.h as f32);
-    draw_label(fb, (tag.x as f32 + 7.0 * scale) as i32, top as i32, px, theme.menu_ink, 1.0, text);
+    draw_tip_at(fb, x, y, text, scale, 1.0, full);
 }
 
 /// Draw `text` with its top-left near (x, y), `px` tall, blending `ink`
