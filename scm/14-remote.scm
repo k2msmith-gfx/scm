@@ -20,6 +20,20 @@
 ; one more define-scheme!.
 (define *schemes* '())
 
+; Whether this HOST lets a buffer send to another process at all, as a
+; FORWARD HOOK answering #t, or a string saying why not. The standalone
+; does; the modeler does not — its image IS the scene, so a send to another
+; Scheme would answer `=> …` and change nothing on screen (Kevin,
+; 2026-11-13). A language's own backend (a Guile buffer's Guile) is not
+; this: a Guile file is never a scene.
+(define *remote-allowed?* (lambda () #t))
+
+(define (%remote-refused)
+  ; #f when remote is allowed, else echo why and answer #t.
+  (let ((ok (*remote-allowed?*)))
+    (and (not (eq? ok #t))
+         (begin (echo (if (string? ok) ok "no remote Scheme in this host")) #t))))
+
 (define (define-scheme! name program args language)
   "Make NAME a Scheme remote-start can start: PROGRAM and ARGS, thunks
 answering the program and its arguments, and LANGUAGE, the editor language
@@ -109,11 +123,12 @@ point this buffer's sends at it. KIND names the Scheme it is (\"scm\", the
 default, or \"guile\" for a serve.scm). `ray --tcp` serves scm on 4007 (the
 default), `scm --serve HOST:PORT` anywhere. Its image is the one a send
 changes, and the one completion and describe read."
-  (when *remote* (%remote-close *remote*))
-  (set! *remote* (%remote-connect addr))
-  (set! *remote-kind* kind)
-  (remote-attach)
-  *remote*)
+  (unless (%remote-refused)
+    (when *remote* (%remote-close *remote*))
+    (set! *remote* (%remote-connect addr))
+    (set! *remote-kind* kind)
+    (remote-attach)
+    *remote*))
 
 (define (buffer-scheme)
   ; The *schemes* name for this buffer's language: what remote-start offers
@@ -138,9 +153,10 @@ asks nothing."
         (echo name " running at " (%remote-address *remote*) " — this buffer sends there")
         *remote*)
       (_ (echo "no Scheme called " name " — " (string-join (map car *schemes*) ", ")) #f)))
-  (if which
-    (go which)
-    (begin
+  (cond
+    ((%remote-refused) #f)
+    (which (go which))
+    (else
       (read-minibuffer "Start which Scheme: "
                        (lambda (s) (go (string-trim-both s)))
                        (map car *schemes*)
