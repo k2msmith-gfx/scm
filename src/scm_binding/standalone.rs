@@ -1062,6 +1062,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "saved\ntwo\nthree\n", ":wq writes");
         assert_eq!(quits(&mut s), "3", "and quits");
 
+        // :help — one markdown page: vi's keys, the search in both styles,
+        // the replace, the ':' commands, then every key binding.
+        ex(&mut s, "help");
+        let md = s.eval_to_string("(vi-help-markdown)").unwrap();
+        for want in ["## vi: normal mode", "## Search", "**search forward** — plain `C-s` or `Cmd-F` · vi `/`", "## Replace", ":%s/old/new/c", ":q!"] {
+            assert!(md.contains(want), "help has {want}");
+        }
+        assert!(s.eval_to_string("(buffer-name (%editor-active-buffer 1))").unwrap().contains("*help*"), "it opened");
+        // ZZ writes and quits; ZQ quits without writing.
+        s.call("(visit-buffer (buffer-by-name \"a.txt\"))");
+        s.call("(%editor-replace 1 0 0 0 5 \"zz\")");
+        s.text("Z");
+        s.text("Z");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "zz\ntwo\nthree\n", "ZZ writes");
+        assert_eq!(quits(&mut s), "4", "and quits");
+        s.call("(%editor-replace 1 0 0 0 2 \"lost\")");
+        s.text("Z");
+        s.text("Q");
+        assert_eq!(quits(&mut s), "5", "ZQ quits over the change");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "zz\ntwo\nthree\n", "without writing it");
         ex(&mut s, "define ex-ran 42");
         assert_eq!(s.eval_to_string("ex-ran").unwrap(), "42", "anything else is an M-x command");
         std::fs::remove_dir_all(&dir).ok();
