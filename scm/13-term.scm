@@ -130,13 +130,37 @@ there is stopped first. C-x o leaves the terminal; C-c C-c sends it a C-c."
 
 (bind-key "C-x o" 'other-pane)
 
+; ── Copy and paste ─────────────────────────────────────────────────────────
+; A drag selects (the host routes the mouse to the terminal's grid); Cmd-C
+; copies the selection; Cmd-V pastes the clipboard into the program — as one
+; bracketed paste when the program asked for that, so a shell takes the
+; lines as one paste rather than running each as it arrives.
+
+(define (term-copy)
+  "Copy the terminal's selection to the clipboard — Cmd-C in the terminal,
+  and Copy on its menu. Drag to select."
+  (let* ((id (*term-pane*)) (s (and id (%term-selection id))))
+    (if s
+      (begin (%set-clipboard s) (%term-clear-selection id) (echo "copied " (string-length s) " chars") s)
+      (begin (echo "nothing selected — drag to select") #f))))
+
+(define (term-paste)
+  "Paste the clipboard into the terminal's program — Cmd-V in the
+  terminal, and Paste on its menu."
+  (let ((id (*term-pane*)) (t (%clipboard)))
+    (cond ((not (and id t (positive? (%term-open? id)))) (echo "nothing to paste into") #f)
+          (else (%term-paste id t) t))))
+
 (define (bind-term-keys)
   "(bind-term-keys)  ->  :terminal
 
 The terminal pane's own keys: C-c C-c sends the program a C-c (C-c being
-a prefix the editor keeps). In the pane's local map, so the editor's C-c C-c
-is untouched. Call it once the host's terminal pane exists."
+a prefix the editor keeps); Cmd-C copies the selection and Cmd-V pastes
+the clipboard into the program. In the pane's local map, so the editor's
+C-c C-c is untouched. Call it once the host's terminal pane exists."
   (bind-key "C-c C-c" (lambda () (%term-key (*term-pane*) "C-c")) :terminal)
+  (bind-key "s-c" 'term-copy :terminal)
+  (bind-key "s-v" 'term-paste :terminal)
   :terminal)
 
 ; ── A terminal as a BACKEND (E3e's interface) ──────────────────────────────

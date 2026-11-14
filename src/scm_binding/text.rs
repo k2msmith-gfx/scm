@@ -232,6 +232,33 @@ prim! {
     }
 }
 
+prim! {
+    /// `(%pane-selection id)` — the mouse-selected text of a transcript pane,
+    /// or nil when nothing is selected. (Moved from the modeler, so the
+    /// standalone's REPL copies the same way.)
+    "%pane-selection", fn pane_selection(a0: num) {
+        let id = a0 as f32;
+        if id < 0.0 {
+            return Out::Nil;
+        }
+        match crate::textpane::selection(id as u32) {
+            Some(s) => Out::Text(s),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
+    /// `(%pane-clear-selection id)`.
+    "%pane-clear-selection", fn pane_clear_selection(a0: num) {
+        let id = a0 as f32;
+        if id >= 0.0 {
+            crate::textpane::clear_selection(id as u32);
+        }
+        Out::Nil
+    }
+}
+
 /// This module's prims, installed; answers their names.
 pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm::EmbedError> {
     Ok(vec![
@@ -253,5 +280,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         pane_row_at::install(interp)?,
         pane_top_anchor::install(interp)?,
         pane_proportional::install(interp)?,
+        pane_selection::install(interp)?,
+        pane_clear_selection::install(interp)?,
     ])
 }

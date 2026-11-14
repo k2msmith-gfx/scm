@@ -363,6 +363,27 @@ pub fn drag_divider(d: Divider, x: f64, y: f64) {
     resize(w, h, scale);
 }
 
+/// Start a mouse selection at a window point, in the REPL's transcript or
+/// the terminal, whichever the panel shows: the pane it started in, or
+/// `None` (the point is elsewhere — the press is an ordinary click).
+pub fn begin_select(x: f64, y: f64) -> Option<u32> {
+    let id = pane_at(x, y)?;
+    match kind_name(id) {
+        Some("term") => crate::termpane::begin_select(id, x, y).then_some(id),
+        Some("text") if id == TRANSCRIPT => textpane::begin_select(id, x, y).then_some(id),
+        _ => None,
+    }
+}
+
+/// Carry a selection begun in pane `id` to a window point.
+pub fn extend_select(id: u32, x: f64, y: f64) {
+    if kind_name(id) == Some("term") {
+        crate::termpane::extend_select(id, x, y);
+    } else {
+        textpane::extend_select(id, x, y);
+    }
+}
+
 /// Show or hide the file tree; the layout follows.
 pub fn show_files(on: bool) {
     let (w, h, scale) = with(|s| {

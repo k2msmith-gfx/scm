@@ -757,4 +757,72 @@ mod tests {
         assert!(run_first_item(&mut s, app::FILES, 50.0), "the tree's menu took the click");
         assert_ne!(s.eval_to_string("(%pane-row-count 4)").unwrap(), before, "and its item ran");
     }
+
+    /// Copy and paste at the REPL and in the terminal: a drag selects, Cmd-C
+    /// copies the selection, Cmd-V pastes — into the REPL lines intact and
+    /// nothing run until RET, into the terminal as the program asked. (The
+    /// clipboard is a stand-in here, not the system's.)
+    #[test]
+    fn copy_and_paste_at_the_repl_and_in_the_terminal() {
+        app::resize(1000, 700, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        s.call("(define clip #f) (set! %set-clipboard (lambda (t) (set! clip t))) (set! %clipboard (lambda () clip))");
+        let typed = |s: &mut Session, line: &str| {
+            for c in line.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+        };
+        let draw = || {
+            let mut fb = crate::framebuffer::Framebuffer::new(1000, 700);
+            app::draw(&mut fb);
+        };
+
+        // The REPL: an answer in the transcript, selected with the mouse.
+        s.call("(repl)");
+        typed(&mut s, "(* 6 7)");
+        draw();
+        let rows = crate::textpane::laid_rows(app::TRANSCRIPT);
+        let (y, _) = rows.iter().find(|(_, t)| t == "=> 42").expect("the answer is on screen").clone();
+        let x0 = app::rect(app::TRANSCRIPT).unwrap().x as f64;
+        assert_eq!(app::begin_select(x0 + 9.0, y as f64 + 2.0), Some(app::TRANSCRIPT));
+        app::extend_select(app::TRANSCRIPT, x0 + 400.0, y as f64 + 2.0);
+        s.key("s-c");
+        assert_eq!(s.eval_to_string("clip").unwrap(), "\"=> 42\"", "Cmd-C copied the selection");
+
+        // A multi-line paste waits as pending source; RET runs the form.
+        s.call(r#"(set! clip "(+ 1\n 2)")"#);
+        s.key("s-v");
+        assert_eq!(s.eval_to_string("*repl-pending*").unwrap(), "\"(+ 1\\n\"", "the first line waits");
+        s.key("return");
+        let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+        assert!(t.iter().any(|l| l == "=> 3"), "RET ran the pasted form: {t:?}");
+
+        // The terminal: a line of output selected and copied; a command
+        // pasted in and run.
+        s.call(r#"(term-open "/bin/sh")"#);
+        s.call(r#"(set! clip "echo pasted-$((6*7))")"#);
+        s.key("s-v");
+        s.key("return");
+        let wait = |want: &str| {
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < std::time::Duration::from_secs(10) {
+                if let Some(i) = crate::termpane::screen_text(app::TRANSCRIPT).iter().position(|l| l == want) {
+                    return Some(i);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            None
+        };
+        let row = wait("pasted-42").expect("the pasted command ran");
+        draw();
+        let r = app::rect(app::TRANSCRIPT).unwrap();
+        let row_h = (crate::textpane::font_px() * crate::editorpane::LEADING).round() as f64;
+        let y = r.y as f64 + 6.0 + row as f64 * row_h + row_h / 2.0;
+        assert_eq!(app::begin_select(r.x as f64 + 6.0 + 1.0, y), Some(app::TRANSCRIPT));
+        app::extend_select(app::TRANSCRIPT, r.x as f64 + 6.0 + 9.0 * crate::text::mono_metrics(crate::textpane::font_px()).0 as f64 + 1.0, y);
+        s.key("s-c");
+        assert_eq!(s.eval_to_string("clip").unwrap(), "\"pasted-42\"", "Cmd-C copied the terminal's selection");
+        s.call("(term-close)");
+    }
 }

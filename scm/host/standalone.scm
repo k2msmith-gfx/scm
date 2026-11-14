@@ -127,6 +127,10 @@ the shell's own (edit/scm/)?"
 (bind-editor-keys :repl)
 (bind-term-keys)
 (bind-files-keys)
+; The lower pane is the REPL OR the terminal, one keymap between them: Cmd-C
+; and Cmd-V act on whichever shows.
+(bind-key "s-c" (lambda () (if (equal? (%panel) :terminal) (term-copy) (repl-copy))) :repl)
+(bind-key "s-v" (lambda () (if (equal? (%panel) :terminal) (term-paste) (repl-paste))) :repl)
 (bind-key "C-x C-c" (lambda () (%quit)))
 
 ; ── The bottom panel: a terminal or the REPL ───────────────────────────────
@@ -202,6 +206,36 @@ the shell's own (edit/scm/)?"
                  ((string-prefix? "scm at " (%alist-ref (repl-backend) :name "")) "scm λ > ")
                  (else "scheme λ > "))))
     (if (string=? *repl-pending* "") p (make-string (string-length p) #\space))))
+
+; Copy and paste at the REPL: Cmd-C copies a mouse selection in the
+; transcript (drag to select), else the input line; Cmd-V pastes keeping the
+; lines — all but the last wait as pending source, nothing runs until RET.
+(define (repl-copy)
+  "Copy the REPL's selection — or, with none, its input line — to the
+  clipboard: Cmd-C at the REPL, and Copy on its menu."
+  (let ((s (%pane-selection 2)))
+    (cond (s (%set-clipboard s) (%pane-clear-selection 2) (echo "copied " (string-length s) " chars") s)
+          ((%editing-pane? 2) (edit-copy-line) (%edit :text))
+          (else (echo "nothing selected — drag to select") #f))))
+
+(define (repl-paste)
+  "Paste the clipboard at the REPL prompt, its lines intact: all but the
+  last wait as pending source (the continuation prompt marks them) and the
+  last sits editable — nothing is evaluated until RET. Cmd-V at the REPL,
+  and Paste on its menu."
+  (let ((t (%clipboard)))
+    (and t
+         (begin
+           (unless (%editing-pane? 2) (repl-focus))
+           (let ((lines (string-split t "\n")))
+             (for-each
+               (lambda (l)
+                 (*transcript-append* (string-append (repl-prompt) l) :accent)
+                 (set! *repl-pending* (string-append *repl-pending* l "\n")))
+               (reverse (cdr (reverse lines))))
+             (%edit! :prompt (repl-prompt))
+             (edit-insert (car (last-pair lines))))
+           t))))
 
 (define (repl-focus)
   "Give the REPL's prompt the keyboard."
@@ -330,6 +364,8 @@ the shell's own (edit/scm/)?"
 (define-menu
   :terminal
   (list (list "back to the editor" focus-scene-editor "C-x o")
+        (list "Copy" term-copy "s-c")
+        (list "Paste" term-paste "s-v")
         (list "send C-c" (lambda () (%term-key 2 "C-c")) "C-c C-c")
         (list "REPL" repl)
         (list "hide" toggle-terminal)
@@ -337,6 +373,8 @@ the shell's own (edit/scm/)?"
 (define-menu
   :transcript
   (list (list "back to the editor" focus-scene-editor "C-x o")
+        (list "Copy" repl-copy "s-c")
+        (list "Paste" repl-paste "s-v")
         (list "terminal" toggle-terminal)
         (list "hide" toggle-repl)
         (list "clear" (lambda () (%pane-clear 2)))))

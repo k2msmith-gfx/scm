@@ -59,6 +59,33 @@ prim! {
     }
 }
 
+prim! {
+    /// `(%term-selection id)` — the text selected in pane ID's terminal (a
+    /// mouse drag), or #f.
+    "%term-selection", fn term_selection(id: num) {
+        match crate::termpane::selection_text(id as u32) {
+            Some(s) => Out::Text(s),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
+    /// `(%term-clear-selection id)`.
+    "%term-clear-selection", fn term_clear_selection(id: num) {
+        crate::termpane::clear_selection(id as u32);
+        Out::Nil
+    }
+}
+
+prim! {
+    /// `(%term-paste id text)` — paste TEXT into the program: as one
+    /// bracketed paste when it asked for that, else line by line. 1 when sent.
+    "%term-paste", fn term_paste(id: num, text: text) {
+        Out::Num(if crate::termpane::paste(id as u32, &text) { 1.0 } else { 0.0 })
+    }
+}
+
 pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm::EmbedError> {
     // `(%term-open id program args cwd)` — run PROGRAM with ARGS (a list of
     // strings) in a terminal shown by pane ID, in CWD (#f: the editor's
@@ -80,5 +107,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         term_exited::install(interp)?,
         term_screen::install(interp)?,
         term_scroll::install(interp)?,
+        term_selection::install(interp)?,
+        term_clear_selection::install(interp)?,
+        term_paste::install(interp)?,
     ])
 }

@@ -46,6 +46,9 @@ struct App {
     pie_deadline: Option<std::time::Instant>,
     /// The divider being dragged: the panel's bar, or the file tree's edge.
     dragging_divider: Option<app::Divider>,
+    /// The pane a mouse selection is being dragged in (the REPL's
+    /// transcript or the terminal), from press to release.
+    selecting: Option<u32>,
     /// Which divider the pointer shows the resize arrow for (set only on
     /// change).
     resize_cursor: Option<app::Divider>,
@@ -163,8 +166,17 @@ impl ApplicationHandler for App {
                             _ => "(toggle-panel :repl)",
                         });
                     }
-                    (ElementState::Pressed, MouseButton::Left) => self.session.click(x, y, shift, ctrl),
-                    (ElementState::Released, MouseButton::Left) => self.session.release(x, y),
+                    (ElementState::Pressed, MouseButton::Left) => {
+                        // A press in the REPL or the terminal anchors a
+                        // selection (a drag extends it); the click still
+                        // reaches the shell, which focuses the pane.
+                        self.selecting = app::begin_select(x, y);
+                        self.session.click(x, y, shift, ctrl);
+                    }
+                    (ElementState::Released, MouseButton::Left) => {
+                        self.selecting = None;
+                        self.session.release(x, y);
+                    }
                     (ElementState::Pressed, MouseButton::Right) => {
                         self.session.menu_press(x, y, shift);
                         let ms = app::pie_delay_ms();
@@ -205,6 +217,10 @@ impl ApplicationHandler for App {
                     }
                 }
                 match (self.held, self.cursor) {
+                    (Some(MouseButton::Left), _) if self.selecting.is_some() => {
+                        app::extend_select(self.selecting.unwrap_or_default(), x, y);
+                        app::mark_dirty();
+                    }
                     (Some(MouseButton::Left), Some((lx, ly))) => {
                         let (alt, shift) = (self.modifiers.alt_key(), self.modifiers.shift_key());
                         self.session.drag(x - lx, y - ly, alt, shift);
@@ -326,6 +342,7 @@ fn main() {
         held: None,
         pie_deadline: None,
         dragging_divider: None,
+        selecting: None,
         resize_cursor: None,
     };
     if let Err(e) = event_loop.run_app(&mut app) {

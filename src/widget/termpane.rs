@@ -96,6 +96,9 @@ struct Terminal {
     /// The grid size last sent to the child, and the cell size in pixels.
     size: (usize, usize),
     program: String,
+    /// Where the grid was last drawn — (left, top, cell width, cell height)
+    /// in window pixels — so a mouse point finds its cell.
+    geom: (f32, f32, f32, f32),
 }
 
 thread_local! {
@@ -137,6 +140,7 @@ pub fn open(id: u32, program: &str, args: &[String], cwd: Option<&std::path::Pat
                 title: listener.title,
                 size: (cols, rows),
                 program: program.to_string(),
+                geom: (0.0, 0.0, 1.0, 1.0),
             },
         )
     });
@@ -248,6 +252,82 @@ pub fn key(id: u32, desc: &str) -> bool {
     match (app_cursor, key_bytes(desc, app_cursor.unwrap_or(false))) {
         (Some(_), Some(bytes)) => send(id, &bytes),
         _ => false,
+    }
+}
+
+// ── Selection: the mouse selects, Cmd-C copies, Cmd-V pastes ──────────────
+
+/// The cell under a window point, and which half of it.
+fn cell_at(t: &Terminal, term: &Term<Listener>, x: f64, y: f64) -> (Point, alacritty_terminal::index::Side) {
+    use alacritty_terminal::index::{Column, Line, Side};
+    let (x0, y0, adv, row_h) = t.geom;
+    let (cols, rows) = (term.columns(), term.screen_lines());
+    let fx = ((x as f32 - x0) / adv).max(0.0);
+    let col = (fx as usize).min(cols.saturating_sub(1));
+    let row = (((y as f32 - y0) / row_h).max(0.0) as usize).min(rows.saturating_sub(1));
+    let line = row as i32 - term.grid().display_offset() as i32;
+    let side = if fx.fract() < 0.5 { Side::Left } else { Side::Right };
+    (Point::new(Line(line), Column(col)), side)
+}
+
+/// Start a selection at a window point: false when there is no terminal.
+pub fn begin_select(id: u32, x: f64, y: f64) -> bool {
+    use alacritty_terminal::selection::{Selection, SelectionType};
+    let started = TERMS.with(|t| {
+        let terms = t.borrow();
+        let Some(t) = terms.get(&id) else { return false };
+        let mut term = t.term.lock();
+        let (point, side) = cell_at(t, &term, x, y);
+        term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+        true
+    });
+    crate::host::mark_dirty();
+    started
+}
+
+/// Carry the selection to a window point, as the mouse drags.
+pub fn extend_select(id: u32, x: f64, y: f64) {
+    TERMS.with(|t| {
+        if let Some(t) = t.borrow().get(&id) {
+            let mut term = t.term.lock();
+            let (point, side) = cell_at(t, &term, x, y);
+            if let Some(sel) = term.selection.as_mut() {
+                sel.update(point, side);
+            }
+        }
+    });
+    crate::host::mark_dirty();
+}
+
+/// The selected text, or `None` — nothing selected, or a click (a point).
+pub fn selection_text(id: u32) -> Option<String> {
+    TERMS.with(|t| {
+        let terms = t.borrow();
+        let term = terms.get(&id)?.term.lock();
+        term.selection_to_string().filter(|s| !s.is_empty())
+    })
+}
+
+pub fn clear_selection(id: u32) {
+    TERMS.with(|t| {
+        if let Some(t) = t.borrow().get(&id) {
+            t.term.lock().selection = None;
+        }
+    });
+    crate::host::mark_dirty();
+}
+
+/// Paste `text` into the program: inside bracketed-paste markers when the
+/// program asked for them (a shell then takes the lines as one paste rather
+/// than running each as it arrives), newlines as returns otherwise.
+pub fn paste(id: u32, text: &str) -> bool {
+    let bracketed = TERMS.with(|t| {
+        t.borrow().get(&id).map(|t| t.term.lock().mode().contains(TermMode::BRACKETED_PASTE))
+    });
+    match bracketed {
+        None => false,
+        Some(true) => send(id, format!("\x1b[200~{text}\x1b[201~").as_bytes()),
+        Some(false) => send(id, text.replace("\r\n", "\r").replace('\n', "\r").as_bytes()),
     }
 }
 
@@ -372,11 +452,13 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
             let _ = term.sender.send(Msg::Resize(window));
         }
         let exited = term.exited.load(Ordering::SeqCst);
+        term.geom = (rect.x as f32 + pad, rect.y as f32 + pad, advance, row_h);
         let term = term.term.lock();
         let content = term.renderable_content();
         let offset = content.display_offset as i32;
         let colors = content.colors;
         let cursor = content.cursor.point;
+        let selection = content.selection;
         let (x0, y0) = (rect.x as f32 + pad, rect.y as f32 + pad);
         let cell_at = |p: Point| (x0 + p.column.0 as f32 * advance, y0 + (p.line.0 + offset) as f32 * row_h);
         for cell in content.display_iter {
@@ -395,6 +477,16 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
             let w = if flags.contains(Flags::WIDE_CHAR) { 2.0 * advance } else { advance };
             if bg != theme.editor_bg {
                 fb.fill_rect(Rect { x: x as u32, y: y as u32, w: w.ceil() as u32, h: row_h as u32 }, bg);
+            }
+            // The selection, as the editor shows one: accent, translucent.
+            if selection.is_some_and(|s| s.contains(cell.point)) {
+                let cell_r = Rect { x: x as u32, y: y as u32, w: w.ceil() as u32, h: row_h as u32 };
+                for py in cell_r.y..(cell_r.y + cell_r.h).min(fb.height) {
+                    for px_ in cell_r.x..(cell_r.x + cell_r.w).min(fb.width) {
+                        let i = (py * fb.width + px_) as usize;
+                        fb.pixels[i] = text::blend(fb.pixels[i], theme.text_accent, 0.32);
+                    }
+                }
             }
             if cell.c != ' ' && !flags.contains(Flags::HIDDEN) {
                 let mut buf = [0u8; 4];
