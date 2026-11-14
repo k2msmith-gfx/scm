@@ -165,6 +165,15 @@ fn close(id: u32) {
     }
 }
 
+/// Stop every server this editor started — at exit, so a Scheme the editor
+/// ran does not outlive it.
+pub fn close_all() {
+    let ids: Vec<u32> = CONNS.with(|c| c.borrow().keys().copied().collect());
+    for id in ids {
+        close(id);
+    }
+}
+
 fn entry(k: &str, v: Val) -> Val {
     Val::Pair(Box::new(Val::Keyword(k.into())), Box::new(v))
 }

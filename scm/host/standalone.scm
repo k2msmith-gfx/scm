@@ -30,15 +30,49 @@
   (lambda (text (style #f))
     (%pane-append 2 (%text (or style :normal)) (%describe-part text))))
 
-; A send goes to this image for a Scheme buffer — a scratch, or a file named
-; as Scheme — and nowhere for anything else (the modeler's rule, by name).
+; WHERE A SEND GOES (Kevin, 2026-11-13: a loaded .scm file should run in an
+; scm process of its own). A Scheme FILE is the program being written, so it
+; runs in a separate scm — started on the first send, one for every such
+; file — where a runaway loop is interrupted, a crash takes only that
+; process, and its names never collide with the editor's. What configures
+; the EDITOR stays in the editor's own image, as Emacs's *scratch* does:
+; the scratch buffer, ~/.config/edit/init.scm, and the shell's own files.
+; M-x run-in-editor-image points one file there too; anything not Scheme
+; sends nowhere. (A Guile file's language sends it to Guile first, 15-guile.)
+(define *scm-files* #f)           ; the separate scm for Scheme files, once started
+
+(define (scheme-path? p)
+  (any (lambda (ext) (string-suffix? ext p)) '(".scm" ".ss" ".sld" ".sls")))
+
+(define (editor-own-file? p)
+  "Is P one of the files that configure this editor — the user's init, or
+the shell's own (edit/scm/)?"
+  (let ((rp (real-file p)))
+    (or (equal? rp (real-file (expand-home "~/.config/edit/init.scm")))
+        (string-prefix? (string-append (real-file (%edit-path "scm")) "/") rp))))
+
+(define (scm-files-backend)
+  ; The separate scm, started on first use; a send FAILS if it cannot start.
+  (guard (e (#t (unavailable-backend "scm" e)))
+    (unless (and *scm-files* (%remote-address *scm-files*))
+      (set! *scm-files* (%remote-start *remote-program* 0 '()))
+      (echo "scm running at " (%remote-address *scm-files*) " for the Scheme files"))
+    (remote-backend *scm-files* "scm")))
+
 (set! *buffer-backend*
   (lambda (buf)
     (let ((p (buffer-path buf)))
-      (and (or (not p)
-               (string-prefix? "*" p)
-               (any (lambda (ext) (string-suffix? ext p)) '(".scm" ".ss" ".sld" ".sls")))
-           (in-process-backend)))))
+      (cond ((or (not p) (string-prefix? "*" p) (editor-own-file? p)) (in-process-backend))
+            ((scheme-path? p) (scm-files-backend))
+            (else #f)))))
+
+(define (run-in-editor-image)
+  "Send this buffer's forms to the EDITOR's own image — where the editor's
+  commands and keymaps live — rather than to the separate scm a Scheme file
+  goes to. For code that extends the editor. remote-detach undoes it."
+  (let ((buf (%editor-active-buffer (editor-pane-id))))
+    (hash-table-set! *attached-backends* buf (in-process-backend))
+    (echo (%text (buffer-name buf)) " sends to the editor's image")))
 
 ; ── Files ──────────────────────────────────────────────────────────────────
 (define *last-open-path* #f)
@@ -144,9 +178,13 @@
   (string-prefix? "guile" (%alist-ref (repl-backend) :name "")))
 
 (define (repl-prompt)
-  ; Guile's REPL says its language and module; the continuation lines up
+  ; Each image's own prompt, so the REPL says where it is: Guile's (its
+  ; language and module), the separate scm's (`scm> `, as its own terminal
+  ; prompt), or the editor's image (`scheme λ > `). A continuation lines up
   ; under the form, as the prompt's width of spaces.
-  (let ((p (if (repl-guile?) "scheme@(guile-user)> " "scheme λ > ")))
+  (let ((p (cond ((repl-guile?) "scheme@(guile-user)> ")
+                 ((string-prefix? "scm at " (%alist-ref (repl-backend) :name "")) "scm> ")
+                 (else "scheme λ > "))))
     (if (string=? *repl-pending* "") p (make-string (string-length p) #\space))))
 
 (define (repl-focus)
@@ -361,7 +399,8 @@
 
 (define (edit-greeting)
   "What the transcript says when the editor opens."
-  (*transcript-append* "edit — Scheme in this image. C-x C-f opens a file, C-x C-s saves," :dim)
+  (*transcript-append* "edit — C-x C-f opens a file, C-x C-s saves. A Scheme file runs in an scm of its own;" :dim)
+  (*transcript-append* "*scratch* and your init.scm run in the editor's image." :dim)
   (*transcript-append* "C-M-x / C-x C-e / C-c C-b send, C-h b lists every key, C-x C-c quits." :dim)
   (*transcript-append* "This is the REPL (C-c C-z). The icons at the bottom right swap it for a terminal, or hide" :dim)
   (*transcript-append* "the panel; C-x o moves the keyboard. Right-click a pane for its menu, hold or drag for the pie." :dim))

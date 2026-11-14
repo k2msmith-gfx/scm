@@ -63,6 +63,17 @@ with this editor's index of the files. LABEL names it."
         (cons :signature (lambda (name) (let ((d (describe name))) (and d (%alist-ref d :signature #f)))))
         (cons :definition-sites (lambda (name) (definition-sites name)))))
 
+(define (unavailable-backend label e)
+  "A backend for a Scheme that could not start: every send FAILS, saying
+why, rather than falling through to another image, where the code would
+run somewhere it was not written for. E is what the start raised."
+  (let ((why (if (string? e) e (*show-value* e))))
+    (list (cons :name (string-append label " (not running)"))
+          (cons :eval (lambda (src)
+                        (list (cons :status 'error)
+                              (cons :message (string-append label ": " why))
+                              (cons :output "")))))))
+
 (define (remote-frame line)
   ; "(form)  at src:line:col" as an error-pane frame: (call location locals).
   ; A wire carries the calls, not the stack, so there are no locals.

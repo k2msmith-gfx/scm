@@ -325,4 +325,6 @@ fn main() {
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("edit: {e}");
     }
+    // The Schemes this editor started end with it.
+    edit::scm_binding::remote::close_all();
 }

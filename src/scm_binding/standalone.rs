@@ -316,6 +316,10 @@ mod tests {
         crate::editorpane::set_vi(false);
         app::resize(800, 600, 1.0);
         let mut s = Session::boot(None, &[file.clone()]).expect("boot");
+        // A Scheme file sends to a separate scm by default
+        // (`files_default_to_a_separate_scm`); this test is about the
+        // editor, so it keeps the file in the editor's image.
+        s.call("(run-in-editor-image)");
         assert_eq!(app::typing(), Some(app::EDITOR), "the editor has the keyboard");
         assert_eq!(s.eval_to_string("(%editor-text 1)").unwrap(), "\"(define greeting \\\"hi\\\")\\n\"");
 
@@ -505,6 +509,46 @@ mod tests {
         s.key("C-x");
         s.key("C-c");
         assert!(app::quit_requested());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Where a send goes by default: a Scheme FILE to a separate scm, the
+    /// scratch and the editor's own files to the editor's image — and with
+    /// scm on the PATH, the file's sends really run over there.
+    #[test]
+    fn files_default_to_a_separate_scm() {
+        app::resize(800, 600, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        let name = |s: &mut Session| {
+            s.eval_to_string("(%alist-ref (backend-of (%editor-active-buffer 1)) :name #f)").unwrap()
+        };
+        assert_eq!(name(&mut s), "\"this image\"", "the scratch is the editor's");
+        let shell_file = super::super::shell_dir().join("05-buffers.scm").to_string_lossy().replace('\\', "/");
+        s.call(&format!("(open-path \"{shell_file}\")"));
+        assert_eq!(name(&mut s), "\"this image\"", "the editor's own files are the editor's");
+
+        let dir = std::env::temp_dir().join(format!("edit-scm-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("prog.scm");
+        std::fs::write(&file, "(define (cube x) (* x x x))\n(cube 3)\n").unwrap();
+        let file = file.to_string_lossy().replace('\\', "/");
+        s.call(&format!("(open-path \"{file}\")"));
+        let scm_on_path =
+            std::process::Command::new("scm").arg("--version").output().is_ok_and(|o| o.status.success());
+        if !scm_on_path {
+            // Without scm, a file's send fails and says so -- it does not run here.
+            s.call("(set! *remote-program* \"no-such-scm-here\") (%editor-goto-line 1 0) (eval-defun)");
+            assert_eq!(s.eval_to_string("(%env-ref 'cube #f)").unwrap(), "#f");
+            eprintln!("scm is not on the PATH: the separate-process half skipped");
+        } else {
+            s.call("(%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)");
+            let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+            assert!(t.iter().any(|l| l == "=> 27"), "{t:?}");
+            assert_eq!(s.eval_to_string("(%env-ref 'cube #f)").unwrap(), "#f", "not in the editor's image");
+            assert!(name(&mut s).starts_with("\"scm at "), "{}", name(&mut s));
+            assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"scm> \"", "the REPL says where it is");
+        }
+        super::super::remote::close_all();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

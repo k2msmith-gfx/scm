@@ -157,7 +157,7 @@ mod breaks;
 mod clipboard;
 mod editor;
 mod menu;
-mod remote;
+pub mod remote;
 pub mod standalone;
 mod term;
 mod text;

@@ -37,12 +37,7 @@ starting it before then."
 ; to this image, where Guile code would run as scm's.
 (hash-table-set! *language-backends* "guile"
   (lambda ()
-    (guard (e (#t (let ((why (if (string? e) e (*show-value* e))))
-                    (list (cons :name "guile (not running)")
-                          (cons :eval (lambda (src)
-                                        (list (cons :status 'error)
-                                              (cons :message (string-append "guile: " why))
-                                              (cons :output ""))))))))
+    (guard (e (#t (unavailable-backend "guile" e)))
       (remote-backend (guile-start) "guile"))))
 
 (define (guile-mode)
