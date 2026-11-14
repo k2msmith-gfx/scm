@@ -132,6 +132,9 @@ the shell's own (edit/scm/)?"
 (bind-key "s-c" (lambda () (if (equal? (%panel) :terminal) (term-copy) (repl-copy))) :repl)
 (bind-key "s-v" (lambda () (if (equal? (%panel) :terminal) (term-paste) (repl-paste))) :repl)
 (bind-key "C-x C-c" (lambda () (%quit)))
+; vi's :q and :e (19-ex).
+(set! *ex-quit* (lambda () (%quit)))
+(set! *ex-open* (lambda (path) (open-path (collapse-path path))))
 
 ; ── The bottom panel: a terminal or the REPL ───────────────────────────────
 ; Kevin, 2026-11-13: two icons at the strip's right end (src/app.rs), one

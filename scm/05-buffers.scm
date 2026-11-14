@@ -174,21 +174,10 @@
 
 (define (editor-ex-command ex)
   "Dispatch a vi ':' ex-command submitted from the editor command line — EX
-  is the \":<text>\" string %editor-act hands back on Enter. Supported: :w and
-  :w <file> (write / save-as), and :s / :%s (substitute, 18-search's
-  ex-substitute). Unknown commands echo."
-  ; drop the leading ':'
-  (define line (string-trim-both (substring ex 1 (string-length ex))))
-  (if (string=? line "")
-    #f
-    (let* ((sp (string-contains line " "))
-           (cmd (if sp (substring line 0 sp) line))
-           (arg (and sp
-                     (let ((a (string-trim-both (substring line (+ sp 1) (string-length line)))))
-                       (if (string=? a "") #f a)))))
-      (cond ((or (equal? cmd "w") (equal? cmd "write")) (save-buffer arg))
-            ((ex-substitute line) #t)
-            (else (echo "unknown ex-command :" line))))))
+  is the \":<text>\" string %editor-act hands back on Enter. 19-ex's ex-run
+  does the work (and says what it takes); ':' in vi's normal mode goes there
+  through the minibuffer, so this is the widget's own line's way in."
+  (ex-run (substring ex 1 (string-length ex))))
 
 (define (focus-scene-editor)
   "Give the editor pane typing focus (held until Escape or a 3D hover)."

@@ -1016,4 +1016,54 @@ mod tests {
         assert_eq!(text(), "one x\n2 three\nII");
         assert_eq!(s.eval_to_string("(if *query* 1 0)").unwrap(), "0");
     }
+
+    /// vi's ':' opens the minibuffer; :q refuses over unsaved changes and :q!
+    /// does not; :w, :wq, :N, :bn, :e!; anything else is an M-x command.
+    #[test]
+    fn vi_colon_commands() {
+        app::resize(1000, 700, 1.0);
+        let dir = std::env::temp_dir().join(format!("edit-ex-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.txt");
+        std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
+        let f = std::fs::canonicalize(&f).unwrap().to_string_lossy().into_owned();
+        let mut s = Session::boot(None, &[f.clone()]).expect("boot");
+        s.call("(define quits 0) (set! *ex-quit* (lambda () (set! quits (+ quits 1))))");
+        s.call("(focus-scene-editor) (%editor-set-vi 1 1)");
+        let ex = |s: &mut Session, line: &str| {
+            s.text(":");
+            assert_eq!(app::typing(), Some(app::MINIBUFFER), ": opens the minibuffer");
+            for c in line.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+        };
+        let quits = |s: &mut Session| s.eval_to_string("quits").unwrap();
+        let mini = || crate::textpane::lines(app::MINIBUFFER).last().map(|(_, l)| l.clone()).unwrap_or_default();
+
+        ex(&mut s, "3");
+        assert_eq!(crate::editorpane::cursor(app::EDITOR).0, 2, ":3 goes to line 3");
+        ex(&mut s, "q");
+        assert_eq!(quits(&mut s), "1", ":q quits a clean buffer");
+
+        // An edit, as typing makes one (set-text is a load: it stays clean).
+        s.call("(%editor-replace 1 0 0 0 0 \"changed \")");
+        assert_eq!(s.eval_to_string("(%editor-dirty? 1)").unwrap(), "1");
+        ex(&mut s, "q");
+        assert_eq!(quits(&mut s), "1", ":q refuses over unsaved changes");
+        assert!(mini().contains(":q! quits anyway"), "{}", mini());
+        ex(&mut s, "q!");
+        assert_eq!(quits(&mut s), "2", ":q! quits anyway");
+
+        ex(&mut s, "e!");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "one\ntwo\nthree\n", ":e! reverts to the file");
+        s.call("(%editor-replace 1 0 0 0 3 \"saved\")");
+        ex(&mut s, "wq");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "saved\ntwo\nthree\n", ":wq writes");
+        assert_eq!(quits(&mut s), "3", "and quits");
+
+        ex(&mut s, "define ex-ran 42");
+        assert_eq!(s.eval_to_string("ex-ran").unwrap(), "42", "anything else is an M-x command");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
