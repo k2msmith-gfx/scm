@@ -338,15 +338,19 @@ fn draw_icons(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::them
 pub fn draw(fb: &mut Framebuffer) {
     let theme = crate::theme::Theme::default();
     fb.fill_rect(Rect { x: 0, y: 0, w: fb.width, h: fb.height }, theme.panel_bg);
-    let focused = focused();
+    let (focused, typing) = (focused(), typing());
     for id in [EDITOR, TRANSCRIPT, MINIBUFFER] {
         let Some(r) = rect(id) else { continue };
+        // The pane with the keyboard draws as focused, so a prompt shows
+        // its cursor: M-x holds the minibuffer's typing without moving the
+        // pane focus, and its cursor went undrawn.
+        let lit = focused == id || typing == Some(id);
         if id == EDITOR {
-            editorpane::draw(id, fb, r, focused == id);
+            editorpane::draw(id, fb, r, lit);
         } else if id == TRANSCRIPT && terminal_showing() {
-            crate::termpane::draw(id, fb, r, focused == id);
+            crate::termpane::draw(id, fb, r, lit);
         } else {
-            textpane::draw(id, fb, r, focused == id);
+            textpane::draw(id, fb, r, lit);
         }
     }
     // A rule over the minibuffer, so the echo line reads as its own strip

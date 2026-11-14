@@ -336,6 +336,24 @@ mod tests {
         let saved = std::fs::read_to_string(&file).unwrap();
         assert!(saved.ends_with("(string-length greeting)"), "{saved:?}");
 
+        // M-x prompts with a cursor where the command goes.
+        let theme = crate::theme::Theme::default();
+        let accent_in = |r: crate::framebuffer::Rect| {
+            let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
+            app::draw(&mut fb);
+            (r.y..r.y + r.h)
+                .flat_map(|y| (r.x..r.x + r.w).map(move |x| (x, y)))
+                .filter(|&(x, y)| fb.pixels[(y * 800 + x) as usize] == theme.text_accent)
+                .count()
+        };
+        let mini = app::rect(app::MINIBUFFER).unwrap();
+        let strip = crate::framebuffer::Rect { w: mini.w / 2, ..mini };
+        let before = accent_in(strip);
+        s.key("M-x");
+        assert_eq!(app::typing(), Some(app::MINIBUFFER));
+        assert!(accent_in(strip) > before + 20, "the prompt draws its cursor block");
+        s.key("C-g");
+        s.escape();
         // C-x C-f prompts in the minibuffer; Escape gives the keyboard back.
         s.key("C-x");
         s.key("C-f");
