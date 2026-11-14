@@ -704,4 +704,57 @@ mod tests {
         app::draw(&mut fb);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A pane's right-click menu WORKS over that pane: a click on an item
+    /// runs it. Over the terminal, the file tree and the REPL the pane's own
+    /// click handler took the click first, so the menu popped up and its
+    /// items did nothing (Kevin, 2026-11-13).
+    #[test]
+    fn a_pane_menu_runs_its_items_over_the_pane() {
+        app::resize(1000, 700, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        // Post a pane's menu with a quick right-click inside it, then click
+        // its first row.
+        let run_first_item = |s: &mut Session, id: u32, down: f64| -> bool {
+            let r = app::rect(id).unwrap();
+            let (x, y) = (r.x as f64 + 30.0, r.y as f64 + down);
+            s.menu_press(x, y, false);
+            s.menu_release(x, y);
+            if s.eval_to_string("(menu-open?)").unwrap() != "#t" {
+                return false;
+            }
+            for py in (0..700).step_by(3) {
+                for px in (0..1000).step_by(10) {
+                    let (px, py) = (px as f64, py as f64);
+                    if s.eval_to_string(&format!("(%overlay-hit {px} {py})")).unwrap() == "0" {
+                        s.click(px, py, false, false);
+                        return s.eval_to_string("(menu-open?)").unwrap() == "#f";
+                    }
+                }
+            }
+            false
+        };
+        // The terminal's first item is "back to the editor". The panel made
+        // tall, so a press near its top posts the menu DOWNWARD, over the
+        // terminal itself — where the terminal's click handler took the click.
+        s.call(r#"(term-open "/bin/sh")"#);
+        let mid = { let e = app::rect(app::EDITOR).unwrap(); e.x as f64 + e.w as f64 / 2.0 };
+        app::drag_divider(app::Divider::Panel, mid, 60.0);
+        assert_eq!(app::typing(), Some(app::TRANSCRIPT));
+        assert!(run_first_item(&mut s, app::TRANSCRIPT, 20.0), "the terminal's menu took the click");
+        assert_eq!(app::typing(), Some(app::EDITOR), "and its item ran");
+        s.call("(term-close)");
+        // The REPL's first item is also "back to the editor".
+        s.call("(repl)");
+        assert_eq!(app::typing(), Some(app::TRANSCRIPT));
+        assert!(run_first_item(&mut s, app::TRANSCRIPT, 20.0), "the REPL's menu took the click");
+        assert_eq!(app::typing(), Some(app::EDITOR));
+        // The file tree's first item opens the row the right-press selected:
+        // a folder, which expands.
+        s.call("(files-open-root \".\")");
+        let before = s.eval_to_string("(%pane-row-count 4)").unwrap();
+        // A right-press selects the row under it: two rows down, a folder.
+        assert!(run_first_item(&mut s, app::FILES, 50.0), "the tree's menu took the click");
+        assert_ne!(s.eval_to_string("(%pane-row-count 4)").unwrap(), before, "and its item ran");
+    }
 }

@@ -175,6 +175,19 @@ pub fn resize(w: u32, h: u32, scale: f32) {
         ];
         s.dirty = true;
     });
+    // Under cargo test the program's host is not installed (install_host),
+    // so the widget asks the TEST host: give it this layout, or a popup
+    // lands at a zero-size window's corner and a pane cannot find its rows.
+    #[cfg(test)]
+    {
+        crate::host::testing::set_window(w, h);
+        for id in [EDITOR, TRANSCRIPT, MINIBUFFER, FILES] {
+            match rect(id) {
+                Some(r) => crate::host::testing::set_rect(id, r),
+                None => crate::host::testing::clear_rect(id),
+            }
+        }
+    }
 }
 
 pub fn rect(id: u32) -> Option<Rect> {

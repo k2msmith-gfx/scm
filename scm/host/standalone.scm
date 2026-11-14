@@ -252,9 +252,10 @@ the shell's own (edit/scm/)?"
   *click-handlers*
   50
   :repl-focus
+  ; Not while a menu is up: the click is the menu's.
   (lambda (x y . _)
     (let ((hit (%pane-at x y)))
-      (and hit (equal? (car hit) 2) (equal? (cadr hit) "text")
+      (and (not (menu-open?)) hit (equal? (car hit) 2) (equal? (cadr hit) "text")
            (begin (repl-focus) #t)))))
 
 ; Running a FILE is loading it, and the panel shows where its answers land

@@ -243,8 +243,9 @@ gives the keyboard back. Call it once the host's tree pane exists."
   58
   :files
   (lambda (x y . _)
+    ; Not while a menu is up: the click is the menu's.
     (let ((id (*files-pane*)))
-      (and id
+      (and id (not (menu-open?))
            (let ((hit (%pane-at x y)))
              (and hit (equal? (car hit) id)
                   (begin

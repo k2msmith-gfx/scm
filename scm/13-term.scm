@@ -111,9 +111,12 @@ there is stopped first. C-x o leaves the terminal; C-c C-c sends it a C-c."
   *click-handlers*
   55
   :terminal-focus
+  ; Not while a menu is up: the click is the menu's — an item over the
+  ; terminal ran nothing, the click focusing the pane instead (Kevin,
+  ; 2026-11-13).
   (lambda (x y . _)
     (let ((hit (%pane-at x y)))
-      (and hit (equal? (cadr hit) "term")
+      (and (not (menu-open?)) hit (equal? (cadr hit) "term")
            (begin (term-focus) #t)))))
 
 (add-handler

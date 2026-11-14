@@ -128,6 +128,7 @@ pub mod testing {
         static RECTS: RefCell<HashMap<u32, Rect>> = RefCell::new(HashMap::new());
         static SCALE: Cell<f32> = const { Cell::new(1.0) };
         static TYPING: Cell<Option<u32>> = const { Cell::new(None) };
+        static WINDOW: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     }
 
     struct TestHost;
@@ -145,7 +146,7 @@ pub mod testing {
             TYPING.with(|t| t.get())
         }
         fn window(&self) -> (u32, u32) {
-            (0, 0)
+            WINDOW.with(|w| w.get())
         }
         fn strip_font_px(&self, _pane: u32) -> Option<f32> {
             None
@@ -155,11 +156,24 @@ pub mod testing {
         }
     }
 
+    /// The window's size, where a popup may go.
+    pub fn set_window(w: u32, h: u32) {
+        install(&TestHost);
+        WINDOW.with(|c| c.set((w, h)));
+    }
+
+    /// Forget a pane's rect (a hidden pane).
+    pub fn clear_rect(pane: u32) {
+        install(&TestHost);
+        RECTS.with(|r| r.borrow_mut().remove(&pane));
+    }
+
     /// Install the test host on this thread, with no rects and scale 1.
     pub fn reset() {
         RECTS.with(|r| r.borrow_mut().clear());
         SCALE.with(|s| s.set(1.0));
         TYPING.with(|t| t.set(None));
+        WINDOW.with(|w| w.set((0, 0)));
         install(&TestHost);
     }
 
