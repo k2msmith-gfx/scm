@@ -161,7 +161,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref"];
 
 /// Where [`SHELL`]'s files are: read at boot from the tree this binary was
 /// built from, as the modeler's own prelude is.
@@ -273,6 +273,17 @@ mod tests {
             (define (string-trim-right s)
               (let loop ((b (string-length s)))
                 (if (and (> b 0) (char-whitespace? (string-ref s (- b 1)))) (loop (- b 1)) (substring s 0 b))))
+            (define-syntax when-let
+              (syntax-rules ()
+                ((_ () body ...) (let () body ...))
+                ((_ ((name expr) more ...) body ...)
+                 (let ((name expr)) (if name (when-let (more ...) body ...) #f)))))
+            (define-syntax if-let
+              (syntax-rules ()
+                ((_ bindings then) (if-let bindings then #f))
+                ((_ () then else) then)
+                ((_ ((name expr) more ...) then else)
+                 (let ((name expr)) (if name (if-let (more ...) then else) else)))))
             (define *typing* #f)
             (define (%focused-pane) 0)
             (define (%typing-pane) *typing*)
@@ -281,6 +292,12 @@ mod tests {
             (define (%hold-typing id) (set! *typing* id))
             (define (%release-typing) (set! *typing* #f))
             (define (%os-realpath p) p)
+            (define (slurp path)
+              (and (file-exists? path)
+                   (call-with-input-file path
+                     (lambda (in) (let loop ((acc '()))
+                                    (let ((s (read-string 4096 in)))
+                                      (if (eof-object? s) (apply string-append (reverse acc)) (loop (cons s acc)))))))))
             (define (spit path text)
               (call-with-output-file path (lambda (out) (write-string text out))))"#);
         for name in SHELL {
@@ -403,6 +420,20 @@ mod tests {
         let described = eval(&mut interp, "(apply string-append helped)");
         let Val::Str(described) = described else { panic!("{described:?}") };
         assert!(described.contains("── (doc twice)") && described.contains("Doubles X."), "{described}");
+        // M-.: a name defined in an indexed file opens that file at the
+        // definition; M-, comes back.
+        let lib = std::env::temp_dir().join(format!("edit-xref-test-{}.scm", std::process::id()));
+        std::fs::write(&lib, "; a library\n(define (helper) 1)\n").unwrap();
+        let lib = lib.to_string_lossy().replace('\\', "/");
+        eval(&mut interp, &format!(r#"
+            (%xref-index (list "{lib}"))
+            (define from (%editor-active-buffer 3))
+            (jump-to-definition "helper")"#));
+        assert_eq!(eval(&mut interp, "(buffer-path (%editor-active-buffer 3))"), Val::Str(lib.clone()));
+        assert_eq!(eval(&mut interp, "(%editor-cursor 3)"), Val::List(vec![Val::Int(1), Val::Int(9)]), "on the name");
+        eval(&mut interp, "(go-back-from-definition)");
+        assert_eq!(eval(&mut interp, "(equal? (%editor-active-buffer 3) from)"), Val::Bool(true));
+        let _ = std::fs::remove_file(&lib);
         // The in-process backend answers a RESULT: what the forms printed,
         // the value, or an error as data rather than an unwind.
         eval(&mut interp, r#"(define r (in-process-eval "(display 1) (+ 2 3)"))
@@ -411,7 +442,7 @@ mod tests {
         assert_eq!(eval(&mut interp, "(%alist-ref r :value #f)"), Val::Int(5));
         assert_eq!(eval(&mut interp, "(%alist-ref r :output #f)"), Val::Str("1".into()));
         assert_eq!(eval(&mut interp, "(%alist-ref e :status #f)"), Val::Sym("error".into()));
-        assert_eq!(eval(&mut interp, "(backend-op (in-process-backend) :definition-sites)"), Val::Bool(false), "not offered yet");
+        assert!(eval(&mut interp, "(backend-op (in-process-backend) :definition-sites)") != Val::Bool(false), "all five offered");
         let keys = eval(&mut interp, "(describe-keys)");
         let Val::Str(keys) = keys else { panic!("{keys:?}") };
         assert!(keys.contains("C-x C-f — "), "{keys}");

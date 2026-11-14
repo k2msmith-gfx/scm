@@ -402,6 +402,9 @@ acts only while the editor holds typing. Call it once the pane exists."
   ; C-M-x is one chord — safe pane-local (08-sends binds the C-x/C-c sends
   ; globally, with a focus guard).
   (bind-key "C-M-x" 'eval-defun :editor)
+  ; M-. and M-, (10-xref): Emacs's xref keys, pane-local.
+  (bind-key "M-." 'find-definition-at-point :editor)
+  (bind-key "M-," 'go-back-from-definition :editor)
   :editor)
 
 (define (set-editor-vi on)
