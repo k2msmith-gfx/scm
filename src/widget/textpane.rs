@@ -46,6 +46,9 @@ pub fn set_font_px(px: f32) -> f32 {
 /// Inner padding between the pane border and the character grid.
 pub const PAD: f32 = 8.0;
 
+/// A proportional list pane's text size, as a share of the mono size.
+const PROPORTIONAL_SHARE: f32 = 1.08;
+
 /// A line's ink, by role. The theme maps each to a color at draw time.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Style {
@@ -1171,8 +1174,11 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
                     let x0 = rect.x as f32 + pad;
                     text::draw_mono_line(fb, x0, y, px, style.ink(&theme), marks);
                     let nx = x0 + marks.chars().count() as f32 * advance;
-                    let ny = y + text::mono_ascent(px) - text::label_ascent(px);
-                    text::draw_label(fb, nx.round() as i32, ny.round() as i32, px, style.ink(&theme), 1.0, name);
+                    // A touch above the text size: Plex Sans reads smaller
+                    // than a mono face at the same px (Kevin, 2026-11-13).
+                    let lpx = px * PROPORTIONAL_SHARE;
+                    let ny = y + text::mono_ascent(px) - text::label_ascent(lpx);
+                    text::draw_label(fb, nx.round() as i32, ny.round() as i32, lpx, style.ink(&theme), 1.0, name);
                 } else {
                     text::draw_mono_line(fb, rect.x as f32 + pad, y, px, style.ink(&theme), &row);
                 }
