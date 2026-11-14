@@ -1114,6 +1114,15 @@ mod tests {
         assert_eq!(cur(), (0, 0), "C-g: back where the search began");
         assert_eq!(s.eval_to_string("(if *search-mode* 1 0)").unwrap(), "0");
 
+        // @ is a character to search for, not the file picker; TAB
+        // completes nothing.
+        s.key("C-s");
+        s.text("@");
+        s.key("tab");
+        assert_eq!(s.eval_to_string("(if (%edit :comp) 1 0)").unwrap(), "0", "no completion popup at a search prompt");
+        assert_eq!(s.eval_to_string("(%edit :text)").unwrap(), "\"@\"");
+        s.key("C-g");
+
         s.key("C-s");
         s.text("ca");
         s.key("C-s");

@@ -391,6 +391,13 @@
         (odd? n))))
 
 (define (edit-tab)
+  (cond
+    ; A :plain prompt (a search, a replacement) takes text as typed: TAB
+    ; completes nothing there.
+    ((eq? (%edit :source) :plain) #f)
+    (else (edit-tab-complete))))
+
+(define (edit-tab-complete)
   (if (%edit :comp)
     ; zsh: TAB extends/descends while it can, then menu-cycles.
     (if (%comp :files) (if (files-lcp) #f (comp-move 1)) (comp-move 1))
@@ -480,7 +487,8 @@
 (define (read-minibuffer prompt callback (source #f) (initial #f) (on-change #f) (on-cancel #f))
   "Prompt in the minibuffer with the shared input editor; `callback` gets
   the submitted string after the prompt closes. Optional completion
-  source: :files (TAB completes project paths) or :symbols. `initial`
+  source: :files (TAB completes project paths), :symbols, or :plain (no
+  completion at all, and @ is just a character — a search). `initial`
   pre-fills the input (cursor at end) — e.g. the last path, so a repeat
   find-file starts where the last one left off. Escape cancels. ON-CHANGE
   hears the text as it is typed; ON-CANCEL runs when C-g or Escape
@@ -544,7 +552,9 @@
     (if (and *edit* (equal? (%typing-pane) (%edit :pane)))
       (begin
         (edit-insert s)
-        (cond ((equal? s "@") (comp-open :files #t))
+        ; @ opens the file picker — but not at a :plain prompt, where an @
+        ; is something to search for.
+        (cond ((and (equal? s "@") (not (eq? (%edit :source) :plain))) (comp-open :files #t))
           ((%edit :comp) (comp-refresh))
           (else #f))
         #t)

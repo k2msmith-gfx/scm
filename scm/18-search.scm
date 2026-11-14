@@ -67,7 +67,7 @@
   (match *search-mode*
     ((l s e)
       (set! *search-mode* #f)
-      (read-minibuffer (with-default (string-append "Replace “" *search-last* "” with") *replace-last*)
+      (read-plain (with-default (string-append "Replace “" *search-last* "” with") *replace-last*)
                        (lambda (to)
                          (%editor-select (editor-pane-id) l s s)
                          (query-replace-run *search-last* (or-last to *replace-last*)))))
@@ -79,7 +79,7 @@
   (when *search-mode*
     (set! *search-mode* #f)
     (let ((from *search-last*))
-      (read-minibuffer (with-default (string-append "Replace every “" from "” with") *replace-last*)
+      (read-plain (with-default (string-append "Replace every “" from "” with") *replace-last*)
                        (lambda (to)
                          (let ((to (or-last to *replace-last*)))
                            (set! *replace-last* to)
@@ -102,6 +102,11 @@
   (if last (string-append prompt " (" last "): ") (string-append prompt ": ")))
 
 (define (or-last s last) (if (and (string=? s "") last) last s))
+
+(define (read-plain prompt callback (on-change #f) (on-cancel #f))
+  ; A prompt for TEXT — what to search for, what to replace with: no TAB
+  ; completion, and @ is a character, not the file picker (:plain).
+  (read-minibuffer prompt callback :plain #f on-change on-cancel))
 
 ; ── Incremental: the match follows the typing ──────────────────────────────
 ; (Kevin, 2026-11-14: "as you type a character the cursor goes to that
@@ -160,7 +165,7 @@
     (hash-table-set! *isearch* :forward forward)
     (hash-table-set! *isearch* :match #f)
     (hash-table-set! *isearch* :prompt base)
-    (read-minibuffer
+    (read-plain
       base
       (lambda (typed)
         ; RET: the match on screen stays, and the single keys come on.
@@ -175,8 +180,6 @@
                (set! *search-mode* m)
                (search-help))
             (else (set! *search-last* typed) (echo "not found: " typed)))))
-      #f
-      #f
       (lambda (text) (when *isearch* (isearch-show text)))
       ; C-g / Escape: back where the search began.
       (lambda ()
@@ -325,21 +328,21 @@
   (wrapping round once) and asks: y or SPC replaces it, n or DEL skips it,
   a (or !) replaces it and all the rest, . replaces it and stops, q quits (RET,
   C-g and Escape too)."
-  (read-minibuffer (with-default "Replace" *search-last*)
+  (read-plain (with-default "Replace" *search-last*)
                    (lambda (from)
                      (let ((from (or-last from *search-last*)))
                        (unless (string=? from "")
-                         (read-minibuffer (with-default (string-append "Replace “" from "” with") *replace-last*)
+                         (read-plain (with-default (string-append "Replace “" from "” with") *replace-last*)
                                           (lambda (to) (query-replace-run from (or-last to *replace-last*)))))))))
 
 (define (replace-all)
   "Replace every match in the buffer at once, as one undo step — asks what
   and with what. M-% then ! does the same from the cursor, looking first."
-  (read-minibuffer (with-default "Replace all" *search-last*)
+  (read-plain (with-default "Replace all" *search-last*)
                    (lambda (from)
                      (let ((from (or-last from *search-last*)))
                        (unless (string=? from "")
-                         (read-minibuffer (with-default (string-append "Replace every “" from "” with") *replace-last*)
+                         (read-plain (with-default (string-append "Replace every “" from "” with") *replace-last*)
                                           (lambda (to)
                                             (let ((to (or-last to *replace-last*)))
                                               (set! *search-last* from)
