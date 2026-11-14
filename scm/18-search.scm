@@ -103,17 +103,94 @@
 
 (define (or-last s last) (if (and (string=? s "") last) last s))
 
+; ── Incremental: the match follows the typing ──────────────────────────────
+; (Kevin, 2026-11-14: "as you type a character the cursor goes to that
+; substring, then after you hit return, you get the single key options".)
+; Each change searches again from where the search began; C-s / C-r at the
+; prompt move on to the next or previous match; RET keeps the match and
+; turns on the single keys; C-g or Escape puts the cursor back.
+
+(define *isearch* #f)   ; while the prompt is up: a hash of :origin :forward
+                        ; :match (line start end, or #f) :prompt
+
+(define (isearch-show text)
+  ; Find TEXT from the origin and select it, the prompt saying when it
+  ; fails.
+  (let* ((eid (editor-pane-id))
+         (origin (%state-ref *isearch* :origin))
+         (forward (%state-ref *isearch* :forward))
+         (base (%state-ref *isearch* :prompt)))
+    (define (prompt p) (%edit! :prompt p) (edit-sync))
+    (match origin
+      ((ol oi)
+        (if (string=? text "")
+          (begin (%editor-select eid ol oi oi)
+                 (hash-table-set! *isearch* :match #f)
+                 (prompt base))
+          (match (%editor-find eid text ol oi (if forward 1 0) (search-fold? text))
+            ((l s e wrapped)
+              (%editor-select eid l s e)
+              (hash-table-set! *isearch* :match (list l s e))
+              (prompt (if (positive? wrapped) (string-append "Wrapped " base) base)))
+            (_ (hash-table-set! *isearch* :match #f)
+               (prompt (string-append "Failing " base)))))))))
+
+(define (isearch-advance forward)
+  ; C-s / C-r at the prompt: on to the next match (or back), from the one
+  ; on screen; with nothing typed yet, the last search fills the line.
+  (let ((text (%edit :text)))
+    (if (and (string=? text "") *search-last*)
+      (edit-set *search-last* (string-length *search-last*))
+      (match (%state-ref *isearch* :match)
+        ((l s e)
+          (hash-table-set! *isearch* :forward forward)
+          (hash-table-set! *isearch* :origin (if forward (list l e) (list l s)))
+          (isearch-show text))
+        (_ #f)))))
+
 (define (search-prompt forward (vi #f))
-  (read-minibuffer (if vi
-                     (string-append (if forward "/" "?") (if *search-last* (string-append " (" *search-last* ") ") ""))
-                     (with-default (if forward "Search" "Search backward") *search-last*))
-                   (lambda (s)
-                     (let ((s (or-last s *search-last*)))
-                       (unless (string=? s "") (search-step s forward))))))
+  (let* ((eid (editor-pane-id))
+         (origin (match (%editor-cursor eid) ((l i) (list l i)) (_ (list 0 0))))
+         (base (if vi
+                 (string-append (if forward "/" "?") (if *search-last* (string-append " (" *search-last* ") ") ""))
+                 (with-default (if forward "Search" "Search backward") *search-last*))))
+    (set! *search-mode* #f)
+    (set! *isearch* (make-hash-table equal?))
+    (hash-table-set! *isearch* :origin origin)
+    (hash-table-set! *isearch* :forward forward)
+    (hash-table-set! *isearch* :match #f)
+    (hash-table-set! *isearch* :prompt base)
+    (read-minibuffer
+      base
+      (lambda (typed)
+        ; RET: the match on screen stays, and the single keys come on.
+        ; Nothing typed means the last search again, from here.
+        (let ((m (%state-ref *isearch* :match))
+              (fwd (%state-ref *isearch* :forward)))
+          (set! *isearch* #f)
+          (cond
+            ((and (string=? typed "") *search-last*) (search-step *search-last* fwd))
+            ((string=? typed "") #f)
+            (m (set! *search-last* typed)
+               (set! *search-mode* m)
+               (search-help))
+            (else (set! *search-last* typed) (echo "not found: " typed)))))
+      #f
+      #f
+      (lambda (text) (when *isearch* (isearch-show text)))
+      ; C-g / Escape: back where the search began.
+      (lambda ()
+        (when *isearch*
+          (match (%state-ref *isearch* :origin)
+            ((l i) (%editor-select eid l i i))
+            (_ #f))
+          (set! *isearch* #f))))))
 
 (define (search-forward)
-  "Search forward from the cursor — C-s, Cmd-F — wrapping round once. An
-  empty answer searches for the last thing again. On a match: n next, p
+  "Search forward from the cursor as you type — C-s, Cmd-F, vi's / — the
+  match following each character, wrapping round once; C-s again at the
+  prompt goes on to the next. RET keeps the match; an empty answer
+  searches for the last thing again. C-g or Escape goes back. On a match: n next, p
   previous, r replace one by one, a replace all, q done; any other key
   ends the search and acts."
   (search-prompt #t))
@@ -360,9 +437,10 @@
 ; Global, acting only while the editor has the keys (as M-g n does), so a
 ; host's own C-s elsewhere is untouched.
 (define (when-editor f) (lambda () (if (editor-focused?) (f) #f)))
-; C-s asks with the last search filled in, so C-s RET is "again".
-(bind-key "C-s" (when-editor search-forward))
-(bind-key "C-r" (when-editor search-backward))
+; C-s with nothing typed and RET is "the last search again".
+; At the search's own prompt C-s / C-r step to the next or previous match.
+(bind-key "C-s" (lambda () (cond (*isearch* (isearch-advance #t)) ((editor-focused?) (search-forward)) (else #f))))
+(bind-key "C-r" (lambda () (cond (*isearch* (isearch-advance #f)) ((editor-focused?) (search-backward)) (else #f))))
 (bind-key "s-f" (when-editor search-forward))
 (bind-key "s-g" (when-editor search-next))
 (bind-key "S-s-g" (when-editor search-previous))

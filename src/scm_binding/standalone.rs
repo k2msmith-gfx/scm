@@ -1066,4 +1066,43 @@ mod tests {
         assert_eq!(s.eval_to_string("ex-ran").unwrap(), "42", "anything else is an M-x command");
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// The search is incremental: each character typed moves the match, a
+    /// miss says Failing, C-s at the prompt steps on, RET keeps the match
+    /// and turns on the single keys, C-g goes back where it began.
+    #[test]
+    fn search_follows_the_typing() {
+        app::resize(1000, 700, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        s.call("(focus-scene-editor) (%editor-set-text 1 \"cat car\\ncart\") (%editor-goto-line 1 0)");
+        let cur = || crate::editorpane::cursor(app::EDITOR);
+        let prompt = |s: &mut Session| s.eval_to_string("(%edit :prompt)").unwrap();
+
+        s.key("C-s");
+        s.text("c");
+        assert_eq!(cur(), (0, 1), "c: the first c");
+        s.text("a");
+        s.text("r");
+        assert_eq!(cur(), (0, 7), "car: the cursor followed the typing to the first car");
+        s.text("t");
+        assert_eq!(cur(), (1, 4), "cart: on to the next line");
+        s.text("x");
+        assert!(prompt(&mut s).starts_with("\"Failing"), "a miss says so: {}", prompt(&mut s));
+        s.key("backspace");
+        assert!(!prompt(&mut s).starts_with("\"Failing"), "{}", prompt(&mut s));
+        s.key("C-g");
+        assert_eq!(cur(), (0, 0), "C-g: back where the search began");
+        assert_eq!(s.eval_to_string("(if *search-mode* 1 0)").unwrap(), "0");
+
+        s.key("C-s");
+        s.text("ca");
+        s.key("C-s");
+        assert_eq!(cur(), (0, 6), "C-s at the prompt: the next ca");
+        s.key("return");
+        assert_eq!(cur(), (0, 6), "RET keeps the match");
+        assert_eq!(s.eval_to_string("(if *search-mode* 1 0)").unwrap(), "1", "and turns on the single keys");
+        s.text("n");
+        assert_eq!(cur(), (1, 2), "n: the next");
+        s.text("q");
+    }
 }

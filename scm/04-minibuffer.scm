@@ -223,9 +223,13 @@
         (comp-show)))))
 
 (define (edit-set text cursor)
-  (%edit! :text text)
-  (%edit! :cursor (max 0 (min cursor (string-length text))))
-  (%pane-set-input (%edit :pane) (%edit :prompt) (%edit :text) (%edit :cursor)))
+  (let ((was (%edit :text)))
+    (%edit! :text text)
+    (%edit! :cursor (max 0 (min cursor (string-length text))))
+    (%pane-set-input (%edit :pane) (%edit :prompt) (%edit :text) (%edit :cursor))
+    ; ON-CHANGE (edit-start) hears each new text: the incremental search.
+    (let ((f (%edit :on-change)))
+      (when (and f (not (equal? was text))) (f text)))))
 
 (define (%edit-splice ins)
   "The editor's text with the token under completion replaced by INS, and
@@ -294,12 +298,14 @@
   (when *edit*
     (%pane-set-input (%edit :pane) (%edit :prompt) (%edit :text) (%edit :cursor))))
 
-(define (edit-start pane prompt on-submit &named history source initial on-quit)
+(define (edit-start pane prompt on-submit &named history source initial on-quit on-change on-cancel)
   ;; HISTORY is a procedure answering the current list (or a list, kept as
   ;; it is): the REPL's grows on every eval, and a list handed over once
   ;; would be the one from the moment the editor opened. ON-QUIT is asked
   ;; first by C-g (edit-quit) and answers whether it handled the press: the
-  ;; REPL's abandons a pending multi-line form.
+  ;; REPL's abandons a pending multi-line form. ON-CHANGE hears the text
+  ;; after every edit; ON-CANCEL runs when the prompt is abandoned (C-g,
+  ;; Escape) — the incremental search puts the cursor back.
   (%clear-completions)
   (let ((init (or initial "")))
     (set! *edit*
@@ -311,7 +317,9 @@
                    :history (or history '())
                    :hist #f
                    :source source
-                   :on-quit on-quit))
+                   :on-quit on-quit
+                   :on-change on-change
+                   :on-cancel on-cancel))
     (set! *focus-held* #t)
     (set! *prompt-open* (equal? pane (mini-id)))
     (%hold-typing pane)
@@ -436,7 +444,10 @@
     ; until then, and Escape was the only way out). Another pane's line
     ; editor — the REPL's — clears its line.
     ((let ((q (%edit :on-quit))) (and q (q))))
-    ((equal? (%edit :pane) (mini-id)) (mini-dismiss) (echo "Quit"))
+    ((equal? (%edit :pane) (mini-id))
+      (let ((c (%edit :on-cancel))) (when c (c)))
+      (mini-dismiss)
+      (echo "Quit"))
     (else (edit-set "" 0))))
 
 ; ── The minibuffer instance ────────────────────────────────────────────────
@@ -466,12 +477,14 @@
     (slashes (substring text (+ slashes 1) (string-length text)))
     (else text)))
 
-(define (read-minibuffer prompt callback (source #f) (initial #f))
+(define (read-minibuffer prompt callback (source #f) (initial #f) (on-change #f) (on-cancel #f))
   "Prompt in the minibuffer with the shared input editor; `callback` gets
   the submitted string after the prompt closes. Optional completion
   source: :files (TAB completes project paths) or :symbols. `initial`
   pre-fills the input (cursor at end) — e.g. the last path, so a repeat
-  find-file starts where the last one left off. Escape cancels.
+  find-file starts where the last one left off. Escape cancels. ON-CHANGE
+  hears the text as it is typed; ON-CANCEL runs when C-g or Escape
+  abandons the prompt.
 
   ‼ a :files prompt runs its answer through (collapse-path), so typing an
     absolute path over a pre-filled directory means what it says."
@@ -485,7 +498,11 @@
     :source
     source
     :initial
-    initial))
+    initial
+    :on-change
+    on-change
+    :on-cancel
+    on-cancel))
 
 (define (execute-command)
   "M-x: prompt for any command by name (TAB fuzzy-completes over every
@@ -510,6 +527,7 @@
   minibuffer prompt."
   (comp-close)
   (when (%editing-pane? (mini-id))
+    (let ((c (and *edit* (%edit :on-cancel)))) (when c (c)))
     (%pane-set-input (mini-id) "" "" 0)
     (set! *edit* #f)
     (*prompt-closed*))
