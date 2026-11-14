@@ -178,12 +178,12 @@ the shell's own (edit/scm/)?"
   (string-prefix? "guile" (%alist-ref (repl-backend) :name "")))
 
 (define (repl-prompt)
-  ; Each image's own prompt, so the REPL says where it is: Guile's (its
-  ; language and module), the separate scm's (`scm> `, as its own terminal
-  ; prompt), or the editor's image (`scheme λ > `). A continuation lines up
-  ; under the form, as the prompt's width of spaces.
+  ; The prompt says where the REPL is: Guile's own (its language and
+  ; module), the separate scm's `scm λ > `, or the editor's image's
+  ; `scheme λ > ` — the λ kept for both scm images (Kevin, 2026-11-13). A
+  ; continuation lines up under the form, as the prompt's width of spaces.
   (let ((p (cond ((repl-guile?) "scheme@(guile-user)> ")
-                 ((string-prefix? "scm at " (%alist-ref (repl-backend) :name "")) "scm> ")
+                 ((string-prefix? "scm at " (%alist-ref (repl-backend) :name "")) "scm λ > ")
                  (else "scheme λ > "))))
     (if (string=? *repl-pending* "") p (make-string (string-length p) #\space))))
 

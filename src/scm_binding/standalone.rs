@@ -569,7 +569,7 @@ mod tests {
             assert!(t.iter().any(|l| l == "=> 27"), "{t:?}");
             assert_eq!(s.eval_to_string("(%env-ref 'cube #f)").unwrap(), "#f", "not in the editor's image");
             assert!(name(&mut s).starts_with("\"scm at "), "{}", name(&mut s));
-            assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"scm> \"", "the REPL says where it is");
+            assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"scm λ > \"", "the REPL says where it is");
         }
         super::super::remote::close_all();
         let _ = std::fs::remove_dir_all(&dir);
