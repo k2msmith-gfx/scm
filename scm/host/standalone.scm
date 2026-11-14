@@ -357,7 +357,9 @@ the shell's own (edit/scm/)?"
         (list "send region" eval-region)
         (list "describe" editor-describe)
         (list "Copy" scene-editor-copy "s-c")
-        (list "Paste" scene-editor-paste "s-v")))
+        (list "Paste" scene-editor-paste "s-v")
+        (list "Find…" search-forward "C-s")
+        (list "Replace…" query-replace "M-%")))
 (define-menu
   :help
   (list (list "back" editor-back) (list "toggle source" toggle-markdown-view)))

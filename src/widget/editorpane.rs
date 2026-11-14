@@ -515,6 +515,96 @@ pub fn replace_range(id: u32, l0: usize, i0: usize, l1: usize, i1: usize, text: 
     crate::host::mark_dirty_ui();
 }
 
+// ── Search and replace (Kevin, 2026-11-14) ──────────────────────────────────
+// Plain text within a line; `fold` matches ASCII case-insensitively, which
+// keeps every byte offset the same in the folded copy.
+
+fn fold_line(s: &str, fold: bool) -> std::borrow::Cow<'_, str> {
+    if fold { std::borrow::Cow::Owned(s.to_ascii_lowercase()) } else { std::borrow::Cow::Borrowed(s) }
+}
+
+/// The lines' text, for a search.
+fn lines_of(pane: &Doc) -> Vec<String> {
+    pane.editor.with_buffer(|b| b.lines.iter().map(|l| l.text().to_string()).collect())
+}
+
+/// Every match of `needle` in `lines` at or after (line, byte), in order.
+fn matches_from(lines: &[String], needle: &str, fold: bool, from: (usize, usize)) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    if needle.is_empty() {
+        return out;
+    }
+    let needle = fold_line(needle, fold);
+    for (l, text) in lines.iter().enumerate().skip(from.0) {
+        let hay = fold_line(text, fold);
+        let mut at = if l == from.0 { from.1.min(hay.len()) } else { 0 };
+        while !hay.is_char_boundary(at) {
+            at += 1;
+        }
+        while let Some(i) = hay[at..].find(needle.as_ref()) {
+            let s = at + i;
+            out.push((l, s, s + needle.len()));
+            at = s + needle.len();
+        }
+    }
+    out
+}
+
+/// The next match of `needle` from (line, byte) — forward from there, or
+/// backward from before it — wrapping round the buffer once: the match as
+/// (line, start, end) and whether it wrapped.
+pub fn find(id: u32, needle: &str, from: (usize, usize), forward: bool, fold: bool) -> Option<((usize, usize, usize), bool)> {
+    with_pane(id, |_, pane, _| {
+        let lines = lines_of(pane);
+        let all = matches_from(&lines, needle, fold, (0, 0));
+        if forward {
+            all.iter().find(|m| (m.0, m.1) >= from).map(|m| (*m, false)).or_else(|| all.first().map(|m| (*m, true)))
+        } else {
+            all.iter().rev().find(|m| (m.0, m.1) < from).map(|m| (*m, false)).or_else(|| all.last().map(|m| (*m, true)))
+        }
+    })
+}
+
+/// Select (line, i0..i1) with the cursor at its end, scrolled into view —
+/// how a search shows its match.
+pub fn select_range(id: u32, line: usize, i0: usize, i1: usize) {
+    with_pane(id, |fs, pane, _| {
+        pane.editor.set_selection(Selection::Normal(Cursor::new(line, i0)));
+        pane.editor.set_cursor(Cursor::new(line, i1));
+        pane.editor.shape_as_needed(fs, false);
+    });
+    crate::host::mark_dirty_ui();
+}
+
+/// Replace every match of `needle` that starts in [from, to) with `with`, as
+/// ONE undo step: how many. A `to` before `from` wraps — from `from` to the
+/// end, then the top down to `to` — the rest of a query-replace's run.
+pub fn replace_all(id: u32, needle: &str, with: &str, fold: bool, from: (usize, usize), to: (usize, usize)) -> usize {
+    let n = with_pane(id, |_, pane, _| {
+        let found: Vec<_> = matches_from(&lines_of(pane), needle, fold, (0, 0))
+            .into_iter()
+            .filter(|m| {
+                let at = (m.0, m.1);
+                if to > from { at >= from && at < to } else { at >= from || at < to }
+            })
+            .collect();
+        if !found.is_empty() {
+            pane.discrete(|e| {
+                // Back to front, so each replacement leaves the earlier
+                // matches' offsets as they were.
+                for &(l, i0, i1) in found.iter().rev() {
+                    e.delete_range(Cursor::new(l, i0), Cursor::new(l, i1));
+                    e.insert_at(Cursor::new(l, i0), with, None);
+                }
+                e.set_selection(Selection::None);
+            });
+        }
+        found.len()
+    });
+    crate::host::mark_dirty_ui();
+    n
+}
+
 /// The selected text, or `None` when there is none to take — the one way
 /// copy, cut and a vi yank read a selection. cosmic-text's own
 /// `copy_selection` indexes the buffer's first line, and a buffer that was

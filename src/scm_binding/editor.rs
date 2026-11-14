@@ -171,6 +171,43 @@ prim! {
 }
 
 prim! {
+    /// `(%editor-find id needle line byte forward fold)` → `[line start end
+    /// wrapped]`, the next match of NEEDLE from (LINE, BYTE) — forward, or
+    /// backward from before it (FORWARD 0) — wrapping round once (WRAPPED 1);
+    /// nil when there is none. FOLD 1 ignores ASCII case.
+    "%editor-find", fn editor_find(id: num, needle: text, line: num, byte: num, forward: num, fold: num) {
+        match crate::editorpane::find(id as u32, &needle, (line.max(0.0) as usize, byte.max(0.0) as usize), forward != 0.0, fold != 0.0) {
+            Some(((l, i0, i1), wrapped)) => Out::Many(vec![
+                Out::Num(l as f64),
+                Out::Num(i0 as f64),
+                Out::Num(i1 as f64),
+                Out::Num(if wrapped { 1.0 } else { 0.0 }),
+            ]),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
+    /// `(%editor-select id line i0 i1)` — select bytes I0..I1 of LINE, the
+    /// cursor at the end, scrolled into view: a search's match.
+    "%editor-select", fn editor_select(id: num, line: num, i0: num, i1: num) {
+        crate::editorpane::select_range(id as u32, line.max(0.0) as usize, i0.max(0.0) as usize, i1.max(0.0) as usize);
+        Out::Nil
+    }
+}
+
+prim! {
+    /// `(%editor-replace-all id needle with fold l0 b0 l1 b1)` → how many:
+    /// every match of NEEDLE starting in [(L0,B0), (L1,B1)) replaced by WITH,
+    /// one undo step. An end before the start wraps round the buffer's end.
+    "%editor-replace-all", fn editor_replace_all(id: num, needle: text, with: text, fold: num, l0: num, b0: num, l1: num, b1: num) {
+        let at = |l: f64, b: f64| (l.max(0.0) as usize, b.max(0.0) as usize);
+        Out::Num(crate::editorpane::replace_all(id as u32, &needle, &with, fold != 0.0, at(l0, b0), at(l1, b1)) as f64)
+    }
+}
+
+prim! {
     /// `(%editor-cursor id)` → `[line byte-index]` — the cursor position, the
     /// anchor for send-expression-at-point (unify.scm's sexp scanner).
     "%editor-cursor", fn editor_cursor(a0: num) {
@@ -559,6 +596,9 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         buffer_mru_prim::install(interp)?,
         editor_buffer_list::install(interp)?,
         editor_cursor::install(interp)?,
+        editor_find::install(interp)?,
+        editor_select::install(interp)?,
+        editor_replace_all::install(interp)?,
         editor_set_text::install(interp)?,
         editor_text::install(interp)?,
         editor_scroll::install(interp)?,

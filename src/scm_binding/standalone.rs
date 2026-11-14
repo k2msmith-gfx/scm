@@ -274,6 +274,12 @@ impl Session {
     /// editor leaves its mode, then an open menu closes, then a typing pane
     /// lets go of the keyboard. Answers whether anything took it.
     pub fn escape(&mut self) -> bool {
+        // A query-replace running stops: Escape is one of its quit keys,
+        // ahead of vi's own use of it.
+        if self.eval_to_string("(if *query* 1 0)").as_deref() == Ok("1") {
+            self.call("(query-answer :quit)");
+            return true;
+        }
         let typing = app::typing();
         // A terminal's program gets Escape, as every other key (D4): vi in a
         // terminal needs it. C-x o is how the keyboard leaves.
@@ -829,5 +835,79 @@ mod tests {
         s.key("s-c");
         assert_eq!(s.eval_to_string("clip").unwrap(), "\"pasted-42\"", "Cmd-C copied the terminal's selection");
         s.call("(term-close)");
+    }
+
+    /// Search and replace (Kevin, 2026-11-14): C-s finds from the cursor and
+    /// wraps; M-% steps through the matches — y replaces, n skips, . replaces
+    /// and stops, ! does the rest at once, q quits; replace-all does them all.
+    #[test]
+    fn search_and_replace_step_through_or_all() {
+        app::resize(1000, 700, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        let set = |s: &mut Session, text: &str| {
+            s.call(&format!("(%editor-set-text 1 {}) (%editor-goto-line 1 0)", lit(text)));
+        };
+        let text = |s: &mut Session| crate::editorpane::text(app::EDITOR);
+        let typed = |s: &mut Session, line: &str| {
+            for c in line.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+        };
+        s.call("(focus-scene-editor)");
+        set(&mut s, "alpha beta\ngamma Beta\nbeta");
+
+        // C-s: the first match from the cursor, then the next, then round.
+        s.key("C-s");
+        typed(&mut s, "beta");
+        assert_eq!(crate::editorpane::cursor(app::EDITOR), (0, 10), "first beta selected, cursor at its end");
+        s.key("C-s");
+        typed(&mut s, "");
+        assert_eq!(crate::editorpane::cursor(app::EDITOR), (1, 10), "C-s RET: the last search again; no capital, so Beta matches");
+        s.key("s-g");
+        s.key("s-g");
+        assert_eq!(crate::editorpane::cursor(app::EDITOR), (0, 10), "wrapped to the top");
+
+        // M-%: y, n, then . stops.
+        s.call("(%editor-goto-line 1 0)");
+        s.key("M-S-5");
+        typed(&mut s, "beta");
+        typed(&mut s, "B");
+        s.text("y");
+        s.text("n");
+        s.text(".");
+        assert_eq!(text(&mut s), "alpha B\ngamma Beta\nB");
+        assert_eq!(s.eval_to_string("*query*").unwrap(), "#f", "the run ended");
+
+        // ! from the middle: this one, the rest, and round to the start.
+        set(&mut s, "x x\nx x");
+        s.call("(%editor-goto-line 1 1)"); // line 1, so the run wraps
+        s.key("M-S-5");
+        typed(&mut s, "x");
+        typed(&mut s, "yy");
+        s.text("n");
+        s.text("!");
+        assert_eq!(text(&mut s), "yy yy\nx yy", "skipped the first, ! did the rest round the end");
+        s.call("(%editor-undo 1)");
+        assert_eq!(text(&mut s), "x x\nx x", "! was one undo step");
+
+        // q quits; so does Escape.
+        s.key("M-S-5");
+        typed(&mut s, "x");
+        typed(&mut s, "z");
+        s.text("q");
+        assert_eq!(s.eval_to_string("*query*").unwrap(), "#f");
+        s.key("M-S-5");
+        typed(&mut s, "x");
+        typed(&mut s, "z");
+        assert!(s.escape());
+        assert_eq!(s.eval_to_string("*query*").unwrap(), "#f");
+        assert_eq!(text(&mut s), "x x\nx x", "quitting replaced nothing");
+
+        // replace-all: the whole buffer, one step.
+        s.call("(replace-all)");
+        typed(&mut s, "x");
+        typed(&mut s, "w");
+        assert_eq!(text(&mut s), "w w\nw w");
     }
 }
