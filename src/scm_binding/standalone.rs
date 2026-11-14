@@ -432,6 +432,35 @@ mod tests {
         let transcript: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
         assert!(transcript.iter().any(|l| l == "=> 42"), "{transcript:?}");
         assert!(transcript.iter().any(|l| l == "=> 3"), "a form over two lines: {transcript:?}");
+        // Guile's REPL command names, at scm's prompt.
+        let type_line = |s: &mut Session, line: &str| {
+            for c in line.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+        };
+        for line in [
+            r#"(define (area r) "Circle area." (* 3 r r))"#,
+            ",help",
+            ",describe area",
+            ",a circle",
+            ",expand1 (when a b)",
+            ",t (area 2)",
+            "(car 1)",
+            ",bt",
+            ",frobnicate",
+        ] {
+            type_line(&mut s, line);
+        }
+        let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+        let has = |want: &str| t.iter().any(|l| l.contains(want));
+        assert!(has(",describe NAME"), ",help lists the commands: {t:?}");
+        assert!(has("(area r)") && has("Circle area."), ",describe: {t:?}");
+        assert!(has("=> (area)"), ",a finds area by its docstring: {t:?}");
+        assert!(has("=> (if a (begin b)"), ",expand1: {t:?}");
+        assert!(has("=> 12") && t.iter().any(|l| l.starts_with(";; ") && l.ends_with(" s")), ",t: {t:?}");
+        assert!(has("  in (car 1)"), ",bt shows the last error's call: {t:?}");
+        assert!(has("unknown command ,frobnicate"), "{t:?}");
         s.call("(term-close)");
         assert_eq!(app::panel(), Some(app::Panel::Repl), "a closed terminal leaves the REPL");
 
