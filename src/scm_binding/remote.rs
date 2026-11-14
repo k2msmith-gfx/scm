@@ -46,11 +46,53 @@ struct Inbox {
     done: Mutex<VecDeque<Response>>,
     /// The server closed the connection (or the read failed): what it said.
     closed: Mutex<Option<String>>,
+    /// ONE request in flight at a time; the rest wait here. A server that
+    /// frames its input as "read until the buffer holds a complete datum" —
+    /// `scm --serve` does — parses only the first of two requests that
+    /// arrive in one read, and drops the second; async sends made two in a
+    /// row possible (two quick C-M-x), and a test lost an answer to it in
+    /// the gate. The server evaluates one at a time anyway, so queueing
+    /// here costs nothing. The reader sends the next when an answer lands.
+    outbox: Mutex<Outbox>,
+}
+
+#[derive(Default)]
+struct Outbox {
+    writer: Option<TcpStream>,
+    in_flight: bool,
+    queue: VecDeque<String>,
+}
+
+impl Inbox {
+    /// Write TEXT now if nothing is in flight, else queue it.
+    fn submit(&self, text: String) -> std::io::Result<()> {
+        let mut out = self.outbox.lock().unwrap_or_else(|e| e.into_inner());
+        if out.in_flight {
+            out.queue.push_back(text);
+            return Ok(());
+        }
+        out.in_flight = true;
+        let w = out.writer.as_mut().ok_or_else(|| std::io::Error::other("no writer"))?;
+        w.write_all(text.as_bytes()).and_then(|()| w.flush())
+    }
+
+    /// An answer landed: send the next queued request, or note that none is
+    /// in flight.
+    fn next(&self) {
+        let mut out = self.outbox.lock().unwrap_or_else(|e| e.into_inner());
+        match out.queue.pop_front() {
+            Some(text) => {
+                if let Some(w) = out.writer.as_mut() {
+                    let _ = w.write_all(text.as_bytes()).and_then(|()| w.flush());
+                }
+            }
+            None => out.in_flight = false,
+        }
+    }
 }
 
 struct Conn {
     addr: String,
-    writer: TcpStream,
     next_id: u64,
     inbox: Arc<Inbox>,
     /// The server, when this editor started it.
@@ -62,9 +104,6 @@ thread_local! {
     static NEXT: Cell<u32> = const { Cell::new(1) };
 }
 
-/// The reader: framing is the reader (one complete datum per answer, as
-/// `scm --connect` reads it), and each answer goes to its waiter, to the
-/// async queue, or nowhere (a streamed chunk; an answer nobody asked for).
 /// The byte length of the first complete datum in `text` (leading space
 /// included), or `None` while it is still arriving. Answers can come back
 /// to back in one read now that sends do not wait — `parse_status` says
@@ -113,6 +152,10 @@ fn first_datum_len(text: &str) -> Option<usize> {
     None
 }
 
+/// The reader: framing is the reader (one complete datum per answer), and
+/// each answer goes to its waiter, to the async queue, or nowhere (a
+/// streamed chunk; an answer nobody asked for) — and lets the next queued
+/// request go.
 fn read_loop(mut stream: TcpStream, inbox: Arc<Inbox>, addr: String) {
     let mut pending = String::new();
     let mut chunk = [0u8; 8192];
@@ -125,6 +168,7 @@ fn read_loop(mut stream: TcpStream, inbox: Arc<Inbox>, addr: String) {
                     if matches!(answer.outcome, Outcome::Streamed(_)) {
                         continue;
                     }
+                    inbox.next();
                     let waiter = inbox.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&answer.id);
                     if let Some(w) = waiter {
                         let _ = w.send(answer);
@@ -163,12 +207,13 @@ fn connect(addr: &str, child: Option<std::process::Child>) -> Result<u32, String
     let _ = stream.set_nodelay(true);
     let reader = stream.try_clone().map_err(|e| format!("{addr}: {e}"))?;
     let inbox = Arc::new(Inbox::default());
+    inbox.outbox.lock().unwrap_or_else(|e| e.into_inner()).writer = Some(stream);
     let (thread_inbox, thread_addr) = (inbox.clone(), addr.to_string());
     std::thread::spawn(move || read_loop(reader, thread_inbox, thread_addr));
     let id = NEXT.with(|n| n.replace(n.get() + 1));
     CONNS.with(|c| {
         c.borrow_mut()
-            .insert(id, Conn { addr: addr.to_string(), writer: stream, next_id: 1, inbox, child })
+            .insert(id, Conn { addr: addr.to_string(), next_id: 1, inbox, child })
     });
     Ok(id)
 }
@@ -222,10 +267,7 @@ fn send(conn: &mut Conn, op: Op) -> Result<u64, String> {
     let rid = conn.next_id;
     conn.next_id += 1;
     let text = format!("{}\n", Request { id: rid, op }.to_wire());
-    conn.writer
-        .write_all(text.as_bytes())
-        .and_then(|()| conn.writer.flush())
-        .map_err(|e| format!("{}: {e}", conn.addr))?;
+    conn.inbox.submit(text).map_err(|e| format!("{}: {e}", conn.addr))?;
     Ok(rid)
 }
 
@@ -455,11 +497,19 @@ mod tests {
     /// A one-connection REPL server over scm's own `Session` — the protocol
     /// `scm --serve` speaks, without needing the binary.
     fn serve() -> String {
+        serve_pausing(std::time::Duration::ZERO)
+    }
+
+    /// The same server, pausing after it accepts: whatever the client sends
+    /// meanwhile arrives in ONE read, as it can under load — the case its
+    /// "read until a complete datum" framing gets wrong.
+    fn serve_pausing(pause: std::time::Duration) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         std::thread::spawn(move || {
             let mut session = scm::Session::new().unwrap();
             let (mut s, _) = listener.accept().unwrap();
+            std::thread::sleep(pause);
             let mut pending = String::new();
             let mut buf = [0u8; 4096];
             loop {
@@ -518,6 +568,31 @@ mod tests {
         assert!(s.settle(10.0));
         assert_eq!(s.eval_to_string("(list-ref *last-error* 2)").unwrap(), "\"vector-ref: index 9 out of range\"");
         assert!(s.eval_to_string("(list-ref *last-error* 3)").unwrap().contains("(vector-ref (vector 1 2) 9)"));
+        s.call("(remote-stop)");
+    }
+
+    /// Sends fired back to back are all answered, in order: one request in
+    /// flight per connection, the rest queued — a server that frames its
+    /// input by "read until a complete datum" (scm --serve, and this test's)
+    /// drops the second of two requests arriving in one read, and the gate
+    /// lost an answer to it once async sends could send two in a row.
+    #[test]
+    fn sends_back_to_back_are_all_answered_in_order() {
+        let addr = serve_pausing(std::time::Duration::from_millis(300));
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        s.call(&format!("(remote-connect \"{addr}\")"));
+        s.call(r#"
+            (define got '())
+            (define b (backend-of (%editor-active-buffer 1)))
+            (let loop ((i 0))
+              (when (< i 20)
+                ((backend-op b :eval-async) (number->string i)
+                  (lambda (r) (set! got (cons (%alist-ref r :printed "") got))))
+                (loop (+ i 1))))"#);
+        assert!(s.settle(20.0), "every send is answered");
+        let want = (0..20).map(|i| format!("\"{i}\"")).collect::<Vec<_>>().join(" ");
+        assert_eq!(s.eval_to_string("(reverse got)").unwrap(), format!("({want})"));
         s.call("(remote-stop)");
     }
 
