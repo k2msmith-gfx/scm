@@ -62,7 +62,4 @@ define-module or use-modules form, a .guile name) is set so when opened."
       (string-contains text "(define-module ")
       (string-contains text "(use-modules ")))
 
-(define (detect-language! eid path)
-  "Set the active buffer of editor EID to the language its file says it is."
-  (when (guile-text? path (%editor-text eid))
-    (%editor-set-language eid "guile")))
+(add-language-detector! "guile" guile-text?)

@@ -3,17 +3,20 @@
 //! brackets are, how a new line indents, and the call around the cursor.
 //! The widget asks a buffer's [`Language`] and nothing else, so a second
 //! language (E6) is a second implementation, not an edit to the widget.
-//! There are two: scm's Scheme ([`scheme::Scheme`]) and GNU Guile
-//! ([`guile::Guile`]), each buffer set to one by name ([`by_name`]).
+//! There are three: scm's Scheme ([`scheme::Scheme`]), GNU Guile
+//! ([`guile::Guile`]) and Rust ([`rust::Rust`]), each buffer set to one by
+//! name ([`by_name`]).
 //!
 //! The highlight COLOURS are not here: each [`Tok`] is a theme slot
 //! (code-comment/string/keyword/number/call/paren), so the look stays the
 //! host's policy.
 
 pub mod guile;
+pub mod rust;
 pub mod scheme;
 
 pub use guile::GUILE;
+pub use rust::RUST;
 pub use scheme::SCHEME;
 
 /// A language by the name a buffer is set to (`%editor-set-language`).
@@ -21,6 +24,7 @@ pub fn by_name(name: &str) -> Option<&'static dyn Language> {
     match name {
         "scheme" => Some(&SCHEME),
         "guile" => Some(&GUILE),
+        "rust" => Some(&RUST),
         _ => None,
     }
 }

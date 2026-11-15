@@ -92,6 +92,30 @@ answer from its live bindings."
 ; language (%buffer-language).
 (define *language-backends* (make-hash-table equal?))
 
+; Which language a file opened as text is: (language . test) pairs, asked
+; in order, TEST taking the path and the text. A language adds its own
+; (15-guile, 20-rust); a file none claims stays scm's Scheme.
+(define *language-detectors* '())
+
+(define (add-language-detector! language test)
+  "Set a file opened as text to LANGUAGE when (TEST path text) is true."
+  (set! *language-detectors* (append *language-detectors* (list (cons language test)))))
+
+(define (detect-language! eid path)
+  "Set the active buffer of editor EID to the language its file says it is."
+  (let ((text (%text (%editor-text eid))))
+    (when-let ((hit (find (lambda (d) ((cdr d) path text)) *language-detectors*)))
+      (%editor-set-language eid (car hit)))))
+
+; Languages that are not Scheme at all (20-rust): this image's names, docs
+; and signatures mean nothing in them, so completion offers the buffer's own
+; words and eldoc stays quiet.
+(define *non-scheme-languages* '())
+
+(define (non-scheme-buffer? buf)
+  "Is BUF in a language whose text is not Scheme?"
+  (and (member (%buffer-language (*pane-id* :editor) buf) *non-scheme-languages*) #t))
+
 (define (backend-of buf)
   "BUF's backend: the one it was attached to, else its language's, else
 the host's choice."

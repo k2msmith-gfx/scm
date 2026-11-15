@@ -69,8 +69,26 @@
   It asked `%scm-complete` for a Scheme buffer while that was a second VM's
   door (modeler-port-plan M0); from inside the one image the door leads
   nowhere (00-decls stubs it to answer nothing), and this pool is what it
-  would have answered."
-  (symbol-candidates))
+  would have answered. A buffer in a language that is not Scheme (Rust)
+  offers its own words instead."
+  (if (non-scheme-buffer? (%editor-active-buffer (editor-pane-id)))
+    (buffer-words (car (editor-text+point)))
+    (symbol-candidates)))
+
+(define (buffer-words text)
+  "The distinct words of TEXT — letters, digits and `_`, three characters
+  or more, not starting with a digit: the completion pool of a buffer whose
+  language this image cannot answer for."
+  (define seen (make-hash-table equal?))
+  (define (word-char? c) (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_)))
+  (let loop ((cs (string->list text)) (word '()))
+    (define (bank!)
+      (when (and (>= (length word) 3) (not (char-numeric? (last word))))
+        (hash-table-set! seen (list->string (reverse word)) #t)))
+    (cond ((null? cs) (bank!))
+          ((word-char? (car cs)) (loop (cdr cs) (cons (car cs) word)))
+          (else (bank!) (loop (cdr cs) '()))))
+  (list-sort string<? (hash-table-keys seen)))
 
 (define (editor-complete)
   "Open symbol completion at the cursor's token — TAB mid-symbol."
@@ -135,7 +153,8 @@
 
 (define (editor-eldoc)
   "Echo the enclosing form's signature when its head changed under typing."
-  (define head (%editor-head (editor-pane-id)))
+  (define head (and (not (non-scheme-buffer? (%editor-active-buffer (editor-pane-id))))
+                    (%editor-head (editor-pane-id))))
   (unless (equal? head *editor-eldoc*)
     (set! *editor-eldoc* head)
     (when head

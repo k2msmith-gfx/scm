@@ -960,6 +960,57 @@ after his words.
     `:files` menu routing (into 17-files, with a `*files-shown?*` hook).
   - `the_file_tree_shows_beside_the_editor` holds it.
 
+**E6b as built: Rust, piece 1** (Kevin, 2026-11-14: "do piece 1, the Rust
+Language, first"). This is the first language whose text is not Scheme, and
+it adds nothing that runs beside the editor.
+- **`language/rust.rs`** is a hand-written lexer, as Scheme's is. It reads
+  `//` and nesting `/* */` comments, strings (raw, byte and C strings too), a
+  char literal as distinct from a lifetime, numbers (`1..2` stays a range),
+  raw identifiers and attributes. A bracket inside any of those is not a
+  bracket.
+  - Highlighting uses the theme's slots: keywords and lifetimes, `true`/
+    `false`, and a function's name where it is called or defined (a
+    macro's with its `!`).
+  - Indentation is rustfmt's block style. A line goes four in from the
+    innermost open bracket's line, back out for a closer, and four more for
+    an expression carried on (a chain, a `let`'s right side). A chain off
+    `})` stays level with it, and a let-else's `else` stays with its `let`.
+    Inside a string the editor never adds spaces.
+  - The call around the point is the name before the innermost `(` (`foo`,
+    `Vec::new`, `println!`, a method). It looks out through tuples, but
+    never out of a `{`.
+  - No read marks: whether Rust is right is the compiler's verdict.
+- **Measured** on every `.rs` file in ray (252) and scm (120), with
+  `rust_corpus` (ignored; `RUST_CORPUS=DIR`). No file's brackets come out of
+  place. TAB leaves 99.5% / 99.6% of the rustfmt-formatted lines where they
+  are. Most of the rest are files rustfmt does not format, or
+  `matches!(…, … if …)` guards.
+- **The shell, `20-rust.scm`:**
+  - A `.rs` file opens as Rust. `detect-language!` moved to 07-backend as a
+    list of detectors that each language adds to; Guile's is one of them.
+  - Rust's backend refuses a send rather than letting it fall through to
+    this image, where it would read as Scheme.
+  - Rust is one of the `*non-scheme-languages*`. In those, completion
+    offers the buffer's own words and eldoc stays quiet, because the
+    image's names mean nothing in them.
+  - `M-x rust-mode` sets a buffer to Rust by hand.
+- **Not yet:** completion's token is still Scheme's (`foo.ba` is one token),
+  and nothing is underlined. Both wait for the next step.
+
+**E7 — a Rust language server (proposed, not started).** rust-analyzer as
+an opt-in backend: used only when it is on the `PATH` (rustup puts it
+there), with no configuration, and nothing works differently without it.
+It needs:
+- a generic stdio JSON-RPC client in the crate, with a reader thread waking
+  the UI as the terminal's does;
+- the server's diagnostics stored per buffer and merged with the
+  underlines, since the server pushes them when it likes;
+- completion, `M-.` and eldoc routed through the backend.
+
+It reverses E6's "no language server" default, which is why it is Kevin's
+call. Most of it carries to any later language server; only the
+`Language` is per language.
+
 **Still open.**
 - **In scm** (each is a change in the scm repo):
   - a sent form locates as `<input>:L:C`, because `eval-string` takes no

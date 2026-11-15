@@ -167,7 +167,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust"];
 
 /// Where [`SHELL`]'s files are in the tree this binary was built from. They
 /// are read from there while it exists, so an edit to one takes effect
@@ -201,6 +201,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("17-files", include_str!("../scm/17-files.scm")),
     ("18-search", include_str!("../scm/18-search.scm")),
     ("19-ex", include_str!("../scm/19-ex.scm")),
+    ("20-rust", include_str!("../scm/20-rust.scm")),
     ("host/prelude", include_str!("../scm/host/prelude.scm")),
     ("host/standalone", include_str!("../scm/host/standalone.scm")),
 ];
@@ -505,6 +506,29 @@ mod tests {
         eval(&mut interp, "(go-back-from-definition)");
         assert_eq!(eval(&mut interp, "(equal? (%editor-active-buffer 3) from)"), Val::Bool(true));
         let _ = std::fs::remove_file(&lib);
+        // Rust: a .rs file opens as Rust, a send from it refuses rather than
+        // run Rust as Scheme here, and completion offers the file's own
+        // words, not this image's names. A file that says it is Guile is
+        // still Guile.
+        let rs = std::env::temp_dir().join(format!("edit-rust-test-{}.rs", std::process::id()));
+        std::fs::write(&rs, "fn main() {\n    let counter = 1;\n    count\n}\n").unwrap();
+        let rs = rs.to_string_lossy().replace('\\', "/");
+        eval(&mut interp, &format!(r#"(set! helped '()) (visit-file-text "{rs}")"#));
+        assert_eq!(eval(&mut interp, "(%buffer-language 3 (%editor-active-buffer 3))"), Val::Str("rust".into()));
+        eval(&mut interp, "(%editor-goto-line 3 1) (eval-defun)");
+        let sent = eval(&mut interp, "(apply string-append helped)");
+        let Val::Str(sent) = sent else { panic!("{sent:?}") };
+        assert!(sent.contains("a send goes nowhere"), "{sent}");
+        assert_eq!(
+            eval(&mut interp, "(editor-candidates)"),
+            Val::List(["count", "counter", "let", "main"].iter().map(|w| Val::Str((*w).into())).collect())
+        );
+        let gl = std::env::temp_dir().join(format!("edit-guile-test-{}.scm", std::process::id()));
+        std::fs::write(&gl, "(use-modules (ice-9 match))\n").unwrap();
+        let gl = gl.to_string_lossy().replace('\\', "/");
+        eval(&mut interp, &format!(r#"(visit-file-text "{gl}")"#));
+        assert_eq!(eval(&mut interp, "(%buffer-language 3 (%editor-active-buffer 3))"), Val::Str("guile".into()));
+        let _ = (std::fs::remove_file(&rs), std::fs::remove_file(&gl));
         // The in-process backend answers a RESULT: what the forms printed,
         // the value, or an error as data rather than an unwind.
         eval(&mut interp, r#"(define r (in-process-eval "(display 1) (+ 2 3)"))
