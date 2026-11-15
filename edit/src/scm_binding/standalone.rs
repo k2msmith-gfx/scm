@@ -678,6 +678,12 @@ mod tests {
         assert!(bad.is_empty(), "rows without a name: {bad:?}");
         assert!(md.contains("- `C-a` — **editor-line-start**"), "the editor's C-a: {md}");
         assert!(md.contains("- `C-a` — **edit-line-start**"), "the minibuffer's C-a");
+        assert!(!md.contains("## Mouse"), "the standalone adds no gestures");
+        // A host's sections that are not bindings (the modeler's mouse
+        // gestures) close the page, the transcript's rule a heading.
+        s.call(r#"(set! *show-keys-extra* (lambda () (list (cons "── mouse ──────" '(("S-drag" "add to the selection"))))))"#);
+        let md = s.eval_to_string("(keybindings-markdown)").unwrap();
+        assert!(md.contains("\\n## Mouse\\n\\n- `S-drag` — add to the selection\\n"), "{md}");
     }
 
     /// Where a send goes by default: a Scheme FILE to a separate scm, the

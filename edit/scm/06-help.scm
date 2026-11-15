@@ -251,7 +251,23 @@
           (emit "\n## " (%text (*pane-key* id)) " pane\n\n")
           (rows (keys-into m "")))))
     (hash-table-keys *pane-keymaps*))
+  ; What the HOST adds that is not a binding — the modeler's mouse gestures
+  ; (*show-keys-extra*), which a page of bindings alone says there are none
+  ; of (Kevin, 2026-11-15). The transcript's "── mouse ──" rule is a heading
+  ; here.
+  (for-each
+    (lambda (sec)
+      (emit "\n## " (extra-heading (car sec)) "\n\n")
+      (for-each (lambda (g) (emit "- `" (car g) "` — " (cadr g) "\n")) (cdr sec)))
+    (*show-keys-extra*))
   (get-output-string out))
+
+(define (extra-heading rule)
+  ; "── mouse ─────" as "Mouse".
+  (let ((t (string-trim-both (list->string (filter (lambda (c) (not (char=? c #\x2500))) (string->list rule))))))
+    (if (string=? t "")
+      t
+      (string-append (string (char-upcase (string-ref t 0))) (substring t 1 (string-length t))))))
 
 (define (show-markdown-doc name md)
   "Open MD (a markdown string) in a reused, view-only editor buffer called
