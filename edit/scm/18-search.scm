@@ -439,11 +439,11 @@
 ; ── Keys and menu ──────────────────────────────────────────────────────────
 ; Global, acting only while the editor has the keys (as M-g n does), so a
 ; host's own C-s elsewhere is untouched.
-(define (when-editor f) (lambda () (if (editor-focused?) (f) #f)))
+(define (when-editor f) (labelled f (lambda () (if (editor-focused?) (f) #f))))
 ; C-s with nothing typed and RET is "the last search again".
 ; At the search's own prompt C-s / C-r step to the next or previous match.
-(bind-key "C-s" (lambda () (cond (*isearch* (isearch-advance #t)) ((editor-focused?) (search-forward)) (else #f))))
-(bind-key "C-r" (lambda () (cond (*isearch* (isearch-advance #f)) ((editor-focused?) (search-backward)) (else #f))))
+(bind-key "C-s" (labelled "search-forward" (lambda () (cond (*isearch* (isearch-advance #t)) ((editor-focused?) (search-forward)) (else #f)))))
+(bind-key "C-r" (labelled "search-backward" (lambda () (cond (*isearch* (isearch-advance #f)) ((editor-focused?) (search-backward)) (else #f)))))
 (bind-key "s-f" (when-editor search-forward))
 (bind-key "s-g" (when-editor search-next))
 (bind-key "S-s-g" (when-editor search-previous))

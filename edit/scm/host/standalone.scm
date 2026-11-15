@@ -196,9 +196,9 @@ Every ray file of the same checkout shares it, so they all start over."
 (bind-files-keys)
 ; The lower pane is the REPL OR the terminal, one keymap between them: Cmd-C
 ; and Cmd-V act on whichever shows.
-(bind-key "s-c" (lambda () (if (equal? (%panel) :terminal) (term-copy) (repl-copy))) :repl)
-(bind-key "s-v" (lambda () (if (equal? (%panel) :terminal) (term-paste) (repl-paste))) :repl)
-(bind-key "C-x C-c" (lambda () (%quit)))
+(bind-key "s-c" (labelled "repl-copy" (lambda () (if (equal? (%panel) :terminal) (term-copy) (repl-copy)))) :repl)
+(bind-key "s-v" (labelled "repl-paste" (lambda () (if (equal? (%panel) :terminal) (term-paste) (repl-paste)))) :repl)
+(bind-key "C-x C-c" (labelled "quit" (lambda () (%quit))))
 ; vi's :q and :e (19-ex).
 (set! *ex-quit* (lambda () (%quit)))
 (set! *ex-open* (lambda (path) (open-path (collapse-path path))))

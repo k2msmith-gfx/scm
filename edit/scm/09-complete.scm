@@ -299,8 +299,7 @@ once the pane exists."
   (for-each
     (lambda (row)                                  ; (key command label)
       (let ((k (car row)) (f (cadr row)) (label (caddr row)))
-        (hash-table-set! *editor-key-labels* k label)
-        (bind-key k f :editor)))
+        (bind-key k (%name-binding label f) :editor)))
     (list
       (list
         "return"

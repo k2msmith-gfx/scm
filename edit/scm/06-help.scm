@@ -25,6 +25,7 @@
   #<procedure ...>, or the raw printed value for an anonymous one."
   (cond ((symbol? f) (symbol->string f))
         ((string? f) f)
+        ((hash-table-ref/default *binding-labels* f #f) => fn-label)
         (else
          (let ((st (format "~a" f)))
            (cond ((string-prefix? "#<procedure " st) (substring st 12 (- (string-length st) 1)))
@@ -59,9 +60,7 @@
           (for-each
             (lambda (b)
               (let* ((k (car b))
-                     ;; *editor-key-labels* is 08-editor's hash table.
-                     (lf (hash-table-ref/default *editor-key-labels* k #f))
-                     (label (cond ((not lf) (cadr b)) ((string? lf) lf) (else (fn-label lf)))))
+                     (label (key-label k (cadr b))))
                 (*transcript-append* (string-append "  " (%key-column k) " " label) :dim)))
             (keys-into m "")))))
     ; What the HOST adds that is not a binding — the modeler's mouse
@@ -119,9 +118,12 @@
       (and (not (string-prefix? "#<" name)) (key-for-command name)))))
 
 (define (key-label k name)
-  "A binding's display name: a registered *editor-key-labels* override (string
-  or fn), else the raw fn name from keys-into."
-  (let ((lf (hash-table-ref/default *editor-key-labels* k #f)))
+  "A binding's display name: NAME, the fn-label keys-into found, when it
+  names something; for an anonymous one, a registered *editor-key-labels*
+  override for key K (string or fn). Keyed by key alone, the override is
+  for global keys: a pane's key names itself through `labelled`, so the
+  minibuffer's label for C-a no longer names the editor's."
+  (let ((lf (and (string-prefix? "#<" name) (hash-table-ref/default *editor-key-labels* k #f))))
     (cond ((not lf) name)
           ((string? lf) lf)
           (else (fn-label lf)))))
@@ -222,7 +224,12 @@
       (lambda (row)
         (let* ((name (key-label (car row) (cadr row)))
                (what (doc-summary name)))
-          (emit "- `" (car row) "` — **" name "**" (if what (string-append " — " what) "") "\n")))
+          ; An unnamed procedure prints #<procedure>, and the reading view
+          ; takes <procedure> for a tag and shows a bare # (Kevin,
+          ; 2026-11-14): say so in words instead.
+          (if (string-prefix? "#<" name)
+            (emit "- `" (car row) "` — *an unnamed procedure*\n")
+            (emit "- `" (car row) "` — **" name "**" (if what (string-append " — " what) "") "\n"))))
       acc))
   ; keys-into ANSWERS the (key label) pairs since M5b (13-outliner).
   (define acc (keys-into *keymap* ""))

@@ -569,7 +569,57 @@
 (define *editor-key-labels*
   ; The (editing?) guard wraps editor fns anonymously; show-keys reads
   ; the real names from here. A hash table, key -> the function or a label.
+  ; Keyed by KEY, so it suits a global key; a pane's guarded key is named
+  ; by `labelled` instead, or one pane's label hid another's (the
+  ; minibuffer's C-a named the editor's, and C-h b showed `#`).
   (make-hash-table equal?))
+
+(define *binding-labels*
+  ; A bound procedure -> what C-h b calls it: a command name, or the
+  ; procedure whose name it is. fn-label asks here first.
+  (make-hash-table eq?))
+
+(define (labelled label f)
+  "F, as a fresh wrapper that C-h b, C-h k and show-keys call LABEL — a
+  command name, or the procedure it runs. An anonymous binding prints as
+  #<procedure>, which the help page's reading view shows as a bare #. The
+  wrapper is new each time, so labelling a shared procedure in one pane
+  names nothing else; a symbol already names itself and comes back as is."
+  (if (procedure? f)
+    (let ((w (lambda () (f))))
+      (hash-table-set! *binding-labels* w label)
+      w)
+    f))
+
+(define (%name-binding label f)
+  "F to bind, named LABEL if it has no name of its own. A named command
+  keeps its name — C-h k finds its docstring by it and a menu its key —
+  so only an anonymous procedure is wrapped."
+  (if (and (procedure? f) (string=? (format "~a" f) "#<procedure>"))
+    (labelled label f)
+    f))
+
+(define (edit-line-start)
+  "Move the input's cursor to its start — C-a, home."
+  (edit-set (%edit :text) 0))
+
+(define (edit-line-end)
+  "Move the input's cursor to its end — C-e, end."
+  (edit-set (%edit :text) (string-length (%edit :text))))
+
+(define (edit-left)
+  "Move the input's cursor one character left, closing a completion list."
+  (comp-close)
+  (edit-set (%edit :text) (- (%edit :cursor) 1)))
+
+(define (edit-right)
+  "Move the input's cursor one character right, closing a completion list."
+  (comp-close)
+  (edit-set (%edit :text) (+ (%edit :cursor) 1)))
+
+(define (edit-completion-back)
+  "Step a completion list back one entry — S-TAB."
+  (comp-move -1))
 
 (define (bind-editor-keys pane-key (paste #f))
   "(bind-editor-keys PANE-KEY &opt PASTE)  ->  PANE-KEY
@@ -583,24 +633,19 @@ that keeps newlines. Call it once the pane exists."
     (for-each
       (lambda (binding)
         (let ((k (car binding)) (f (cadr binding)))
-          (hash-table-set! *editor-key-labels* k f)
-          (bind-key k (lambda () (if (editing?) (f) #f)) pane-key)))
+          (bind-key k (labelled f (lambda () (if (editing?) (f) #f))) pane-key)))
       (list
         (list "return" edit-return)
         (list "backspace" edit-backspace)
         (list "delete" edit-delete)
         (list "tab" edit-tab)
-        (list "S-tab" (lambda () (comp-move -1)))
-        (list
-          "left"
-          (lambda () (comp-close) (edit-set (%edit :text) (- (%edit :cursor) 1))))
-        (list
-          "right"
-          (lambda () (comp-close) (edit-set (%edit :text) (+ (%edit :cursor) 1))))
-        (list "home" (lambda () (edit-set (%edit :text) 0)))
-        (list "end" (lambda () (edit-set (%edit :text) (string-length (%edit :text)))))
-        (list "C-a" (lambda () (edit-set (%edit :text) 0)))
-        (list "C-e" (lambda () (edit-set (%edit :text) (string-length (%edit :text)))))
+        (list "S-tab" edit-completion-back)
+        (list "left" edit-left)
+        (list "right" edit-right)
+        (list "home" edit-line-start)
+        (list "end" edit-line-end)
+        (list "C-a" edit-line-start)
+        (list "C-e" edit-line-end)
         (list "C-k" edit-kill-to-end)
         (list "C-y" paste)
         (list "s-v" paste)
@@ -620,8 +665,7 @@ that keeps newlines. Call it once the pane exists."
   "Bind each (key f label) in BINDINGS on PANE-KEY's map, and file its label."
   (for-each
     (lambda (b)
-      (hash-table-set! *editor-key-labels* (car b) (caddr b))
-      (bind-key (car b) (cadr b) pane-key))
+      (bind-key (car b) (%name-binding (caddr b) (cadr b)) pane-key))
     bindings))
 
 (define (set-text-size px)

@@ -243,6 +243,14 @@
 
 ; ── Keys, the mouse, the menu ──────────────────────────────────────────────
 
+(define (files-next)
+  "Select the next row of the tree — down, or n."
+  (files-select! (+ *files-sel* 1)))
+
+(define (files-previous)
+  "Select the row above in the tree — up, or p."
+  (files-select! (- *files-sel* 1)))
+
 (define (bind-files-keys)
   "(bind-files-keys)  ->  :files
 
@@ -250,10 +258,10 @@ The tree's own keys: up/down (p/n) move, RET opens, right/left (+/-)
 expand and collapse, g reads the disk again, i shows what git ignores, q
 gives the keyboard back. Call it once the host's tree pane exists."
   (for-each (lambda (row) (bind-key (car row) (cadr row) :files))
-            (list (list "down" (lambda () (files-select! (+ *files-sel* 1))))
-                  (list "n" (lambda () (files-select! (+ *files-sel* 1))))
-                  (list "up" (lambda () (files-select! (- *files-sel* 1))))
-                  (list "p" (lambda () (files-select! (- *files-sel* 1))))
+            (list (list "down" files-next)
+                  (list "n" files-next)
+                  (list "up" files-previous)
+                  (list "p" files-previous)
                   (list "return" files-activate)
                   (list "right" files-expand)
                   (list "+" files-expand)

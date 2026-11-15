@@ -664,6 +664,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Every row of the :help page names what its key runs. An anonymous
+    /// binding printed #<procedure>, which the reading view showed as a bare
+    /// `#` (Kevin, 2026-11-14: "C-a - #"), and labels filed by key alone let
+    /// the minibuffer's C-a name the editor's.
+    #[test]
+    fn every_help_row_names_its_command() {
+        app::resize(800, 600, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        let md = s.eval_to_string("(string-append (vi-help-markdown) (keybindings-markdown))").unwrap();
+        let bad: Vec<&str> =
+            md.split("\\n").filter(|l| l.contains("#<") || l.contains("unnamed")).collect();
+        assert!(bad.is_empty(), "rows without a name: {bad:?}");
+        assert!(md.contains("- `C-a` — **editor-line-start**"), "the editor's C-a: {md}");
+        assert!(md.contains("- `C-a` — **edit-line-start**"), "the minibuffer's C-a");
+    }
+
     /// Where a send goes by default: a Scheme FILE to a separate scm, the
     /// scratch and the editor's own files to the editor's image — and with
     /// scm on the PATH, the file's sends really run over there.

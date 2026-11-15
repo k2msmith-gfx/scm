@@ -375,8 +375,7 @@ acts only while the editor holds typing. Call it once the pane exists."
   (for-each
     (lambda (row)                                  ; (key command label)
       (let ((k (car row)) (f (cadr row)) (label (caddr row)))
-        (hash-table-set! *editor-key-labels* k label)
-        (bind-key k f :editor)))
+        (bind-key k (%name-binding label f) :editor)))
     (list
       (list "return" (eact "enter") "editor-newline")
       (list "backspace" (eact "backspace") "editor-backspace")

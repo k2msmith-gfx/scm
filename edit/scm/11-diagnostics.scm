@@ -32,8 +32,8 @@
       (echo (number->string (+ line 1)) ":" (number->string (+ column 1)) "  "
             (if (= error? 1) "" "open: ") message))))
 
-(bind-key "M-g n" (lambda () (if (editor-focused?) (goto-diagnostic) #f)))
-(bind-key "M-g p" (lambda () (if (editor-focused?) (goto-diagnostic) #f)))
+(bind-key "M-g n" (labelled "goto-diagnostic" (lambda () (if (editor-focused?) (goto-diagnostic) #f))))
+(bind-key "M-g p" (labelled "goto-diagnostic" (lambda () (if (editor-focused?) (goto-diagnostic) #f))))
 
 ; ── Document symbols: what this buffer defines ─────────────────────────────
 ; Emacs's imenu (M-g i), from the same scan the M-. index uses: every
@@ -84,4 +84,4 @@
       ; The list is the point: show it before anything is typed.
       (comp-open labels #f))))
 
-(bind-key "M-g i" (lambda () (if (editor-focused?) (document-symbols) #f)))
+(bind-key "M-g i" (labelled "document-symbols" (lambda () (if (editor-focused?) (document-symbols) #f))))
