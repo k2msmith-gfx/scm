@@ -437,6 +437,48 @@ completion, describe, an error with its backtrace, string escaping in both
 directions, the REPL buffer, and an interrupt of a runaway. The mode is the
 protocol's first client, so what it exercises is the protocol.
 
+## The editor, `edit`
+
+[`edit/`](edit/) is an Emacs-shaped editor for Scheme in a window of its
+own: vi or Emacs keys, sends to a separate `scm` (or Guile, or ray) with the
+answers in a REPL panel, completion and describe from the live image, `M-.`,
+a terminal pane, a file tree, and Rust with `rust-analyzer`. It is the same
+editor ray's modeler docks beside its 3D view.
+
+### Building it
+
+It needs Rust 1.88 or later (rustup) and nothing else: no Nix, no LLVM, no C
+libraries. Everything it draws with is Rust, and the fonts are vendored.
+
+    cargo build --release -p edit             # or a root `cargo build --release`, which includes it
+    ./target/release/edit                     # a *scratch* buffer
+    ./target/release/edit scene.scm notes.md  # each file in a buffer
+
+`~/.config/edit/init.scm` is loaded at startup, after the editor's own
+Scheme, when it exists. `edit --screenshot out.png [FILE]` draws one frame
+without opening a window.
+
+**On Linux** the window needs the desktop's own libraries, which it loads
+when it opens: libxkbcommon and the Wayland or X11 client libraries. A
+desktop install already has them; on NixOS they must be on the library
+path.
+
+### What it starts, when it is on the PATH
+
+None of these is needed to build or run it. Each one turns a feature on,
+and without it the feature says so instead.
+
+| program | for |
+|---|---|
+| `scm` | sending a `.scm` file: it runs in an `scm --serve` of its own |
+| `guile` | a Guile file's sends |
+| `ray` | a ray scene outside a ray checkout (one inside runs that checkout's `target/release/ray`) |
+| `rust-analyzer` | a `.rs` file's completion, `M-.`, describe and underlined errors |
+| `ffmpeg` | playing a movie in a buffer |
+
+`:help` (or `C-h b`) lists every key. [docs/editor-crate-plan.md](docs/editor-crate-plan.md)
+is how it was built and why.
+
 ## The LLVM tiers
 
 `scm-llvm` is deliberately not a default workspace member: a root
@@ -614,7 +656,7 @@ effort on the next multiple is a separate decision.
 criterion and whether it was met.
 
 Development targets **aarch64 macOS first**. x86-64 Linux is sequenced
-later, not dropped. Rust 1.85 or later.
+later, not dropped. Rust 1.88 or later (the editor's `if let … && let`).
 
 ## License
 
