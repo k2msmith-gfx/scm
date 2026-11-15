@@ -405,6 +405,21 @@ pub fn files_shown() -> bool {
     with(|s| s.files)
 }
 
+/// The size a window opens at, edit's and the modeler's: Blender's 1920×1080
+/// in logical pixels, kept a little inside the screen (Kevin, 2026-11-14).
+/// `screen` is the monitor's LOGICAL size, when the host could ask.
+pub fn start_window_size(screen: Option<(f64, f64)>) -> (f64, f64) {
+    match screen {
+        Some((sw, sh)) if sw > 1.0 && sh > 1.0 => (1920.0f64.min(sw * 0.94).round(), 1080.0f64.min(sh * 0.90).round()),
+        _ => (1600.0, 900.0),
+    }
+}
+
+/// Does a window open maximized? On Linux — the ThinkPad's 1920×1080 is
+/// filled, its panel left clear — and not on a Mac, where a 2560×1440
+/// screen filled is too big (Kevin, 2026-11-14).
+pub const START_MAXIMIZED: bool = cfg!(target_os = "linux");
+
 /// Which of the strip's icons a window point is on.
 pub fn icon_at(x: f64, y: f64) -> Option<Icon> {
     with(|s| s.icons.iter().find(|(_, r)| r.w > 0 && r.contains(x, y)).map(|(i, _)| *i))

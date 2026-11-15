@@ -111,9 +111,15 @@ impl ApplicationHandler for App {
         if self.display.is_some() {
             return;
         }
+        let screen = event_loop.primary_monitor().map(|m| {
+            let (size, scale) = (m.size(), m.scale_factor());
+            (size.width as f64 / scale, size.height as f64 / scale)
+        });
+        let (w, h) = app::start_window_size(screen);
         let attrs = Window::default_attributes()
             .with_title("edit")
-            .with_inner_size(winit::dpi::LogicalSize::new(1000.0, 760.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(w, h))
+            .with_maximized(app::START_MAXIMIZED);
         let window = Rc::new(event_loop.create_window(attrs).expect("a window"));
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer context");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("softbuffer surface");

@@ -338,6 +338,17 @@ mod tests {
         ((right - 2.0 * (15.0 + 5.0) - 7.5, y), (right - 15.0 - 5.0 - 7.5, y), (right - 7.5, y))
     }
 
+    /// The window's opening size (Kevin, 2026-11-14): 1920×1080 on the Mac's
+    /// 2560×1440, kept inside a smaller screen, a default with none; and
+    /// maximized only on Linux.
+    #[test]
+    fn the_window_opens_at_blenders_size_inside_the_screen() {
+        assert_eq!(app::start_window_size(Some((2560.0, 1440.0))), (1920.0, 1080.0));
+        assert_eq!(app::start_window_size(Some((1440.0, 900.0))), (1354.0, 810.0));
+        assert_eq!(app::start_window_size(None), (1600.0, 900.0));
+        assert_eq!(app::START_MAXIMIZED, cfg!(target_os = "linux"));
+    }
+
     /// The program without its window: boot the shell over the three panes,
     /// type a form, send it, save the buffer, and draw.
     #[test]
