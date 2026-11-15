@@ -389,6 +389,34 @@ impl Server {
         format!("{} is ready ({})", self.program, self.root.display())
     }
 
+    /// How the server is in a word or two, for a modeline: its name alone
+    /// once it is ready.
+    pub fn mode(&self) -> String {
+        let st = self.shared.lock();
+        let program = &self.program;
+        if st.closed.is_some() {
+            return format!("{program} stopped");
+        }
+        if !st.ready {
+            return format!("{program} starting");
+        }
+        let mut work: Vec<&String> = st.progress.values().collect();
+        work.sort();
+        if let Some(w) = work.first() {
+            // "Indexing — 12/40 (core) (30%)" is "indexing (30%)" here.
+            let title = w.split(" — ").next().unwrap_or("").split(" (").next().unwrap_or("").to_lowercase();
+            let pct = w.rsplit_once(" (").map(|(_, p)| p).filter(|p| p.ends_with("%)"));
+            return match pct {
+                Some(p) => format!("{program} {title} ({p}"),
+                None => format!("{program} {title}"),
+            };
+        }
+        if st.quiescent == Some(false) {
+            return format!("{program} loading");
+        }
+        program.clone()
+    }
+
     pub fn closed(&self) -> bool {
         self.shared.lock().closed.is_some()
     }
@@ -939,6 +967,38 @@ pub fn status(path: &str, lang: &str) -> String {
     })
 }
 
+/// No buffer visits PATH now: its server is told, and forgets it.
+pub fn closed(path: &str) {
+    REGISTRY.with(|r| {
+        let mut r = r.borrow_mut();
+        let file = r.canonical(path);
+        let Some(doc) = r.docs.remove(&file) else { return };
+        let server = &r.servers[doc.server];
+        if !server.closed() {
+            server.notify("textDocument/didClose", json!({"textDocument": {"uri": path_to_uri(&file)}}));
+        }
+        if r.hover.as_ref().is_some_and(|((p, ..), _)| *p == file) {
+            r.hover = None;
+        }
+    })
+}
+
+/// LANG's server for PATH in a word or two, for the modeline; None when
+/// none serves it — no server for the language, or its program is not on
+/// the PATH (nothing to say, every time the buffer is drawn).
+pub fn mode(path: &str, lang: &str) -> Option<String> {
+    REGISTRY.with(|r| {
+        let mut r = r.borrow_mut();
+        let spec = r.specs.get(lang)?;
+        if spec.program.is_empty() || r.failed.contains_key(&spec.program) {
+            return None;
+        }
+        let file = r.canonical(path);
+        let doc = r.docs.get(&file)?;
+        Some(r.servers[doc.server].mode())
+    })
+}
+
 /// The widget's view of the servers: each buffer's text as it changes, and
 /// the diagnostics to draw.
 struct LspWatcher;
@@ -954,6 +1014,14 @@ impl crate::editorpane::Watcher for LspWatcher {
 
     fn diagnostics(&self, path: &str) -> Vec<Diagnostic> {
         diagnostics(path)
+    }
+
+    fn closed(&self, path: &str) {
+        closed(path);
+    }
+
+    fn mode(&self, path: &str, lang: &str) -> Option<String> {
+        mode(path, lang)
     }
 }
 
@@ -1037,6 +1105,7 @@ mod tests {
         let server = Server::over("fake", Path::new("/proj"), Box::new(from_server), Box::new(to_server));
         server.notify("textDocument/didOpen", json!({"textDocument": {"uri": "file:///proj/a.rs", "text": "x"}}));
         let id = server.request("textDocument/completion", json!({}));
+        assert_eq!(server.mode(), "fake starting");
         let fake = std::thread::spawn(move || {
             let mut from_client = BufReader::new(from_client);
             let mut to_client = to_client;
@@ -1057,6 +1126,10 @@ mod tests {
                 "uri": "file:///proj/a.rs",
                 "diagnostics": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
                                  "severity": 1, "message": "mismatched types\nexpected u32"}]}})).unwrap();
+            for value in [json!({"kind": "begin", "title": "Indexing", "percentage": 0}),
+                          json!({"kind": "report", "message": "12/40 (core)", "percentage": 30})] {
+                write_message(&mut to_client, &json!({"method": "$/progress", "params": {"token": "idx", "value": value}})).unwrap();
+            }
             write_message(&mut to_client, &json!({"id": 7, "method": "workspace/configuration", "params": {"items": [{}, {}]}})).unwrap();
             let answer = next(&mut from_client);
             // The pipe stays open: a closed one is a server that stopped.
@@ -1071,7 +1144,8 @@ mod tests {
         let diags = server.diagnostics_of(Path::new("/proj/a.rs"));
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "mismatched types — expected u32");
-        assert!(server.status().contains("ready"), "{}", server.status());
+        assert_eq!(server.status(), "fake: Indexing — 12/40 (core) (30%)");
+        assert_eq!(server.mode(), "fake indexing (30%)", "the modeline's word");
     }
 
     impl Server {
@@ -1102,6 +1176,7 @@ mod tests {
         assert_eq!(complete(&path, "rust", "fn main() {}", 0, 3), None);
         assert!(diagnostics(&path).is_empty());
         assert_eq!(status(&path, "rust"), "edit-no-such-language-server: not on the PATH");
+        assert_eq!(mode(&path, "rust"), None, "the modeline says nothing of it");
         register("rust", "", &[], &[]);
         assert_eq!(status(&path, "rust"), "the rust language server is off");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1134,7 +1209,17 @@ mod tests {
         assert!(words.is_some(), "{}", status(&path, "rust"));
         let def = definition(&path, "rust", src, 5, 6).unwrap();
         assert_eq!(def, vec![(std::fs::canonicalize(&main).unwrap().to_string_lossy().into_owned(), 1, 3)]);
-        let (sig, doc) = hover(&path, "rust", src, 1, 5).unwrap();
+        // Busy loading (two of these tests at once), a first hover can come
+        // back empty; it is not cached, so ask until it answers.
+        let th = Instant::now();
+        let mut h = None;
+        while th.elapsed() < Duration::from_secs(60) && h.is_none() {
+            h = hover(&path, "rust", src, 1, 5);
+            if h.is_none() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let (sig, doc) = h.unwrap();
         assert_eq!(sig, "fn frobnicate(x: u32) -> u32");
         assert!(doc.contains("Frobs it."), "{doc}");
         let t1 = Instant::now();

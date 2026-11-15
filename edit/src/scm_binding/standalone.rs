@@ -579,7 +579,8 @@ mod tests {
     /// Rust with rust-analyzer, through the shell as a user reaches it:
     /// a .rs file opens as Rust, TAB's pool has the crate's names, M-.
     /// jumps, describe shows the doc, the argument hint is echoed when the
-    /// host is woken, and a saved file's errors are underlined.
+    /// host is woken, a saved file's errors are underlined, the modeline
+    /// names the server once it is ready, and C-x k lets the file go.
     /// `cargo test -p edit --lib rust_analyzer_through_the_shell -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -646,6 +647,19 @@ mod tests {
         }
         eprintln!("diagnostics: {diags}");
         assert!(diags.contains("mismatched types"), "{diags}");
+        // The modeline's word, once the server has settled.
+        let t3 = Instant::now();
+        let mut mode = None;
+        while t3.elapsed() < Duration::from_secs(60) && mode.as_deref() != Some("rust-analyzer") {
+            std::thread::sleep(Duration::from_millis(200));
+            mode = crate::lsp::mode(&file, "rust");
+        }
+        assert_eq!(mode.as_deref(), Some("rust-analyzer"));
+        // C-x k: the server is told, and forgets the file.
+        s.key("C-x");
+        s.key("k");
+        assert_eq!(crate::lsp::status(&file, "rust"), "rust-analyzer has not seen this buffer yet");
+        assert_eq!(crate::lsp::mode(&file, "rust"), None);
         crate::lsp::stop(None);
         let _ = std::fs::remove_dir_all(&dir);
     }

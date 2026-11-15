@@ -8,7 +8,9 @@
 ;## language server (E7, edit's lsp.rs): it starts with the first .rs
 ;## buffer of a project and from then on errors are underlined as you type
 ;## (and from cargo check on save), TAB completes, M-. jumps, C-c C-d d
-;## describes and eldoc gives the argument hint. Nothing is configured.
+;## describes and eldoc gives the argument hint; the modeline says how it
+;## is (starting, indexing, ready), and C-x k closes the file to it.
+;## Nothing is configured.
 ;## Without it — or after M-x rust-analyzer-stop — completion offers the
 ;## buffer's own words and the rest says nothing.
 

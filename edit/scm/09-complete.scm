@@ -14,6 +14,7 @@
 
 (define *editor-comp* #f)
 ; a %make-state of :all (the pool) :cands (ranked) :sel :start (an offset)
+; :served (the pool is a language server's, already in its order)
 
 (define (editor-insertish?)
   "Typed characters INSERT here (vi insert/replace mode, or vi off)."
@@ -67,10 +68,31 @@
         (if (< point (%state-ref comp :start))
           (editor-comp-cancel)
           (let* ((tok (substring text (%state-ref comp :start) point))
-                 (matches (%as-list (rank-candidates tok (%state-ref comp :all)))))
+                 (matches (%as-list ((if (%state-ref comp :served) keep-candidates rank-candidates)
+                                     tok (%state-ref comp :all)))))
             (hash-table-set! comp :cands matches)
             (hash-table-set! comp :sel 0)
             (if (null? matches) (editor-comp-cancel) (editor-comp-show))))))))
+
+(define (keep-candidates tok cands)
+  "The CANDS that contain TOK, ignoring case, in the order given — for a
+  language server's pool, which comes ranked by what the server knows of
+  the code (locals and the receiver's methods first), where
+  rank-candidates would put the shortest name first."
+  (define ltok (string-downcase tok))
+  (filter (lambda (c) (string-contains (string-downcase c) ltok)) (%as-list cands)))
+
+(define (editor-pool)
+  "The completion pool and whose it is: (served? . words), served? when a
+  language server answered (see editor-candidates)."
+  (define buf (%editor-active-buffer (editor-pane-id)))
+  (if (non-scheme-buffer? buf)
+    (if-let ((words (and-let* ((b (non-scheme-backend buf))
+                               (complete (backend-op b :complete)))
+                      (complete ""))))
+      (cons #t words)
+      (cons #f (buffer-words (car (editor-text+point)))))
+    (cons #f (symbol-candidates))))
 
 (define (editor-candidates)
   "The completion pool: this image's bindings and the API's :keywords
@@ -83,13 +105,7 @@
   would have answered. A buffer in a language that is not Scheme (Rust)
   asks its language's backend — a language server, when one runs — and
   falls back to the buffer's own words."
-  (define buf (%editor-active-buffer (editor-pane-id)))
-  (if (non-scheme-buffer? buf)
-    (or (and-let* ((b (non-scheme-backend buf))
-                   (complete (backend-op b :complete)))
-          (complete ""))
-        (buffer-words (car (editor-text+point))))
-    (symbol-candidates)))
+  (cdr (editor-pool)))
 
 (define (buffer-words text)
   "The distinct words of TEXT — letters, digits and `_`, three characters
@@ -110,10 +126,12 @@
   "Open symbol completion at the cursor's token — TAB mid-symbol."
   (let* ((tp (editor-text+point))
          (text (car tp))
-         (point (cadr tp)))
+         (point (cadr tp))
+         (pool (editor-pool)))
     (set! *editor-comp*
       (%make-state
-        :all (editor-candidates)
+        :all (cdr pool)
+        :served (car pool)
         :cands '()
         :sel 0
         :start (editor-token-start text point)))

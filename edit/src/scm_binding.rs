@@ -526,6 +526,16 @@ mod tests {
             eval(&mut interp, "(editor-candidates)"),
             Val::List(["count", "counter", "let", "main"].iter().map(|w| Val::Str((*w).into())).collect())
         );
+        // A server's pool keeps the server's order as more is typed; the
+        // buffer's words are ranked, shortest first.
+        let words = |ws: &[&str]| Val::List(ws.iter().map(|w| Val::Str((*w).into())).collect());
+        eval(&mut interp, r#"(hash-table-set! *language-backends* "rust"
+                               (lambda () (list (cons :complete (lambda (p) '("counter_of" "count_all" "Count"))))))"#);
+        assert_eq!(eval(&mut interp, "(car (editor-pool))"), Val::Bool(true), "served");
+        assert_eq!(eval(&mut interp, r#"(keep-candidates "count" (cdr (editor-pool)))"#), words(&["counter_of", "count_all", "Count"]));
+        assert_eq!(eval(&mut interp, r#"(rank-candidates "count" (cdr (editor-pool)))"#), words(&["Count", "count_all", "counter_of"]));
+        eval(&mut interp, r#"(hash-table-set! *language-backends* "rust" rust-backend)"#);
+        assert_eq!(eval(&mut interp, "(car (editor-pool))"), Val::Bool(false), "no server: the buffer's words");
         let gl = std::env::temp_dir().join(format!("edit-guile-test-{}.scm", std::process::id()));
         std::fs::write(&gl, "(use-modules (ice-9 match))\n").unwrap();
         let gl = gl.to_string_lossy().replace('\\', "/");

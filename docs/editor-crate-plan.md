@@ -1044,10 +1044,22 @@ without it).
   - two `#[ignore]`d runs against the real rust-analyzer, one of them
     through the standalone shell exactly as a user reaches it. Completion
     answers about 0.3–0.5 s after opening a small crate.
-- **Not yet:** `didClose` when a buffer is killed (the server keeps the
-  file); rename, code actions and formatting; completion ranked by the
-  server's own order (the shell re-ranks by match); a mode-line indicator
-  of the server's state.
+- **The follow-ups** (Kevin, 2026-11-15). The widget's `Watcher` gained
+  two calls with defaults that do nothing. `closed(path)` is made when no
+  buffer in any pane visits a file any more: C-x k, or a buffer that comes
+  to visit another file. The server is sent `didClose` and the file is
+  forgotten. `mode(path, lang)` is a word or two after the buffer's name
+  on the modeline: "rust-analyzer starting", "rust-analyzer indexing
+  (30%)", "rust-analyzer loading", "rust-analyzer stopped", and the name
+  alone once it is ready. A program not on the PATH says nothing there,
+  since it would say it on every draw; M-x rust-analyzer-status still
+  says why. The modeline follows the server's progress because each
+  `$/progress` wakes the host, which redraws. A server's completion pool
+  is kept in the server's order as more is typed (`keep-candidates`, a
+  substring filter), where Scheme's pool and the buffer's words are still
+  ranked shortest-first: the server ranks locals and the receiver's
+  methods first, which a ranking by length undid.
+- **Not yet:** rename, code actions and formatting.
 
 **Still open.**
 - **In scm** (each is a change in the scm repo):

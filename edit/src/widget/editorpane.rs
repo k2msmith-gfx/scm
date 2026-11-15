@@ -728,6 +728,14 @@ pub trait Watcher: Sync {
     fn text_changed(&self, path: &str, lang: &str, lines: &[&str]);
     /// What is wrong with the buffer visiting PATH, in the widget's units.
     fn diagnostics(&self, path: &str) -> Vec<language::Diagnostic>;
+    /// No buffer visits PATH any more: it was closed, or it visits another
+    /// file now.
+    fn closed(&self, _path: &str) {}
+    /// A word or two for the modeline of the buffer visiting PATH in LANG —
+    /// how what watches it is ("rust-analyzer indexing (40%)") — or None.
+    fn mode(&self, _path: &str, _lang: &str) -> Option<String> {
+        None
+    }
 }
 
 thread_local! {
@@ -737,6 +745,24 @@ thread_local! {
 /// Install the watcher (one; a second replaces the first).
 pub fn set_watcher(w: &'static dyn Watcher) {
     WATCHER.set(Some(w));
+}
+
+/// Tell the watcher PATH was let go, unless a buffer in some pane still
+/// visits it.
+fn release(path: Option<String>) {
+    let (Some(w), Some(path)) = (WATCHER.get(), path) else { return };
+    let held = with_state(|state| state.panes.values().any(|p| p.docs.iter().any(|d| d.path.as_deref() == Some(path.as_str()))));
+    if !held {
+        w.closed(&path);
+    }
+}
+
+/// The watcher's modeline word for a buffer that is text with a file.
+fn watched_mode(doc: &Doc) -> Option<String> {
+    if doc.md.is_some() || doc.image.is_some() || doc.video.is_some() {
+        return None;
+    }
+    WATCHER.get()?.mode(doc.path.as_deref()?, doc.lang.name())
 }
 
 /// The watcher's diagnostics for a buffer that is text with a file.
@@ -812,8 +838,10 @@ pub fn buffer_switch(id: u32, buf: u32) -> bool {
 
 /// Drop `buf` from the pane (never the last one). Returns whether it went.
 pub fn buffer_close(id: u32, buf: u32) -> bool {
+    let path = buffer_path(id, buf);
     let ok = with_view(id, |pane| pane.buffer_close(buf));
     if ok {
+        release(path);
         crate::host::mark_dirty_ui();
     }
     ok
@@ -841,7 +869,16 @@ pub fn buffer_path(id: u32, buf: u32) -> Option<String> {
 
 /// Point `buf` at a file path (None = scratch).
 pub fn set_buffer_path(id: u32, buf: u32, path: Option<&str>) -> bool {
-    with_doc(id, buf, |d| d.path = path.map(str::to_string)).is_some()
+    let old = with_doc(id, buf, |d| std::mem::replace(&mut d.path, path.map(str::to_string)));
+    match old {
+        Some(old) => {
+            if old.as_deref() != path {
+                release(old);
+            }
+            true
+        }
+        None => false,
+    }
 }
 
 /// `buf`'s modeline display name.
@@ -3128,6 +3165,10 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
             Some(d) => format!("{left} · unreadable at line {}", d.start.0 + 1),
             None => left,
         };
+        let left = match watched_mode(pane) {
+            Some(mode) => format!("{left} · {mode}"),
+            None => left,
+        };
         draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, &theme, &left, vi_label.as_deref());
     });
 }
@@ -3623,6 +3664,7 @@ mod tests {
     struct Recording;
     thread_local! {
         static TOLD: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
+        static LET_GO: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
     static RECORDING: Recording = Recording;
     impl Watcher for Recording {
@@ -3632,6 +3674,36 @@ mod tests {
         fn diagnostics(&self, path: &str) -> Vec<language::Diagnostic> {
             vec![language::Diagnostic { start: (0, 0), end: (0, 1), message: format!("from {path}"), error: true }]
         }
+        fn closed(&self, path: &str) {
+            LET_GO.with(|t| t.borrow_mut().push(path.into()));
+        }
+        fn mode(&self, _path: &str, lang: &str) -> Option<String> {
+            Some(format!("{lang}-server"))
+        }
+    }
+
+    #[test]
+    fn the_watcher_hears_a_file_let_go_once_no_buffer_visits_it() {
+        set_vi(false);
+        crate::host::testing::reset();
+        set_watcher(&RECORDING);
+        let let_go = || LET_GO.with(|t| t.borrow().clone());
+        let (a, b) = (962, 963);
+        set_text(a, "");
+        set_text(b, "");
+        let one = buffer_new(a);
+        set_buffer_path(a, one, Some("/tmp/one.rs"));
+        let two = buffer_new(b);
+        set_buffer_path(b, two, Some("/tmp/one.rs"));
+        let mode = with_view(a, |p| watched_mode(&p.docs[p.index_of(one).unwrap()]));
+        assert_eq!(mode.as_deref(), Some("scheme-server"), "the modeline's word, from the watcher");
+        assert!(buffer_close(a, one));
+        assert!(let_go().is_empty(), "the other pane still visits it");
+        set_buffer_path(b, two, Some("/tmp/two.rs"));
+        assert_eq!(let_go(), vec!["/tmp/one.rs"], "visiting another file lets the first go");
+        assert!(buffer_close(b, two));
+        assert_eq!(let_go(), vec!["/tmp/one.rs", "/tmp/two.rs"]);
+        WATCHER.set(None);
     }
 
     #[test]
