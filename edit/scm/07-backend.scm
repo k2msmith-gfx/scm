@@ -116,6 +116,16 @@ answer from its live bindings."
   "Is BUF in a language whose text is not Scheme?"
   (and (member (%buffer-language (*pane-id* :editor) buf) *non-scheme-languages*) #t))
 
+(define (non-scheme-backend buf)
+  "The backend of BUF's language when that language is not Scheme (Rust's,
+20-rust), else #f. Completion, eldoc and M-. ask it; for a Scheme buffer
+they answer from this image, and asking would start the Scheme a send
+goes to."
+  (and (non-scheme-buffer? buf)
+       (let ((f (hash-table-ref/default *language-backends*
+                                        (%buffer-language (*pane-id* :editor) buf) #f)))
+         (and f (f)))))
+
 (define (backend-of buf)
   "BUF's backend: the one it was attached to, else its language's, else
 the host's choice."

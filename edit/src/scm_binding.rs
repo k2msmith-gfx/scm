@@ -156,6 +156,7 @@ macro_rules! prim {
 mod breaks;
 mod clipboard;
 mod editor;
+mod lsp;
 mod menu;
 pub mod remote;
 pub mod standalone;
@@ -268,6 +269,7 @@ pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Res
         .chain(breaks::install(interp)?)
         .chain(term::install(interp)?)
         .chain(remote::install(interp)?)
+        .chain(lsp::install(interp)?)
     {
         installed(name);
     }
@@ -513,7 +515,8 @@ mod tests {
         let rs = std::env::temp_dir().join(format!("edit-rust-test-{}.rs", std::process::id()));
         std::fs::write(&rs, "fn main() {\n    let counter = 1;\n    count\n}\n").unwrap();
         let rs = rs.to_string_lossy().replace('\\', "/");
-        eval(&mut interp, &format!(r#"(set! helped '()) (visit-file-text "{rs}")"#));
+        // No language server: what this test sees must not depend on the PATH.
+        eval(&mut interp, &format!(r#"(rust-analyzer-stop) (set! helped '()) (visit-file-text "{rs}")"#));
         assert_eq!(eval(&mut interp, "(%buffer-language 3 (%editor-active-buffer 3))"), Val::Str("rust".into()));
         eval(&mut interp, "(%editor-goto-line 3 1) (eval-defun)");
         let sent = eval(&mut interp, "(apply string-append helped)");

@@ -10,12 +10,14 @@
 //! this crate knows what a 3D pane, a scene or a status bar is. What the
 //! editor knows about the text it edits is a [`language::Language`], and
 //! what Scheme reaches it through is [`scm_binding`] (E2), the one module
-//! that names the VM.
+//! that names the VM. A language server, when one is on the PATH, is
+//! [`lsp`] (E7).
 
 pub mod app;
 pub mod host;
 pub mod keys;
 pub mod language;
+pub mod lsp;
 pub mod scm_binding;
 pub mod theme;
 pub mod wake;

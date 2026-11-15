@@ -181,6 +181,10 @@
 
 (define (editor-typing?) (equal? (%typing-pane) (editor-pane-id)))
 
+; What runs after a buffer is written to PATH (20-rust: its language
+; server checks the file).
+(define *save-hooks* '())
+
 (define (save-buffer (path #f))
   "Write this buffer to its own file — C-x C-s. Runs nothing, unless
   reload-on-save is on and the file is one of the loaded scene's: then the
@@ -206,6 +210,7 @@
     (%editor-mark-saved eid)
     (unless (and own (same-file? own path)) (register-buffer buf path))
     (%xref-update (real-file path) (%text (%editor-text eid)))
+    (for-each (lambda (h) (h path)) *save-hooks*)
     (*show-status* path)
     (unless (*after-save* path own) (echo "wrote " path)))
   (cond ; A buffer the host will not write (an image, a Janet file) has no
@@ -472,6 +477,7 @@ acts only while the editor holds typing. Call it once the pane exists."
   (%editor-buffer-switch eid buf)
   (spit (buffer-path buf) (%editor-text eid))
   (%editor-mark-saved eid)
+  (for-each (lambda (h) (h (buffer-path buf))) *save-hooks*)
   (%editor-buffer-switch eid cur))
 
 (define (switch-to-buffer)

@@ -39,6 +39,8 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # System clipboard for the shared input editor (REPL/minibuffer/agent):
 # paste, copy-line, cut-line. Pure-Rust face over the OS pasteboards.
 arboard = "3"
+# The language-server client (src/lsp.rs, E7): LSP is JSON-RPC.
+serde_json = "1"
 # Scheme as an editor sees it: the token scan the Scheme `Language` highlights
 # and indents from (docs/editor-crate-plan.md E1c) -- the same scan the
 # modeler's `M-.` index and `scm-lsp` use, so a fix to how Scheme is read

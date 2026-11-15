@@ -719,14 +719,48 @@ pub fn enclosing_head(id: u32) -> Option<String> {
     })
 }
 
+/// **What watches the buffers from outside** — a language server
+/// (`crate::lsp`, E7). The widget tells it each file buffer's text when the
+/// text changes, and draws what it says is wrong beside the language's own
+/// read marks. The widget does not know what is watching.
+pub trait Watcher: Sync {
+    /// The buffer visiting PATH, in language LANG, holds LINES now.
+    fn text_changed(&self, path: &str, lang: &str, lines: &[&str]);
+    /// What is wrong with the buffer visiting PATH, in the widget's units.
+    fn diagnostics(&self, path: &str) -> Vec<language::Diagnostic>;
+}
+
+thread_local! {
+    static WATCHER: Cell<Option<&'static dyn Watcher>> = const { Cell::new(None) };
+}
+
+/// Install the watcher (one; a second replaces the first).
+pub fn set_watcher(w: &'static dyn Watcher) {
+    WATCHER.set(Some(w));
+}
+
+/// The watcher's diagnostics for a buffer that is text with a file.
+fn watched_diagnostics(doc: &Doc) -> Vec<language::Diagnostic> {
+    if doc.md.is_some() || doc.image.is_some() || doc.video.is_some() {
+        return Vec::new();
+    }
+    match (WATCHER.get(), doc.path.as_deref()) {
+        (Some(w), Some(path)) => w.diagnostics(path),
+        _ => Vec::new(),
+    }
+}
+
 /// What the active buffer's language cannot read (E3f), from the scan the
-/// draw keeps — made now if the text has changed since.
+/// draw keeps — made now if the text has changed since — and what the
+/// [`Watcher`] says.
 pub fn diagnostics(id: u32) -> Vec<language::Diagnostic> {
     with_pane(id, |_, pane, _| {
         let reads = pane.reads();
-        let (lex, lang) = (&mut pane.lex, pane.lang);
-        pane.editor.with_buffer(|buffer| fresh_scan(lex, lang, reads, buffer));
-        pane.lex.as_ref().map_or_else(Vec::new, |c| c.diags.clone())
+        let (lex, lang, path) = (&mut pane.lex, pane.lang, pane.path.as_deref());
+        pane.editor.with_buffer(|buffer| fresh_scan(lex, lang, reads, buffer, path));
+        let mut diags = pane.lex.as_ref().map_or_else(Vec::new, |c| c.diags.clone());
+        diags.extend(watched_diagnostics(pane));
+        diags
     })
 }
 
@@ -2604,8 +2638,9 @@ struct LexCache {
 }
 
 /// Make `lex` the scan of `buffer`'s text — and the reader's diagnostics
-/// of it — unless it already is.
-fn fresh_scan(lex: &mut Option<LexCache>, lang: &'static dyn Language, reads: bool, buffer: &Buffer) {
+/// of it — unless it already is. A buffer with a file whose text changed is
+/// reported to the [`Watcher`].
+fn fresh_scan(lex: &mut Option<LexCache>, lang: &'static dyn Language, reads: bool, buffer: &Buffer, path: Option<&str>) {
     let same = lex.as_ref().is_some_and(|c| {
         c.reads == reads
             && c.lines.len() == buffer.lines.len()
@@ -2613,6 +2648,9 @@ fn fresh_scan(lex: &mut Option<LexCache>, lang: &'static dyn Language, reads: bo
     });
     if !same {
         let lines: Vec<&str> = buffer.lines.iter().map(|l| l.text()).collect();
+        if let (Some(w), Some(path)) = (WATCHER.get(), path) {
+            w.text_changed(path, lang.name(), &lines);
+        }
         let scan = lang.scan(&lines);
         let diags = if reads { lang.diagnose(&lines, &scan) } else { Vec::new() };
         *lex = Some(LexCache {
@@ -2647,10 +2685,11 @@ fn relex(pane: &mut Doc, family: &str, theme: &crate::theme::Theme, typing: bool
     let line_sigs = &mut pane.line_sigs;
     let lex = &mut pane.lex;
     let lang = pane.lang;
+    let path = pane.path.as_deref();
     pane.editor.with_buffer_mut(|buffer| {
         // Pass 1: lex every line, collecting spans and delimiter positions —
         // unless the text is what the kept scan was made from.
-        fresh_scan(lex, lang, reads, buffer);
+        fresh_scan(lex, lang, reads, buffer, path);
         let cache = lex.as_mut().expect("just filled");
         let all_spans = &cache.scan.spans;
         let parens: &[ParenPos] = &cache.scan.parens;
@@ -3004,10 +3043,11 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
         // What the reader cannot read (E3f), underlined: in the error ink for
         // text that will not read, and faintly for a form left open — which
         // is also what every form is while it is being typed.
-        let diags = match (&pane.md, &pane.lex) {
+        let mut diags = match (&pane.md, &pane.lex) {
             (None, Some(c)) => c.diags.clone(),
             _ => Vec::new(),
         };
+        diags.extend(watched_diagnostics(pane));
         if !diags.is_empty() {
             let thick = (2.0 * scale).round().max(1.0) as i32;
             let advance = crate::text::mono_metrics(px).0;
@@ -3577,6 +3617,51 @@ mod tests {
         fn enclosing_head(&self, lines: &[&str], line: usize, byte: usize) -> Option<String> {
             language::SCHEME.enclosing_head(lines, line, byte)
         }
+    }
+
+    /// A watcher that records what it is told and marks the first byte.
+    struct Recording;
+    thread_local! {
+        static TOLD: RefCell<Vec<(String, String, String)>> = const { RefCell::new(Vec::new()) };
+    }
+    static RECORDING: Recording = Recording;
+    impl Watcher for Recording {
+        fn text_changed(&self, path: &str, lang: &str, lines: &[&str]) {
+            TOLD.with(|t| t.borrow_mut().push((path.into(), lang.into(), lines.join("\n"))));
+        }
+        fn diagnostics(&self, path: &str) -> Vec<language::Diagnostic> {
+            vec![language::Diagnostic { start: (0, 0), end: (0, 1), message: format!("from {path}"), error: true }]
+        }
+    }
+
+    #[test]
+    fn the_watcher_hears_a_file_buffer_change_and_its_marks_are_drawn() {
+        set_vi(false);
+        crate::host::testing::reset();
+        let id = 961;
+        let rect = Rect { x: 0, y: 0, w: 300, h: 100 };
+        crate::host::testing::set_rect(id, rect);
+        set_watcher(&RECORDING);
+        set_text(id, "fn main() {}");
+        let mut fb = Framebuffer::new(300, 100);
+        draw(id, &mut fb, rect, true);
+        assert!(TOLD.with(|t| t.borrow().is_empty()), "a buffer with no file is not watched");
+        assert!(diagnostics(id).is_empty());
+        set_buffer_path(id, active_buffer(id), Some("/tmp/w.rs"));
+        set_language(id, "rust");
+        draw(id, &mut fb, rect, true);
+        draw(id, &mut fb, rect, true);
+        assert_eq!(
+            TOLD.with(|t| t.borrow().clone()),
+            vec![("/tmp/w.rs".to_string(), "rust".to_string(), "fn main() {}".to_string())],
+            "told once, until the text changes"
+        );
+        let d = diagnostics(id);
+        assert_eq!((d.len(), d[0].message.as_str(), d[0].error), (1, "from /tmp/w.rs", true));
+        act(id, "insert", Some("x"), 0.0, 0.0);
+        draw(id, &mut fb, rect, true);
+        assert_eq!(TOLD.with(|t| t.borrow().len()), 2, "and again when it does");
+        WATCHER.set(None);
     }
 
     #[test]

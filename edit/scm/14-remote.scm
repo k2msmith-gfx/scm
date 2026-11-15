@@ -73,9 +73,15 @@ a buffer sending to it is set to."
 ; the callback its send left here. The window stays live while a form runs.
 (define *remote-callbacks* (make-hash-table equal?))   ; (conn . request-id) → k
 
+; What else runs when the host is woken (20-rust: a language server's
+; argument hint, which arrives as a socket's answer does).
+(define *wake-hooks* '())
+
 (define (remote-poll)
   "Deliver every answer an async send is owed: call each send's callback
-with its RESULT. The host calls this when a connection wakes it."
+with its RESULT, then run *wake-hooks*. The host calls this when a
+connection wakes it."
+  (for-each (lambda (h) (h)) *wake-hooks*)
   (for-each
     (lambda (row)
       (match row

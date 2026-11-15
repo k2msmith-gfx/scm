@@ -95,9 +95,12 @@ Example: (find-definitions \"stair\")"
                       (cons (list (%editor-active-buffer eid) line index) *definition-marks*)))
       (_ #f))
     (goto-site site))
-  (match (definition-sites name)
+  (define foreign (non-scheme-backend (%editor-active-buffer eid)))
+  (match (if foreign
+           ((or (backend-op foreign :definition-sites) (lambda (n) '())) name)
+           (definition-sites name))
     (()
-      (if (%env-ref (string->symbol name) #f)
+      (if (and (not foreign) (%env-ref (string->symbol name) #f))
         (begin
           (describe-name name)
           (echo name " has no source in this scene's files or the preludes — "

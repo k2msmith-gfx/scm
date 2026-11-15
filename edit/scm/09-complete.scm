@@ -26,10 +26,21 @@
 
 (define editor-delims (list " " "\t" "\n" "(" ")" "[" "]" "{" "}" "\"" "`" "#"))
 
+(define (editor-delimiter)
+  ; What ends a token in the active buffer: Scheme's delimiters, or — in a
+  ; language that is not Scheme — anything but a letter, a digit or `_`, so
+  ; Rust's `xs.it` is the token `it`.
+  (if (non-scheme-buffer? (%editor-active-buffer (editor-pane-id)))
+    (lambda (s)
+      (let ((c (string-ref s 0)))
+        (not (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_)))))
+    (lambda (s) (member s editor-delims))))
+
 (define (editor-token-start text point)
   "Scan back from POINT over symbol chars to the token's start."
+  (define delim? (editor-delimiter))
   (let loop ((i point))
-    (if (and (positive? i) (not (member (substring text (- i 1) i) editor-delims)))
+    (if (and (positive? i) (not (delim? (substring text (- i 1) i))))
       (loop (- i 1))
       i)))
 
@@ -70,9 +81,14 @@
   door (modeler-port-plan M0); from inside the one image the door leads
   nowhere (00-decls stubs it to answer nothing), and this pool is what it
   would have answered. A buffer in a language that is not Scheme (Rust)
-  offers its own words instead."
-  (if (non-scheme-buffer? (%editor-active-buffer (editor-pane-id)))
-    (buffer-words (car (editor-text+point)))
+  asks its language's backend — a language server, when one runs — and
+  falls back to the buffer's own words."
+  (define buf (%editor-active-buffer (editor-pane-id)))
+  (if (non-scheme-buffer? buf)
+    (or (and-let* ((b (non-scheme-backend buf))
+                   (complete (backend-op b :complete)))
+          (complete ""))
+        (buffer-words (car (editor-text+point))))
     (symbol-candidates)))
 
 (define (buffer-words text)
@@ -152,19 +168,24 @@
         (if (string-prefix? "(" line) line (first-line d))))))
 
 (define (editor-eldoc)
-  "Echo the enclosing form's signature when its head changed under typing."
-  (define head (and (not (non-scheme-buffer? (%editor-active-buffer (editor-pane-id))))
-                    (%editor-head (editor-pane-id))))
+  "Echo the enclosing form's signature when its head changed under typing.
+  In a language that is not Scheme its backend is asked (:eldoc), which
+  may answer later — a language server's hint arrives when the host is
+  woken."
+  (define head (%editor-head (editor-pane-id)))
   (unless (equal? head *editor-eldoc*)
     (set! *editor-eldoc* head)
     (when head
-      (let ((sig (signature-of head))) (when sig (echo sig))))))
+      (if-let ((b (non-scheme-backend (%editor-active-buffer (editor-pane-id)))))
+        (when-let ((ask (backend-op b :eldoc))) (ask))
+        (let ((sig (signature-of head))) (when sig (echo sig)))))))
 
 (define (editor-token-around text point)
   "The whole symbol token spanning POINT."
   (define n (string-length text))
+  (define delim? (editor-delimiter))
   (let loop ((e point))
-    (if (and (< e n) (not (member (substring text e (+ e 1)) editor-delims)))
+    (if (and (< e n) (not (delim? (substring text e (+ e 1)))))
       (loop (+ e 1))
       (substring text (editor-token-start text point) e))))
 

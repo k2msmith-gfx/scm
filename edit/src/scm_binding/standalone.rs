@@ -576,6 +576,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Rust with rust-analyzer, through the shell as a user reaches it:
+    /// a .rs file opens as Rust, TAB's pool has the crate's names, M-.
+    /// jumps, describe shows the doc, the argument hint is echoed when the
+    /// host is woken, and a saved file's errors are underlined.
+    /// `cargo test -p edit --lib rust_analyzer_through_the_shell -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn rust_analyzer_through_the_shell() {
+        use std::time::{Duration, Instant};
+        let dir = std::env::temp_dir().join(format!("edit-ra-shell-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        let src = "/// Frobs it.\nfn frobnicate(x: u32) -> u32 { x }\n\nfn main() {\n    let y: u32 = \"no\";\n    frobnicate(1);\n    frob\n}\n";
+        let main = dir.join("src/main.rs");
+        std::fs::write(&main, src).unwrap();
+        let file = main.to_string_lossy().replace('\\', "/");
+        crate::editorpane::set_vi(false);
+        app::resize(800, 600, 1.0);
+        let mut s = Session::boot(None, std::slice::from_ref(&file)).expect("boot");
+        assert_eq!(s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap(), "\"rust\"");
+        let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
+        app::draw(&mut fb);
+        // TAB's pool at the end of `    frob`, once the server has loaded.
+        s.call("(%editor-goto-line 1 6) (%editor-act 1 \"end\")");
+        let t0 = Instant::now();
+        let mut pool = String::new();
+        // The server's pool, not the buffer's words (\"Frobs\" is a word of
+        // the doc comment) that answer while it loads.
+        let served = |p: &str| p.contains("\"frobnicate\"") && !p.contains("\"Frobs\"");
+        while t0.elapsed() < Duration::from_secs(120) && !served(&pool) {
+            pool = s.eval_to_string("(editor-candidates)").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        eprintln!("pool after {:?}: {}", t0.elapsed(), &pool[..pool.len().min(120)]);
+        assert!(served(&pool), "{pool} / {}", s.eval_to_string("(%lsp-status 1)").unwrap());
+        // Describe on the call; M-. to the definition.
+        s.call("(editor-goto 1 5 6)");
+        let th = Instant::now();
+        let mut h = String::from("#f");
+        while th.elapsed() < Duration::from_secs(60) && h == "#f" {
+            h = s.eval_to_string("(%lsp-hover 1)").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        eprintln!("hover after {:?}: {h}", th.elapsed());
+        s.call("(editor-describe)");
+        let transcript: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+        assert!(transcript.iter().any(|l| l.contains("Frobs it.")), "{transcript:?}");
+        s.call("(find-definition-at-point)");
+        assert_eq!(s.eval_to_string("(%editor-cursor 1)").unwrap(), "(1 3)");
+        // The argument hint, inside `frobnicate(|1)`, arrives on a wake.
+        s.call("(go-back-from-definition) (editor-goto 1 5 15) (set! *editor-eldoc* #f) (editor-eldoc)");
+        let t1 = Instant::now();
+        let echoed = || crate::textpane::lines(app::MINIBUFFER).into_iter().any(|(_, l)| l.contains("fn frobnicate(x: u32)"));
+        while t1.elapsed() < Duration::from_secs(10) && !echoed() {
+            std::thread::sleep(Duration::from_millis(50));
+            s.poll();
+        }
+        assert!(echoed(), "{:?}", crate::textpane::lines(app::MINIBUFFER));
+        // Saved, cargo check's errors come back and are underlined.
+        s.key("C-x");
+        s.key("C-s");
+        let t2 = Instant::now();
+        let mut diags = String::new();
+        while t2.elapsed() < Duration::from_secs(60) && !diags.contains("mismatched types") {
+            std::thread::sleep(Duration::from_millis(200));
+            app::draw(&mut fb);
+            diags = s.eval_to_string("(%editor-diagnostics 1)").unwrap();
+        }
+        eprintln!("diagnostics: {diags}");
+        assert!(diags.contains("mismatched types"), "{diags}");
+        crate::lsp::stop(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Where a send goes by default: a Scheme FILE to a separate scm, the
     /// scratch and the editor's own files to the editor's image — and with
     /// scm on the PATH, the file's sends really run over there.

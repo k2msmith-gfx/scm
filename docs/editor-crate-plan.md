@@ -994,22 +994,60 @@ it adds nothing that runs beside the editor.
     offers the buffer's own words and eldoc stays quiet, because the
     image's names mean nothing in them.
   - `M-x rust-mode` sets a buffer to Rust by hand.
-- **Not yet:** completion's token is still Scheme's (`foo.ba` is one token),
-  and nothing is underlined. Both wait for the next step.
+- **Not yet** (both done in E7): completion's token was still Scheme's,
+  and nothing was underlined.
 
-**E7 — a Rust language server (proposed, not started).** rust-analyzer as
-an opt-in backend: used only when it is on the `PATH` (rustup puts it
-there), with no configuration, and nothing works differently without it.
-It needs:
-- a generic stdio JSON-RPC client in the crate, with a reader thread waking
-  the UI as the terminal's does;
-- the server's diagnostics stored per buffer and merged with the
-  underlines, since the server pushes them when it likes;
-- completion, `M-.` and eldoc routed through the backend.
-
-It reverses E6's "no language server" default, which is why it is Kevin's
-call. Most of it carries to any later language server; only the
-`Language` is per language.
+**E7 as built: rust-analyzer, when it is on the PATH** (Kevin, 2026-11-14:
+"lets do next phase" — which reverses E6's "no language server" default,
+on E6's own terms: opt-in by presence, nothing configured, nothing different
+without it).
+- **`lsp.rs`** is a generic LSP client over a child's stdin/stdout. It never
+  names the VM, and its prims are in `scm_binding/lsp.rs`. A language
+  registers a program and a root marker:
+  `(%lsp-register "rust" "rust-analyzer" '("Cargo.toml"))`. The root is
+  the nearest marker, then further up while a `Cargo.toml` declares a
+  `[workspace]`, so all of ray's crates share one server.
+- **Nothing on the UI thread waits on startup.**
+  - `initialize` goes at once. What follows is queued until the reader
+    thread has the answer, which then sends `initialized` and the queue in
+    order.
+  - All writes go through a writer thread, so a server slow to drain its
+    pipe cannot freeze the window.
+  - Positions are bytes (`positionEncodings: utf-8`, which rust-analyzer
+    accepts). A UTF-16-only server is converted line by line.
+- **Diagnostics**: the server pushes them, the reader stores them and wakes
+  the host, and the widget draws them. The widget's hook is
+  `editorpane::Watcher`: it is told each file buffer's text when it changes
+  (`didOpen`, then whole-text `didChange`) and asked what is wrong. Errors
+  draw in the error ink, warnings quietly, hints not at all. `M-g n` goes to
+  one and says why. A save sends `didSave`, so `cargo check`'s errors come
+  back too (`*save-hooks*`, 05-buffers).
+- **The questions** ask the server about the point, waiting at most 1.5 s
+  and cancelling past it:
+  - TAB completes from the server, falling back to the buffer's words while
+    it loads. A token in Rust is letters, digits and `_`, so `xs.it`
+    completes `it`.
+  - `M-.` jumps (`:definition-sites`).
+  - `C-c C-d d` describes from hover. The answer is kept only when there is
+    one: a cached "nothing" from a server still loading hid every later
+    answer until this was found in testing.
+  - Eldoc's argument hint is asked without waiting. It arrives on a wake,
+    and `*wake-hooks*` (14-remote's `remote-poll`) echoes it.
+- **Commands**: `rust-analyzer-status` (starting, indexing with the
+  server's own progress, ready, or not on the PATH), `rust-analyzer-stop`,
+  `rust-analyzer-start`.
+- **Tests**:
+  - a fake server on a pair of pipes (queueing, the order after
+    `initialize`, diagnostics, a server's own request answered);
+  - a program not on the PATH serving nothing;
+  - the watcher hook in the widget;
+  - two `#[ignore]`d runs against the real rust-analyzer, one of them
+    through the standalone shell exactly as a user reaches it. Completion
+    answers about 0.3–0.5 s after opening a small crate.
+- **Not yet:** `didClose` when a buffer is killed (the server keeps the
+  file); rename, code actions and formatting; completion ranked by the
+  server's own order (the shell re-ranks by match); a mode-line indicator
+  of the server's state.
 
 **Still open.**
 - **In scm** (each is a change in the scm repo):

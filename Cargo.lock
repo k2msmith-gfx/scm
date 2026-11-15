@@ -521,6 +521,7 @@ dependencies = [
  "pulldown-cmark",
  "schemers",
  "scm-text",
+ "serde_json",
  "softbuffer",
  "swash",
  "winit",
