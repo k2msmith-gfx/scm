@@ -387,6 +387,23 @@ prim! {
 }
 
 prim! {
+    /// `(%buffer-dialect id buf)` — the dialect `buf`'s text is written for
+    /// ("ray"), "" for none.
+    "%buffer-dialect", fn buffer_dialect_prim(id: num, buf: num) {
+        Out::Text(crate::editorpane::buffer_dialect(id as u32, buf as u32).unwrap_or_default())
+    }
+}
+
+prim! {
+    /// `(%buffer-set-dialect id buf text)` — set it: the modeline says
+    /// "Scheme (ray)".
+    "%buffer-set-dialect", fn buffer_set_dialect_prim(id: num, buf: num, a2: opt_text) {
+        crate::editorpane::set_buffer_dialect(id as u32, buf as u32, &a2.unwrap_or_default());
+        Out::Nil
+    }
+}
+
+prim! {
     /// `(%buffer-tag id buf)` — `buf`'s modeline tag ("" for none).
     "%buffer-tag", fn buffer_tag_prim(id: num, buf: num) {
         Out::Text(crate::editorpane::buffer_tag(id as u32, buf as u32).unwrap_or_default())
@@ -664,6 +681,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         buffer_name_prim::install(interp)?,
         buffer_set_name_prim::install(interp)?,
         buffer_tag_prim::install(interp)?,
+        buffer_dialect_prim::install(interp)?,
+        buffer_set_dialect_prim::install(interp)?,
         buffer_set_tag_prim::install(interp)?,
         editor_take_owned::install(interp)?,
         editor_own::install(interp)?,

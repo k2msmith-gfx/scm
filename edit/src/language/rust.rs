@@ -48,6 +48,10 @@ impl Language for Rust {
         "rust"
     }
 
+    fn title(&self) -> &'static str {
+        "Rust"
+    }
+
     fn scan(&self, lines: &[&str]) -> Scan {
         let toks = tokens(lines);
         let mut out = Scan { spans: vec![Vec::new(); lines.len()], parens: Vec::new() };

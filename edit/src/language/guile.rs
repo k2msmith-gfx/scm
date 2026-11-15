@@ -25,6 +25,10 @@ impl Language for Guile {
         "guile"
     }
 
+    fn title(&self) -> &'static str {
+        "Guile"
+    }
+
     fn scan(&self, lines: &[&str]) -> Scan {
         let mut scan = super::SCHEME.scan(lines);
         for (line, spans) in lines.iter().zip(scan.spans.iter_mut()) {

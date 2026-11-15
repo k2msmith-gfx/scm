@@ -58,6 +58,8 @@ pub trait Language: Sync {
     /// The language's name, as a buffer is set to it and the shell asks
     /// which backend a buffer's sends go to: "scheme" (scm's), "guile".
     fn name(&self) -> &'static str;
+    /// The language as the modeline names it: "Scheme", "Rust".
+    fn title(&self) -> &'static str;
     /// Scan the buffer, one entry per line.
     fn scan(&self, lines: &[&str]) -> Scan;
     /// The column a NEW line at (`line`, `byte`) indents to.

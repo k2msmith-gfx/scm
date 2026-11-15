@@ -101,11 +101,29 @@ answer from its live bindings."
   "Set a file opened as text to LANGUAGE when (TEST path text) is true."
   (set! *language-detectors* (append *language-detectors* (list (cons language test)))))
 
+; Which DIALECT of Scheme a Scheme file is written for — ray's scenes, whose
+; verbs only ray's image knows: (dialect . test) pairs as above, asked only
+; of a file that reads as Scheme. The modeline gives it in brackets,
+; "Scheme (ray)" (21-ray).
+(define *dialect-detectors* '())
+
+(define (add-dialect-detector! dialect test)
+  "Mark a Scheme file opened as text as written for DIALECT when (TEST path
+text) is true; the modeline says \"Scheme (DIALECT)\"."
+  (set! *dialect-detectors* (append *dialect-detectors* (list (cons dialect test)))))
+
 (define (detect-language! eid path)
-  "Set the active buffer of editor EID to the language its file says it is."
-  (let ((text (%text (%editor-text eid))))
+  "Set the active buffer of editor EID to the language its file says it is,
+and a Scheme file's dialect."
+  (let ((text (%text (%editor-text eid)))
+        (buf (%editor-active-buffer eid)))
     (when-let ((hit (find (lambda (d) ((cdr d) path text)) *language-detectors*)))
-      (%editor-set-language eid (car hit)))))
+      (%editor-set-language eid (car hit)))
+    (%buffer-set-dialect
+      eid buf
+      (or (and (equal? (%buffer-language eid buf) "scheme")
+               (and-let* ((hit (find (lambda (d) ((cdr d) path text)) *dialect-detectors*))) (car hit)))
+          ""))))
 
 ; Languages that are not Scheme at all (20-rust): this image's names, docs
 ; and signatures mean nothing in them, so completion offers the buffer's own

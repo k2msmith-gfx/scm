@@ -85,6 +85,10 @@ struct Doc {
     /// loaded scene ("scene", "part of view-classic.scm"), empty for none.
     /// Scheme policy writes it (docs/modeler-scene-buffers-plan.md, B2).
     tag: String,
+    /// The dialect of the language the text is written for, which the
+    /// modeline gives in brackets: "ray" makes "Scheme (ray)". Empty for
+    /// none; Scheme policy writes it (the dialect detectors, 07-backend).
+    dialect: String,
     /// Some when this is an IMAGE buffer (view-only): draw blits it instead
     /// of the text editor, and edits are refused.
     image: Option<ImageBuf>,
@@ -263,6 +267,7 @@ impl Doc {
             path: None,
             auto_opened: false,
             tag: String::new(),
+            dialect: String::new(),
             image: None,
             video: None,
             md: None,
@@ -926,6 +931,20 @@ pub fn set_buffer_auto_opened(id: u32, buf: u32, on: bool) -> bool {
 /// `buf`'s modeline tag — its place in the loaded scene, or empty.
 pub fn buffer_tag(id: u32, buf: u32) -> Option<String> {
     with_doc(id, buf, |d| d.tag.clone())
+}
+
+/// `buf`'s dialect ("ray"), or empty.
+pub fn buffer_dialect(id: u32, buf: u32) -> Option<String> {
+    with_doc(id, buf, |d| d.dialect.clone())
+}
+
+/// Set `buf`'s dialect (Scheme policy): the modeline says "Scheme (ray)".
+pub fn set_buffer_dialect(id: u32, buf: u32, dialect: &str) -> bool {
+    let ok = with_doc(id, buf, |d| d.dialect = dialect.to_string()).is_some();
+    if ok {
+        crate::host::mark_dirty_ui();
+    }
+    ok
 }
 
 /// Set `buf`'s modeline tag (Scheme policy).
@@ -2953,6 +2972,34 @@ fn draw_video(
     draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, theme, name, Some(&v.modeline()));
 }
 
+/// A text buffer's modeline, left of the vi mode: its name (+ the dirty
+/// star, + its place in the loaded scene), the language it is read as
+/// ("Rust", or "Scheme (ray)" with its dialect; not for markdown, which is
+/// read, not edited), how the server
+/// watching it is ("rust-analyzer indexing (30%)"), and where text that
+/// will not read is — so a mark scrolled out of view is still found (M-g n
+/// goes there). A form left open does not say: it is what typing looks
+/// like.
+fn modeline_left(doc: &Doc, diags: &[language::Diagnostic]) -> String {
+    let mut left = if doc.dirty { format!("{} *", doc.name) } else { doc.name.clone() };
+    if !doc.tag.is_empty() {
+        left = format!("{left} · {}", doc.tag);
+    }
+    if doc.md.is_none() {
+        left = match doc.dialect.as_str() {
+            "" => format!("{left} · {}", doc.lang.title()),
+            dialect => format!("{left} · {} ({dialect})", doc.lang.title()),
+        };
+    }
+    if let Some(mode) = watched_mode(doc) {
+        left = format!("{left} · {mode}");
+    }
+    if let Some(d) = diags.iter().find(|d| d.error) {
+        left = format!("{left} · unreadable at line {}", d.start.0 + 1);
+    }
+    left
+}
+
 /// The modeline's height in physical pixels at `scale` — what a host's
 /// divider grabs (the standalone's bar between the editor and its panel).
 pub fn modeline_height(scale: f32) -> f32 {
@@ -3028,10 +3075,7 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
         // line caret cosmic renders.
         let vi_block =
             typing && vi_on() && !matches!(pane.vi.mode, ViMode::Insert | ViMode::Replace);
-        // Modeline contents, captured before the &mut editor borrow below.
-        let buf_name = pane.name.clone();
-        let buf_dirty = pane.dirty;
-        let buf_tag = pane.tag.clone();
+        // The vi label, captured before the &mut editor borrow below.
         let vi_label = if vi_on() && typing && pane.md.is_none() {
             Some(mode_text(&pane.vi.mode))
         } else {
@@ -3153,22 +3197,10 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
                 }
             }
 
-        // Modeline: buffer name (+ dirty star, + its place in the loaded
-        // scene) at the left; vi mode at the right while the pane holds
-        // typing focus. Replaces the old floating badge and corner dirty dot.
-        let left = if buf_dirty { format!("{buf_name} *") } else { buf_name };
-        let left = if buf_tag.is_empty() { left } else { format!("{left} · {buf_tag}") };
-        // Text that will not read says where, so a mark scrolled out of
-        // view is still found (M-g n goes there). A form left open does
-        // not: it is what typing looks like.
-        let left = match diags.iter().find(|d| d.error) {
-            Some(d) => format!("{left} · unreadable at line {}", d.start.0 + 1),
-            None => left,
-        };
-        let left = match watched_mode(pane) {
-            Some(mode) => format!("{left} · {mode}"),
-            None => left,
-        };
+        // Modeline: what modeline_left says at the left; vi mode at the
+        // right while the pane holds typing focus. Replaces the old floating
+        // badge and corner dirty dot.
+        let left = modeline_left(pane, &diags);
         draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, &theme, &left, vi_label.as_deref());
     });
 }
@@ -3648,6 +3680,9 @@ mod tests {
         fn name(&self) -> &'static str {
             "counting"
         }
+        fn title(&self) -> &'static str {
+            "Counting"
+        }
         fn scan(&self, lines: &[&str]) -> language::Scan {
             SCANS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             language::SCHEME.scan(lines)
@@ -3680,6 +3715,33 @@ mod tests {
         fn mode(&self, _path: &str, lang: &str) -> Option<String> {
             Some(format!("{lang}-server"))
         }
+    }
+
+    #[test]
+    fn the_modeline_names_the_language_and_the_server() {
+        set_vi(false);
+        crate::host::testing::reset();
+        WATCHER.set(None);
+        let id = 964;
+        set_text(id, "(display 1)");
+        let left = || with_pane(id, |_, pane, _| modeline_left(pane, &[]));
+        assert_eq!(left(), "*scratch* · Scheme");
+        set_buffer_dialect(id, active_buffer(id), "ray");
+        assert_eq!(left(), "*scratch* · Scheme (ray)", "the dialect in brackets");
+        set_buffer_dialect(id, active_buffer(id), "");
+        set_language(id, "guile");
+        assert_eq!(left(), "*scratch* · Guile");
+        set_buffer_path(id, active_buffer(id), Some("/tmp/m.rs"));
+        set_buffer_name(id, active_buffer(id), "m.rs");
+        set_language(id, "rust");
+        set_watcher(&RECORDING);
+        assert_eq!(left(), "m.rs · Rust · rust-server", "then how its server is");
+        let unreadable = [language::Diagnostic { start: (2, 0), end: (2, 1), message: String::new(), error: true }];
+        assert_eq!(
+            with_pane(id, |_, pane, _| modeline_left(pane, &unreadable)),
+            "m.rs · Rust · rust-server · unreadable at line 3"
+        );
+        WATCHER.set(None);
     }
 
     #[test]

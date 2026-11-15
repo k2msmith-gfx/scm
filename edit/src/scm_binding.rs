@@ -168,7 +168,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust", "21-ray"];
 
 /// Where [`SHELL`]'s files are in the tree this binary was built from. They
 /// are read from there while it exists, so an edit to one takes effect
@@ -203,6 +203,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("18-search", include_str!("../scm/18-search.scm")),
     ("19-ex", include_str!("../scm/19-ex.scm")),
     ("20-rust", include_str!("../scm/20-rust.scm")),
+    ("21-ray", include_str!("../scm/21-ray.scm")),
     ("host/prelude", include_str!("../scm/host/prelude.scm")),
     ("host/standalone", include_str!("../scm/host/standalone.scm")),
 ];
@@ -541,6 +542,28 @@ mod tests {
         let gl = gl.to_string_lossy().replace('\\', "/");
         eval(&mut interp, &format!(r#"(visit-file-text "{gl}")"#));
         assert_eq!(eval(&mut interp, "(%buffer-language 3 (%editor-active-buffer 3))"), Val::Str("guile".into()));
+        let dialect = |interp: &mut scm::Interp| eval(interp, "(%buffer-dialect 3 (%editor-active-buffer 3))");
+        assert_eq!(dialect(&mut interp), Val::Str("".into()), "Guile has none");
+        // A ray file, by what it calls or by where it lives; a Scheme file
+        // that is neither has no dialect.
+        let tmp = std::env::temp_dir().join(format!("edit-ray-test-{}", std::process::id()));
+        let part = tmp.join("checkout/examples/part.scm");
+        std::fs::create_dir_all(tmp.join("checkout/scripts/scm")).unwrap();
+        std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+        std::fs::write(tmp.join("checkout/scripts/scm/prelude.scm"), "").unwrap();
+        for (name, text, expect) in [
+            ("scene.scm", "(clear-scene)\n(add-sphere \"s\" :radius 1)\n", "ray"),
+            ("plain.scm", "(define (f x) (* x 2))\n", ""),
+        ] {
+            let f = tmp.join(name);
+            std::fs::write(&f, text).unwrap();
+            eval(&mut interp, &format!(r#"(visit-file-text "{}")"#, f.to_string_lossy().replace('\\', "/")));
+            assert_eq!(dialect(&mut interp), Val::Str(expect.into()), "{name}");
+        }
+        std::fs::write(&part, "(define stones 3)\n").unwrap();
+        eval(&mut interp, &format!(r#"(visit-file-text "{}")"#, part.to_string_lossy().replace('\\', "/")));
+        assert_eq!(dialect(&mut interp), Val::Str("ray".into()), "inside a ray checkout");
+        let _ = std::fs::remove_dir_all(&tmp);
         let _ = (std::fs::remove_file(&rs), std::fs::remove_file(&gl));
         // The in-process backend answers a RESULT: what the forms printed,
         // the value, or an error as data rather than an unwind.

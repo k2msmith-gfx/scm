@@ -1060,6 +1060,14 @@ without it).
   ranked shortest-first: the server ranks locals and the receiver's
   methods first, which a ranking by length undid.
 - **Not yet:** rename, code actions and formatting.
+- **The modeline names the language** (Kevin, 2026-11-15): `main.rs ·
+  Rust · rust-analyzer`, `boot.scm · Guile`, `scene.scm · Scheme (ray)` —
+  `Language::title`, and a buffer's DIALECT in brackets. Dialect detectors
+  (`add-dialect-detector!`, 07-backend) are asked of a file that reads as
+  Scheme; 21-ray's says "ray" of a file that calls a ray verb or lies in a
+  ray checkout (one holding `scripts/scm/prelude.scm`), since a Fallingwater
+  part such as masonry-04.scm calls none. The modeler adds its own: every
+  Scheme file it opens runs in ray's image, so every one is ray's.
 
 **Still open.**
 - **In scm** (each is a change in the scm repo):
