@@ -1083,6 +1083,75 @@ without it).
   attaches a buffer to a `ray --tcp` already running, the one ray-view
   shows.
 
+**E8 — find references, and warnings before you run (plan)** (Kevin,
+2026-11-15: "plan find references and the warnings"). An LSP's best ideas
+for Scheme without the protocol: Zed is set aside for Scheme, so this goes
+into the editor itself, against the image the buffer sends to, which knows
+more than any server reading the text. Not built yet; about two days.
+
+*What it does.*
+- **M-? — find references**: every place the name at point is USED, across
+  the indexed files — not every place the word appears. A `(let ((slab …)))`
+  that shadows a top-level `slab` is not a reference to it, and a quoted
+  `'slab` is data. A list like the error pane's, `path:line  the line`; RET
+  goes there and M-, comes back, as from M-..
+- **Unbound names, underlined as you type**: a name used that nothing
+  binds — not the image, not a define in this file or one it includes, not
+  a local. The typo `(add-shpere …)` is marked before you send it.
+- **Wrong argument counts**: `(cube 1 2)` when `cube` takes one. A keyword
+  call counts its positional arguments only, so `(add-sphere "s" :radius 1)`
+  is checked against `add-sphere`'s positional parameters.
+- Both are WARNINGS: drawn in their own ink (neither the error red nor the
+  open form's faint mark), listed by M-g n, and counted on the modeline
+  ("· 2 warnings"). They never stop a send.
+
+*How.*
+- **W1, scope, in scm-text** (Rust, shared). A form tree over the token
+  scan, and one pass that knows the binding forms — `lambda`, `define` (and
+  its curried and internal forms), `let` / `let*` / `letrec` / named `let`,
+  `let-values`, `do`, `case-lambda`, `receive`, `match`'s patterns,
+  `and-let*`, `if-let` / `when-let`, `guard`'s variable,
+  `define-record-type`, `syntax-rules`' pattern variables — and skips
+  quoted data (`'x`, a `quasiquote` outside its `unquote`s). Out: each FREE
+  occurrence of a name, with its place and, at a call's head, the call's
+  positional argument count and whether keywords follow. This is the
+  ground truth both features stand on, and where the false positives would
+  come from, so it is tested against ray's examples and scm's own `.scm`
+  files: zero unbound warnings on code that runs is the bar.
+- **W2, references.** The index (`scm-text`'s `Index`, which M-. already
+  uses) records each file's free occurrences beside its definitions;
+  `%xref-references` answers them; M-? lists them. The standalone indexes
+  the project — the git checkout the file tree shows — and not only the
+  files opened, or it would find a fraction; the modeler keeps its own
+  index (the scene's files and the preludes), which is right there.
+- **W3, the image's names.** What the image binds and each procedure's
+  arity. In process (the modeler; the standalone's own files): two prims
+  over a new `Interp::arity` (the closure's required, optional, keyword
+  and rest — what `signature_of` already prints) and the global names,
+  syntax included. Over the wire (a standalone `.scm` file's scm, a ray
+  file's ray): the protocol's `complete ""` for the names, and `describe`
+  of a call's head for its signature — which reads back as a declaration
+  of the same call shape, so its arity parses from it. Asked after each
+  send, cached until the next, never while a send runs.
+- **W4, the warnings.** A second watcher beside the language server's
+  (the `Watcher` slot becomes a list): for a Scheme buffer, W1's free
+  names checked against W3's, plus the defines of this file and the files
+  the index holds. A procedure the image has not got (a define not yet
+  sent) is checked against its own lambda list from the file. A name used
+  at the head of a form whose head is a macro the editor does not know is
+  not checked, since a macro decides what its arguments are — a missed
+  warning, never a false one. `Diagnostic` gains a severity (error,
+  warning, open form) in place of its `error` flag.
+
+*Not in this.* Guile buffers: their modules and `define-module` exports
+make "unbound" a question for Guile, so they get references but no
+warnings. Rename across files (W2's references are what it needs — next,
+if wanted). Types: Scheme has none to check.
+
+*The risk is false warnings*, and an editor that cries wolf gets ignored.
+So W1 is tested on real code before any warning is drawn, an unknown macro
+silences what is inside it, and `M-x set-editor-warnings #f` turns them off.
+
 **Still open.**
 - **In scm** (each is a change in the scm repo):
   - a sent form locates as `<input>:L:C`, because `eval-string` takes no
