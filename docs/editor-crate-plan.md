@@ -1085,8 +1085,7 @@ without it).
     across lines.
 - **Decisions:**
   - D1, the name (`edit` still);
-  - D2, the move to the scm repo once the crate settles;
-  - D3, a second OS window.
+  - (D2, where it lives, and D3, pane or window, are decided: below.)
 
 ## What it does to the modeler
 
@@ -1149,7 +1148,15 @@ would land on the modeler side; the diagnosis would read the shared dispatch.
   pins scm by git commit, so every editor change would mean push scm, then
   `cargo update` here — the friction that hurts most while the editor is
   still moving. Move it once it settles.
-- **D3 — "pop up": a pane or a window.** Recommended: a pane first (one
+- **D3 — "pop up": a pane or a window. DECIDED 2026-11-15 (Kevin): a
+  pane, for now.** Tearing it off into its own window, configurable, was
+  costed at about a week: a second window with events routed by window, the
+  editor's own minibuffer and popups there (the snag — every prompt lives
+  in the one minibuffer), attach/detach and its session state, the harness;
+  a drag-to-tear gesture a day or two more. The cheaper road, if it is ever
+  wanted: the standalone `edit` beside the modeler, sending into its image
+  over scm's protocol — a second program, so its buffers are not the
+  dock's. Recommended before: a pane first (one
   framebuffer, one event loop, docks like the outliner), a separate OS window
   later if wanted. winit can open a second window, but every pane, key route
   and redraw would then be per-window.
