@@ -124,6 +124,12 @@ struct Facts {
     arities: HashMap<String, Arity>,
 }
 
+/// A buffer this big is not judged: it is data (a rock's point cloud, 2–5
+/// MB), not code anyone is writing, and judging it would cost about 100 ms
+/// an edit for nothing (Kevin, 2026-11-15: "skip it for 1 MB files and
+/// over").
+const TOO_BIG: usize = 1024 * 1024;
+
 #[derive(Default)]
 struct Warner {
     on: bool,
@@ -147,7 +153,7 @@ thread_local! {
 impl Warner {
     fn judge(&mut self, path: &str) {
         let warnings = match (self.on, self.buffers.get(path).and_then(|k| self.facts.get(k)), self.texts.get(path)) {
-            (true, Some(facts), Some(text)) => judge(path, text, facts),
+            (true, Some(facts), Some(text)) if text.len() < TOO_BIG => judge(path, text, facts),
             _ => Vec::new(),
         };
         self.found.insert(path.to_string(), warnings);
@@ -421,6 +427,21 @@ mod tests {
         let keyed = Arity { required: 1, optional: 0, rest: false, keys: true };
         assert_eq!(misfit("add-sphere", keyed, Call { total: 2, positional: 0, keywords: true }), None);
         assert!(misfit("add-sphere", keyed, Call { total: 4, positional: 2, keywords: true }).is_some());
+    }
+
+    #[test]
+    fn a_megabyte_buffer_is_not_judged() {
+        WARNER.with(|w| {
+            let mut w = w.borrow_mut();
+            w.facts.insert("k".into(), Facts::default());
+            w.buffers.insert("/big.scm".into(), "k".into());
+            w.texts.insert("/big.scm".into(), format!("(undefined-thing)\n{}", " ".repeat(TOO_BIG)));
+            w.judge("/big.scm");
+            assert!(w.found["/big.scm"].is_empty(), "data, not code");
+            w.texts.insert("/big.scm".into(), "(undefined-thing)\n".into());
+            w.judge("/big.scm");
+            assert_eq!(w.found["/big.scm"].len(), 1, "the same text, small, is judged");
+        });
     }
 
     #[test]

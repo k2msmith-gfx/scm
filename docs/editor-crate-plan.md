@@ -1183,7 +1183,9 @@ silences what is inside it, and `M-x set-editor-warnings #f` turns them off.
   procedure without keyword parameters, since ray names things with
   keywords (`(plate :main-plate …)`); for one with them, only "too many"
   is sure. A send marks its image's buffers stale, judged when next drawn,
-  so it re-judges one buffer and not every one open.
+  so it re-judges one buffer and not every one open. A buffer of 1 MB or
+  more is not judged: it is data (the rock point clouds, 2–5 MB), and
+  judging it cost about 100 ms an edit (Kevin, 2026-11-15).
   `Diagnostic.error` became a `Severity` (error, warning, open form); the
   theme has `text_warning` (One Dark yellow); M-g n / M-g p step through
   every mark; the modeline counts warnings. In the standalone a Scheme file
