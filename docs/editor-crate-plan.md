@@ -1068,6 +1068,20 @@ without it).
   ray checkout (one holding `scripts/scm/prelude.scm`), since a Fallingwater
   part such as masonry-04.scm calls none. The modeler adds its own: every
   Scheme file it opens runs in ray's image, so every one is ray's.
+- **A ray file runs in ray, in the standalone** (Kevin, 2026-11-15). Its
+  sends go to `ray --serve`, which speaks scm's protocol: one ray for each
+  checkout, run from the checkout's root and from its own
+  `target/release/ray` before the PATH's (`*ray-program*` overrides), and
+  one for a file outside any checkout, run from the file's directory
+  (`%remote-start` takes the directory). Each send begins `(%including
+  "/abs/file.scm")` — scm sets a parameter called with a value — on the
+  send's first line, so an include resolves beside the file and a reported
+  line stays the buffer's. `a_ray_file_sends_to_ray` (ignored; `RAY_BIN`)
+  proves both. M-x ray-restart stops the buffer's ray (its checkout's, so
+  every ray file there starts over) and the next send starts a fresh one —
+  remote-stop knows only remote-connect's. M-x remote-connect still
+  attaches a buffer to a `ray --tcp` already running, the one ray-view
+  shows.
 
 **Still open.**
 - **In scm** (each is a change in the scm repo):

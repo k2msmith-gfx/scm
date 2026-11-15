@@ -221,7 +221,7 @@ fn connect(addr: &str, child: Option<std::process::Child>) -> Result<u32, String
 /// Start `program ARGS…` serving on 127.0.0.1:PORT (a free port when
 /// `port` is 0) and connect to it, retrying while it boots. Each `{addr}` in
 /// ARGS becomes the address; with no ARGS it is `--serve {addr}`, scm's.
-fn start(program: &str, args: &[String], port: u16) -> Result<u32, String> {
+fn start(program: &str, args: &[String], port: u16, dir: Option<&str>) -> Result<u32, String> {
     let port = if port == 0 {
         std::net::TcpListener::bind("127.0.0.1:0")
             .and_then(|l| l.local_addr())
@@ -236,7 +236,11 @@ fn start(program: &str, args: &[String], port: u16) -> Result<u32, String> {
     } else {
         args.iter().map(|a| a.replace("{addr}", &addr)).collect()
     };
-    let mut child = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -387,11 +391,13 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
     // `(%remote-start program port [args])` — run PROGRAM serving on PORT
     // (0: a free one) and connect: the connection's id. ARGS, a list in
     // which "{addr}" stands for the address, default to scm's `--serve
-    // {addr}`; Guile's are its serve.scm (E6). Raises when it cannot.
+    // {addr}`; Guile's are its serve.scm (E6). DIR, when given, is the
+    // directory it runs in (ray's, its checkout). Raises when it cannot.
     interp.define_fn("%remote-start", |args| {
         let program = val_text(args, 0).unwrap_or_else(|| "scm".into());
         let argv = val_textv(args, 2);
-        Ok(Val::Int(start(&program, &argv, val_num(args, 1).max(0.0) as u16)? as i64))
+        let dir = val_text(args, 3);
+        Ok(Val::Int(start(&program, &argv, val_num(args, 1).max(0.0) as u16, dir.as_deref())? as i64))
     })?;
     // `(%remote-connect "host:port")` — attach to a server already running.
     interp.define_fn("%remote-connect", |args| {

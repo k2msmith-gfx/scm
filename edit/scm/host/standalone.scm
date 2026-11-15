@@ -75,10 +75,75 @@ the shell's own (edit/scm/)?"
       (echo "scm running at " (%remote-address *scm-files*) " for the Scheme files"))
     (remote-backend *scm-files* "scm")))
 
+; A RAY file (21-ray: the modeline says "Scheme (ray)") runs in ray, whose
+; image has the verbs it calls — `ray --serve`, the protocol scm's speaks
+; (Kevin, 2026-11-15). One ray for each checkout, run from its root so a
+; scene's (load "examples/…") finds what it does from a terminal there, and
+; that checkout's own build (target/release/ray) before the PATH's; a file
+; outside any checkout gets one run from its own directory. Each send names
+; its file first, (%including "/abs/file.scm"), so (include "frame.scm")
+; resolves beside the file as `ray FILE` would. M-x remote-connect attaches
+; a buffer to a `ray --tcp` already running instead — ray-view's.
+(define *ray-program* #f)       ; #f: the checkout's build, else "ray"
+(define *ray-servers* (make-hash-table equal?))   ; directory → connection
+
+(define (ray-program dir)
+  (or *ray-program*
+      (let ((built (string-append dir "/target/release/ray")))
+        (if (file-exists? built) built "ray"))))
+
+(define (ray-file-backend path)
+  ; The ray for PATH's checkout (or directory), started on first use; a send
+  ; FAILS if it cannot start, saying why.
+  (define dir (ray-dir path))
+  (guard (e (#t (unavailable-backend "ray" e)))
+    (let ((conn (hash-table-ref/default *ray-servers* dir #f)))
+      (unless (and conn (%remote-address conn))
+        (set! conn (%remote-start (ray-program dir) 0 '("--serve" "{addr}") dir))
+        (hash-table-set! *ray-servers* dir conn)
+        (echo "ray running at " (%remote-address conn) " for " dir))
+      (ray-sends-from path (remote-backend conn "ray")))))
+
+(define (ray-sends-from path backend)
+  ; BACKEND with each send prefixed by (%including PATH), on the send's own
+  ; first line so a reported line number stays the buffer's.
+  (define (from src) (string-append "(%including " (*show-value* path) ") " src))
+  (map (lambda (op)
+         (match op
+           ((:eval . f) (cons :eval (lambda (src) (f (from src)))))
+           ((:eval-async . f) (cons :eval-async (lambda (src k) (f (from src) k))))
+           (_ op)))
+       backend))
+
+(define (ray-dir path)
+  ; Where PATH's ray runs: its checkout's root, else its own directory.
+  (or (ray-checkout-root path) (path-parent path) "."))
+
+(define (ray-restart)
+  "Stop the ray this buffer's sends go to — M-x ray-restart — so the next
+send starts a fresh one: no definitions, no scene, nothing left from before.
+Every ray file of the same checkout shares it, so they all start over."
+  (let* ((buf (%editor-active-buffer (editor-pane-id)))
+         (path (buffer-path buf)))
+    (if (not (and path (ray-buffer? buf)))
+      (echo "not a ray file — the modeline says Scheme (ray) of one")
+      (let* ((dir (ray-dir path))
+             (conn (hash-table-ref/default *ray-servers* dir #f)))
+        (if (not conn)
+          (echo "no ray running for " dir " — the next send starts one")
+          (begin
+            (%remote-close conn)
+            (hash-table-delete! *ray-servers* dir)
+            (echo "ray for " dir " stopped — the next send starts a fresh one")))))))
+
+(define (ray-buffer? buf)
+  (equal? (%buffer-dialect (editor-pane-id) buf) "ray"))
+
 (set! *buffer-backend*
   (lambda (buf)
     (let ((p (buffer-path buf)))
       (cond ((or (not p) (string-prefix? "*" p) (editor-own-file? p)) (in-process-backend))
+            ((ray-buffer? buf) (ray-file-backend p))
             ((scheme-path? p) (scm-files-backend))
             (else #f)))))
 

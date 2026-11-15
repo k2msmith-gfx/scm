@@ -11,13 +11,18 @@
     "(add-sphere " "(add-box " "(add-cylinder " "(add-plane " "(add-mesh " "(add-light "
     "(add-sun " "(make-material "))
 
-(define (ray-checkout-file? path)
-  "Is PATH inside a ray checkout — under a directory holding ray's prelude,
-scripts/scm/prelude.scm?"
+(define (ray-checkout-root path)
+  "The ray checkout PATH is inside — the nearest directory above it holding
+ray's prelude, scripts/scm/prelude.scm — or #f."
   (let loop ((dir (path-parent path)) (n 0))
     (and dir (< n 32)
-         (or (file-exists? (string-append dir "/scripts/scm/prelude.scm"))
-             (loop (path-parent dir) (+ n 1))))))
+         (if (file-exists? (string-append dir "/scripts/scm/prelude.scm"))
+           dir
+           (loop (path-parent dir) (+ n 1))))))
+
+(define (ray-checkout-file? path)
+  "Is PATH inside a ray checkout?"
+  (and (ray-checkout-root path) #t))
 
 (define (path-parent path)
   "PATH's directory, or #f at the top."

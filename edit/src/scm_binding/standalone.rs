@@ -705,6 +705,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A ray file (the modeline's "Scheme (ray)") sends to a `ray --serve`
+    /// of its checkout's: ray's verbs are there, and an include resolves
+    /// beside the file, and M-x ray-restart starts it over. Needs a ray
+    /// binary:
+    /// `RAY_BIN=~/devel/ray/target/release/ray cargo test -p edit --lib a_ray_file_sends_to_ray -- --ignored`
+    #[test]
+    #[ignore]
+    fn a_ray_file_sends_to_ray() {
+        let ray = std::env::var("RAY_BIN").expect("RAY_BIN names a ray binary");
+        app::resize(800, 600, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-ray-files-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scripts/scm")).unwrap();
+        std::fs::create_dir_all(dir.join("examples/parts")).unwrap();
+        std::fs::write(dir.join("scripts/scm/prelude.scm"), "").unwrap();
+        std::fs::write(dir.join("examples/parts/cube.scm"), "(define (cube x) (* x x x))\n").unwrap();
+        let file = dir.join("examples/scene.scm");
+        std::fs::write(&file, "(include \"parts/cube.scm\")\n(cube 2)\n(procedure? add-sphere)\n").unwrap();
+        let file = file.to_string_lossy().replace('\\', "/");
+        s.call(&format!("(set! *ray-program* \"{ray}\") (open-path \"{file}\")"));
+        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"ray\"");
+        for line in 0..3 {
+            s.call(&format!("(%editor-goto-line 1 {line}) (eval-defun)"));
+            assert!(s.settle(30.0), "ray answers line {line}");
+        }
+        let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+        assert!(t.iter().any(|l| l == "=> 8"), "the include resolved beside the file: {t:?}");
+        assert!(t.iter().any(|l| l == "=> #t"), "ray's verbs are there: {t:?}");
+        let name = s.eval_to_string("(%alist-ref (backend-of (%editor-active-buffer 1)) :name #f)").unwrap();
+        assert!(name.starts_with("\"ray at "), "{name}");
+        // M-x ray-restart: the next send meets a fresh ray, without cube.
+        s.call("(ray-restart) (%editor-goto-line 1 1) (eval-defun)");
+        assert!(s.settle(30.0), "a fresh ray answers");
+        let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+        assert!(
+            t.iter().rev().take(3).any(|l| l == "error: unbound variable: cube"),
+            "cube went with the old ray: {t:?}"
+        );
+        super::super::remote::close_all();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The file tree: rooted at the git checkout, folders first, what git
     /// ignores hidden; expand, collapse, collapse all; RET opens a file;
     /// the tree follows the buffer on screen; its menu shows its keys.
