@@ -4912,6 +4912,17 @@ fn signature_prim(vm: &mut Vm, a: &[Value]) -> PResult {
     }
 }
 
+/// `(%syntax-names)` -> every name bound as syntax, as a list of symbols:
+/// the compiler's own forms and every macro. `apropos` lists the variables
+/// only, so an editor asks both before it calls a name unbound.
+fn syntax_names_prim(vm: &mut Vm, a: &[Value]) -> PResult {
+    if !a.is_empty() {
+        return Err(err("%syntax-names: expects no arguments"));
+    }
+    let vals: Vec<Value> = vm.syntax_names().iter().map(|n| vm.engine.sym(n)).collect();
+    Ok(vm.engine.list(&vals))
+}
+
 /// `(apropos "text")` -> the matching global names, as a list of symbols:
 /// first every name containing TEXT, sorted, then every other name whose
 /// docstring contains it, case-insensitively, sorted. With no argument,
@@ -5039,6 +5050,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_vm_prim("doc", doc_prim);
     vm.define_vm_prim("signature", signature_prim);
     vm.define_vm_prim("apropos", apropos_prim);
+    vm.define_vm_prim("%syntax-names", syntax_names_prim);
     vm.define_vm_prim("display", display);
     vm.define_vm_prim("write", write_prim);
     vm.define_vm_prim("newline", newline);

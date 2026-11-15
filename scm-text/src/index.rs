@@ -43,6 +43,13 @@ pub struct Site {
 pub struct Index {
     /// One entry per file, so a file can be re-scanned without a sweep.
     by_file: HashMap<String, Vec<(String, Site)>>,
+    /// Where each file USES a name free ([`crate::scope`]): find references
+    /// (ray docs/editor-crate-plan.md, E8). `form` is "use".
+    uses_by_file: HashMap<String, Vec<(String, Site)>>,
+    /// How many files define each name -- so "is it defined anywhere?",
+    /// asked for every name in a buffer as its warnings are made, is a
+    /// lookup rather than a sweep.
+    defined: HashMap<String, usize>,
 }
 
 /// Directories never worth walking. `target` alone is most of the win in a
@@ -99,6 +106,17 @@ impl Index {
     /// typed should land where it is now rather than where it was saved.
     pub fn update(&mut self, uri: &str, text: &str) {
         let doc = Doc::new(text);
+        let uses: Vec<(String, Site)> = crate::scope::references(&doc)
+            .into_iter()
+            .map(|r| {
+                let (line, character) = doc.position(r.start);
+                let (_, end_character) = doc.position(r.end);
+                let column = doc.column(r.start);
+                let site = Site { uri: uri.to_string(), line, character, end_character, column, form: "use".into(), detail: None };
+                (r.name, site)
+            })
+            .collect();
+        self.uses_by_file.insert(uri.to_string(), uses);
         let sites: Vec<(String, Site)> = doc
             .definitions()
             .into_iter()
@@ -120,11 +138,54 @@ impl Index {
                 )
             })
             .collect();
+        self.uncount(uri);
+        for (name, _) in &sites {
+            *self.defined.entry(name.clone()).or_default() += 1;
+        }
         self.by_file.insert(uri.to_string(), sites);
     }
 
+    fn uncount(&mut self, uri: &str) {
+        for (name, _) in self.by_file.get(uri).into_iter().flatten() {
+            if let Some(n) = self.defined.get_mut(name) {
+                *n -= 1;
+                if *n == 0 {
+                    self.defined.remove(name);
+                }
+            }
+        }
+    }
+
     pub fn forget(&mut self, uri: &str) {
+        self.uncount(uri);
         self.by_file.remove(uri);
+        self.uses_by_file.remove(uri);
+    }
+
+    /// Whether any indexed file defines NAME.
+    pub fn defines(&self, name: &str) -> bool {
+        self.defined.contains_key(name)
+    }
+
+    /// The call shape a file gives NAME -- `(f a b)` -- when one defines it
+    /// as a procedure.
+    pub fn signature(&self, name: &str) -> Option<String> {
+        self.sites(name).into_iter().find_map(|s| s.detail)
+    }
+
+    /// Every place NAME is USED free -- not where the word appears: a local
+    /// binding of the same name, and quoted data, are not uses of it.
+    /// Sorted by file and position.
+    pub fn references(&self, name: &str) -> Vec<Site> {
+        let mut out: Vec<Site> = self
+            .uses_by_file
+            .values()
+            .flatten()
+            .filter(|(n, _)| n == name)
+            .map(|(_, s)| s.clone())
+            .collect();
+        out.sort_by(|a, b| (&a.uri, a.line, a.column).cmp(&(&b.uri, b.line, b.column)));
+        out
     }
 
     /// Every place a name is defined. More than one is normal and not an
@@ -222,6 +283,22 @@ mod tests {
         let p = PathBuf::from("/tmp/a dir/b.scm");
         assert_eq!(uri_of(&p), "file:///tmp/a%20dir/b.scm");
         assert_eq!(path_of(&uri_of(&p)).unwrap(), p);
+    }
+
+    #[test]
+    fn references_are_uses_not_words() {
+        let mut ix = Index::default();
+        ix.update("file:///a.scm", "(define (slab w) (box w))\n(slab 1)\n");
+        ix.update("file:///b.scm", "(let ((slab 2)) slab)\n'slab\n(map slab xs)\n");
+        let at: Vec<(String, u32, u32)> =
+            ix.references("slab").into_iter().map(|s| (s.uri, s.line, s.column)).collect();
+        assert_eq!(at, vec![("file:///a.scm".into(), 1, 1), ("file:///b.scm".into(), 2, 5)]);
+        assert!(ix.defines("slab") && !ix.defines("box"));
+        assert_eq!(ix.signature("slab").as_deref(), Some("(slab w)"));
+        ix.update("file:///a.scm", "");
+        assert!(!ix.defines("slab"), "re-indexing a file uncounts what it defined");
+        ix.forget("file:///b.scm");
+        assert!(ix.references("slab").is_empty());
     }
 
     #[test]

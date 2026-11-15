@@ -1222,6 +1222,30 @@ impl Vm {
             .map_err(VmError::Error)
     }
 
+    /// Every name that is SYNTAX rather than a variable: the forms the
+    /// compiler knows itself (`if`, `lambda`, `define` …) and every macro
+    /// (`when`, `cond`, `match`, a user's `define-syntax`). `apropos` lists
+    /// the variables, so the two together are everything a name can be
+    /// bound as -- which an editor needs before calling a name unbound.
+    pub fn syntax_names(&self) -> Vec<String> {
+        let s = &self.syms;
+        let core = [
+            s.quote, s.if_, s.define, s.set, s.lambda, s.let_, s.begin, s.define_syntax,
+            s.define_library, s.import, s.cond_expand, s.let_syntax, s.letrec_syntax,
+            s.quasiquote, s.unquote, s.unquote_splicing,
+        ];
+        let mut out: Vec<String> = core
+            .iter()
+            .chain(self.macros.keys())
+            .map(|&sym| self.engine.interner.sym_name(sym).to_string())
+            // A renamed template identifier is hygiene's business (apropos).
+            .filter(|n| !(n.contains('.') && n.parse::<f64>().is_err()))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Whether a top-level name is bound to a macro -- the question a
     /// compiler asks before deciding a head is a call.
     pub fn is_macro(&mut self, sym: SymId) -> bool {

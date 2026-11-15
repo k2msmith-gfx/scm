@@ -22,11 +22,13 @@ pub struct Theme {
     /// The editor's mode line.
     pub status_bg: u32,
     pub status_ink: u32,
-    /// Body text, de-emphasis, emphasis (prompt, cursor block), errors.
+    /// Body text, de-emphasis, emphasis (prompt, cursor block), errors,
+    /// warnings (E8: a name nothing binds, a call with the wrong count).
     pub text_ink: u32,
     pub text_dim: u32,
     pub text_accent: u32,
     pub text_error: u32,
+    pub text_warning: u32,
     /// The popup's background, a menu row's label and the key beside it.
     pub popup_bg: u32,
     pub menu_ink: u32,
@@ -53,6 +55,7 @@ impl Default for Theme {
             text_dim: 0x0082_8997,
             text_accent: 0x0061_afef,
             text_error: 0x00e0_6c75,
+            text_warning: 0x00e5_c07b,
             popup_bg: 0x003a_3f4b,
             // Near-white, as a desktop menu's (Kevin, 2026-11-14).
             menu_ink: 0x00f5_f7fa,

@@ -75,16 +75,33 @@ pub trait Language: Sync {
     }
 }
 
-/// A stretch of text the language cannot read, from `start` to `end`, each
+/// A stretch of text something is wrong with, from `start` to `end`, each
 /// a (line, byte) — the widget underlines it and the shell can say why.
-/// `error` is text that will not read at all; otherwise it is a form still
-/// open, which is what text being typed usually is, and is drawn quieter.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Diagnostic {
     pub start: (usize, usize),
     pub end: (usize, usize),
     pub message: String,
-    pub error: bool,
+    pub severity: Severity,
+}
+
+/// How bad: what the underline's ink says.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Severity {
+    /// Text that will not read, or a compiler's error: the error ink.
+    Error,
+    /// It reads, but something is likely wrong — a name nothing binds, a
+    /// call with the wrong count (E8), a server's warning: the warning ink.
+    Warning,
+    /// A form still open, which is what text being typed usually is: the
+    /// error ink, faint.
+    Open,
+}
+
+impl Diagnostic {
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
+    }
 }
 
 /// A code-context delimiter's position, buffer-wide.

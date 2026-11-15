@@ -21,7 +21,7 @@
 
 use scm_text::text::{Kind, Token};
 
-use super::{Diagnostic, Language, ParenPos, Scan, Tok};
+use super::{Diagnostic, Language, ParenPos, Scan, Severity, Tok};
 
 pub struct Scheme;
 
@@ -111,7 +111,7 @@ impl Language for Scheme {
                 // Offsets in order, as the walker wants them.
                 let mut walk = Walker::new(lines);
                 let (from, to) = (walk.at(start), walk.at(end.max(start)));
-                vec![Diagnostic { start: from, end: to, message, error: true }]
+                vec![Diagnostic { start: from, end: to, message, severity: Severity::Error }]
             }
             ReadCheck::Incomplete => {
                 let mut open: Vec<&ParenPos> = Vec::new();
@@ -134,7 +134,7 @@ impl Language for Scheme {
                     }
                 };
                 let end = (at.0, (at.1 + 1).min(lines.get(at.0).map_or(0, |l| l.len())));
-                vec![Diagnostic { start: at, end, message, error: false }]
+                vec![Diagnostic { start: at, end, message, severity: Severity::Open }]
             }
         }
     }

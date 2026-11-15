@@ -744,40 +744,58 @@ pub trait Watcher: Sync {
 }
 
 thread_local! {
-    static WATCHER: Cell<Option<&'static dyn Watcher>> = const { Cell::new(None) };
+    static WATCHERS: RefCell<Vec<&'static dyn Watcher>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Install the watcher (one; a second replaces the first).
+/// Install a watcher beside the others — the language server's (E7), the
+/// warnings (E8). Installing one twice keeps one.
 pub fn set_watcher(w: &'static dyn Watcher) {
-    WATCHER.set(Some(w));
+    WATCHERS.with(|ws| {
+        let mut ws = ws.borrow_mut();
+        if !ws.iter().any(|x| std::ptr::addr_eq(*x as *const dyn Watcher, w as *const dyn Watcher)) {
+            ws.push(w);
+        }
+    });
 }
 
-/// Tell the watcher PATH was let go, unless a buffer in some pane still
+/// The watchers, copied out so none is borrowed while one runs.
+fn watchers() -> Vec<&'static dyn Watcher> {
+    WATCHERS.with(|ws| ws.borrow().clone())
+}
+
+#[cfg(test)]
+fn clear_watchers() {
+    WATCHERS.with(|ws| ws.borrow_mut().clear());
+}
+
+/// Tell the watchers PATH was let go, unless a buffer in some pane still
 /// visits it.
 fn release(path: Option<String>) {
-    let (Some(w), Some(path)) = (WATCHER.get(), path) else { return };
+    let Some(path) = path else { return };
     let held = with_state(|state| state.panes.values().any(|p| p.docs.iter().any(|d| d.path.as_deref() == Some(path.as_str()))));
     if !held {
-        w.closed(&path);
+        watchers().iter().for_each(|w| w.closed(&path));
     }
 }
 
-/// The watcher's modeline word for a buffer that is text with a file.
+/// The watchers' modeline word for a buffer that is text with a file: the
+/// first that has one.
 fn watched_mode(doc: &Doc) -> Option<String> {
     if doc.md.is_some() || doc.image.is_some() || doc.video.is_some() {
         return None;
     }
-    WATCHER.get()?.mode(doc.path.as_deref()?, doc.lang.name())
+    let path = doc.path.as_deref()?;
+    watchers().iter().find_map(|w| w.mode(path, doc.lang.name()))
 }
 
-/// The watcher's diagnostics for a buffer that is text with a file.
+/// The watchers' diagnostics for a buffer that is text with a file.
 fn watched_diagnostics(doc: &Doc) -> Vec<language::Diagnostic> {
     if doc.md.is_some() || doc.image.is_some() || doc.video.is_some() {
         return Vec::new();
     }
-    match (WATCHER.get(), doc.path.as_deref()) {
-        (Some(w), Some(path)) => w.diagnostics(path),
-        _ => Vec::new(),
+    match doc.path.as_deref() {
+        Some(path) => watchers().iter().flat_map(|w| w.diagnostics(path)).collect(),
+        None => Vec::new(),
     }
 }
 
@@ -2704,8 +2722,8 @@ fn fresh_scan(lex: &mut Option<LexCache>, lang: &'static dyn Language, reads: bo
     });
     if !same {
         let lines: Vec<&str> = buffer.lines.iter().map(|l| l.text()).collect();
-        if let (Some(w), Some(path)) = (WATCHER.get(), path) {
-            w.text_changed(path, lang.name(), &lines);
+        if let Some(path) = path {
+            watchers().iter().for_each(|w| w.text_changed(path, lang.name(), &lines));
         }
         let scan = lang.scan(&lines);
         let diags = if reads { lang.diagnose(&lines, &scan) } else { Vec::new() };
@@ -2976,8 +2994,8 @@ fn draw_video(
 /// star, + its place in the loaded scene), the language it is read as
 /// ("Rust", or "Scheme (ray)" with its dialect; not for markdown, which is
 /// read, not edited), how the server
-/// watching it is ("rust-analyzer indexing (30%)"), and where text that
-/// will not read is — so a mark scrolled out of view is still found (M-g n
+/// watching it is ("rust-analyzer indexing (30%)"), how many warnings it
+/// has (E8), and where text that will not read is — so a mark scrolled out of view is still found (M-g n
 /// goes there). A form left open does not say: it is what typing looks
 /// like.
 fn modeline_left(doc: &Doc, diags: &[language::Diagnostic]) -> String {
@@ -2994,8 +3012,14 @@ fn modeline_left(doc: &Doc, diags: &[language::Diagnostic]) -> String {
     if let Some(mode) = watched_mode(doc) {
         left = format!("{left} · {mode}");
     }
-    if let Some(d) = diags.iter().find(|d| d.error) {
+    if let Some(d) = diags.iter().find(|d| d.is_error()) {
         left = format!("{left} · unreadable at line {}", d.start.0 + 1);
+    }
+    // Warnings are counted, not placed: M-g n goes to them.
+    match diags.iter().filter(|d| d.severity == language::Severity::Warning).count() {
+        0 => {}
+        1 => left = format!("{left} · 1 warning"),
+        n => left = format!("{left} · {n} warnings"),
     }
     left
 }
@@ -3148,13 +3172,12 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
                                 .map_or(run.line_w, |g| g.x);
                             spans.push((x, advance));
                         }
-                        let a = if d.error { 0xff } else { 0x70 };
-                        let color = Color::rgba(
-                            (theme.text_error >> 16) as u8,
-                            (theme.text_error >> 8) as u8,
-                            theme.text_error as u8,
-                            a,
-                        );
+                        let (ink, a) = match d.severity {
+                            language::Severity::Error => (theme.text_error, 0xff),
+                            language::Severity::Warning => (theme.text_warning, 0xff),
+                            language::Severity::Open => (theme.text_error, 0x70),
+                        };
+                        let color = Color::rgba((ink >> 16) as u8, (ink >> 8) as u8, ink as u8, a);
                         let y = (run.line_top + run.line_height) as i32 - thick;
                         for (x, w) in spans {
                             let x0 = (x as i32 + ox as i32).max(cx0).max(0);
@@ -3707,7 +3730,7 @@ mod tests {
             TOLD.with(|t| t.borrow_mut().push((path.into(), lang.into(), lines.join("\n"))));
         }
         fn diagnostics(&self, path: &str) -> Vec<language::Diagnostic> {
-            vec![language::Diagnostic { start: (0, 0), end: (0, 1), message: format!("from {path}"), error: true }]
+            vec![language::Diagnostic { start: (0, 0), end: (0, 1), message: format!("from {path}"), severity: language::Severity::Error }]
         }
         fn closed(&self, path: &str) {
             LET_GO.with(|t| t.borrow_mut().push(path.into()));
@@ -3721,7 +3744,7 @@ mod tests {
     fn the_modeline_names_the_language_and_the_server() {
         set_vi(false);
         crate::host::testing::reset();
-        WATCHER.set(None);
+        clear_watchers();
         let id = 964;
         set_text(id, "(display 1)");
         let left = || with_pane(id, |_, pane, _| modeline_left(pane, &[]));
@@ -3736,12 +3759,17 @@ mod tests {
         set_language(id, "rust");
         set_watcher(&RECORDING);
         assert_eq!(left(), "m.rs · Rust · rust-server", "then how its server is");
-        let unreadable = [language::Diagnostic { start: (2, 0), end: (2, 1), message: String::new(), error: true }];
+        let unreadable = [language::Diagnostic { start: (2, 0), end: (2, 1), message: String::new(), severity: language::Severity::Error }];
         assert_eq!(
             with_pane(id, |_, pane, _| modeline_left(pane, &unreadable)),
             "m.rs · Rust · rust-server · unreadable at line 3"
         );
-        WATCHER.set(None);
+        let warned = [
+            language::Diagnostic { start: (0, 0), end: (0, 1), message: String::new(), severity: language::Severity::Warning },
+            language::Diagnostic { start: (1, 0), end: (1, 1), message: String::new(), severity: language::Severity::Warning },
+        ];
+        assert_eq!(with_pane(id, |_, pane, _| modeline_left(pane, &warned)), "m.rs · Rust · rust-server · 2 warnings");
+        clear_watchers();
     }
 
     #[test]
@@ -3765,7 +3793,7 @@ mod tests {
         assert_eq!(let_go(), vec!["/tmp/one.rs"], "visiting another file lets the first go");
         assert!(buffer_close(b, two));
         assert_eq!(let_go(), vec!["/tmp/one.rs", "/tmp/two.rs"]);
-        WATCHER.set(None);
+        clear_watchers();
     }
 
     #[test]
@@ -3791,11 +3819,11 @@ mod tests {
             "told once, until the text changes"
         );
         let d = diagnostics(id);
-        assert_eq!((d.len(), d[0].message.as_str(), d[0].error), (1, "from /tmp/w.rs", true));
+        assert_eq!((d.len(), d[0].message.as_str(), d[0].is_error()), (1, "from /tmp/w.rs", true));
         act(id, "insert", Some("x"), 0.0, 0.0);
         draw(id, &mut fb, rect, true);
         assert_eq!(TOLD.with(|t| t.borrow().len()), 2, "and again when it does");
-        WATCHER.set(None);
+        clear_watchers();
     }
 
     #[test]

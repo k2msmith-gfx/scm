@@ -17,23 +17,34 @@
   (let loop ((n column))
     (when (positive? n) (%editor-act eid "right") (loop (- n 1)))))
 
-(define (goto-diagnostic)
-  "Go to where the buffer stops reading, and say why — M-g n (and M-g p,
-  there being one). Runs nothing: the reader is asked about the text as it
-  stands, the same reader a send will meet.
+(define (goto-diagnostic (backward #f))
+  "Go to the next mark after the cursor and say why — M-g n; M-g p the one
+  before; past the last, round to the first. A mark is where the buffer
+  stops reading, or a warning (a name nothing binds, a call with the wrong
+  count — E8), or a language server's. Runs nothing: the text is asked
+  about as it stands, as a send will meet it.
 
   M-, comes back, as it does from M-.."
   (define eid (editor-pane-id))
-  (match (%editor-diagnostics eid)
-    (() (echo "the buffer reads"))
-    (((line column message error?) . _)
+  (define (before? a b) (or (< (car a) (car b)) (and (= (car a) (car b)) (< (cadr a) (cadr b)))))
+  (define marks (list-sort before? (%editor-diagnostics eid)))
+  (define here (match (%editor-cursor eid) ((line index) (list line index)) (_ (list 0 0))))
+  (define pick
+    (if backward
+      (let ((earlier (filter (lambda (m) (before? m here)) marks)))
+        (if (null? earlier) (and (pair? marks) (last marks)) (last earlier)))
+      (or (find (lambda (m) (before? here m)) marks) (and (pair? marks) (car marks)))))
+  (match pick
+    (#f (echo "the buffer reads, and nothing in it is marked"))
+    ((line column message severity)
       (push-definition-mark! eid)
       (editor-goto eid line column)
       (echo (number->string (+ line 1)) ":" (number->string (+ column 1)) "  "
-            (if (= error? 1) "" "open: ") message))))
+            (case severity ((0) "open: ") ((2) "warning: ") (else ""))
+            message))))
 
 (bind-key "M-g n" (labelled "goto-diagnostic" (lambda () (if (editor-focused?) (goto-diagnostic) #f))))
-(bind-key "M-g p" (labelled "goto-diagnostic" (lambda () (if (editor-focused?) (goto-diagnostic) #f))))
+(bind-key "M-g p" (labelled "goto-diagnostic-backward" (lambda () (if (editor-focused?) (goto-diagnostic #t) #f))))
 
 ; ── Document symbols: what this buffer defines ─────────────────────────────
 ; Emacs's imenu (M-g i), from the same scan the M-. index uses: every

@@ -130,10 +130,11 @@ prim! {
 }
 
 prim! {
-    /// `(%editor-diagnostics id)` — what the active buffer's reader cannot
-    /// read (E3f), in buffer order: `((line column message error?) …)`, the
-    /// line from 0, the column in CHARACTERS, error? 1 for text that will
-    /// not read and 0 for a form left open.
+    /// `(%editor-diagnostics id)` — what is wrong with the active buffer:
+    /// what its reader cannot read (E3f), and what its watchers say (a
+    /// language server's marks, E7; the warnings, E8), as `((line column
+    /// message severity) …)`, the line from 0, the column in CHARACTERS,
+    /// severity 1 for an error, 2 a warning and 0 a form left open.
     "%editor-diagnostics", fn editor_diagnostics(id: num) {
         let id = id as u32;
         let text = crate::editorpane::text(id);
@@ -145,7 +146,11 @@ prim! {
                 Out::Num(line as f64),
                 Out::Num(column as f64),
                 Out::Text(d.message),
-                Out::Num(if d.error { 1.0 } else { 0.0 }),
+                Out::Num(match d.severity {
+                    crate::language::Severity::Error => 1.0,
+                    crate::language::Severity::Open => 0.0,
+                    crate::language::Severity::Warning => 2.0,
+                }),
             ])
         }))
     }

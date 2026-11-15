@@ -173,3 +173,74 @@ Example: (find-definitions \"stair\")"
         (echo "that buffer was killed — M-, again goes further back")))))
 
 (bind-key "C-M-." 'find-definition)
+
+;; ── Where a name is used (E8) ─────────────────────────────────────────────
+;; Every place the name is USED — not every place the word appears: a local
+;; binding of the same name is another variable, and a quoted 'slab is data
+;; (scm-text's scope pass). Over the files the index holds: the modeler's
+;; scene files and preludes; the standalone's whole checkout.
+
+(define (reference-sites name)
+  "Every place NAME (a symbol or a string) is used, as a list of (path line
+  column \"use\") — 0-based, the column in characters — over the files
+  definition-sites searches, the buffer on screen as it stands."
+  (xref-note-buffer!)
+  (%xref-references (if (symbol? name) (symbol->string name) name)))
+
+(define (site-line path line)
+  ; Line LINE of PATH as it reads now: the buffer's text when it is open,
+  ; else the file's.
+  (let* ((buf (buffer-for-file path))
+         (text (cond ((and buf (equal? buf (%editor-active-buffer (editor-pane-id))))
+                       (%text (%editor-text (editor-pane-id))))
+                     ((file-exists? path) (slurp path))
+                     (else ""))))
+    (let loop ((lines (string-split text "\n")) (i 0))
+      (cond ((null? lines) "")
+            ((= i line) (string-trim-both (car lines)))
+            (else (loop (cdr lines) (+ i 1)))))))
+
+(define (find-references name)
+  "List every place NAME is used, in the minibuffer, as file:LINE and the
+  line itself; typing narrows, RET goes there, M-, comes back."
+  (define eid (editor-pane-id))
+  (define sites (reference-sites name))
+  (define cache (make-hash-table equal?))
+  (define (label site)
+    (match site
+      ((path line . _)
+        (string-append (buffer-basename path) ":" (number->string (+ line 1)) "  "
+                       (let ((key (cons path line)))
+                         (or (hash-table-ref/default cache key #f)
+                             (let ((l (site-line path line))) (hash-table-set! cache key l) l)))))))
+  (define labels (map label sites))
+  (define (go site)
+    (push-definition-mark! eid)
+    (goto-site site))
+  (if (null? sites)
+    (echo "no uses of " name " in " (if (positive? (length (%xref-sites name))) "the indexed files" "the indexed files, and no definition either"))
+    (begin
+      (read-minibuffer
+        (string-append (number->string (length sites)) (if (= 1 (length sites)) " use" " uses") " of " name ": ")
+        (lambda (ans)
+          (let ((ans (string-trim-both ans)))
+            (unless (string=? ans "")
+              (let loop ((ls labels) (ss sites))
+                (cond ((null? ls) (echo "no use " ans))
+                      ((string=? (string-trim-both (car ls)) ans) (go (car ss)))
+                      (else (loop (cdr ls) (cdr ss))))))))
+        labels)
+      (comp-open labels #f))))
+
+(define (find-references-at-point)
+  "List every place the name under the cursor is used — M-? (bound as
+  M-S-/), Emacs's xref-find-references. Uses, not words: a local variable
+  of the same name, or the name quoted as data, is not one. Runs nothing;
+  RET on one goes there and M-, comes back."
+  (define tp (editor-text+point))
+  (define name (editor-token-around (car tp) (cadr tp)))
+  (if (string=? name "")
+    (echo "no symbol at point")
+    (find-references name)))
+
+(bind-key "M-S-/" (labelled "find-references-at-point" (lambda () (if (editor-focused?) (find-references-at-point) #f))))

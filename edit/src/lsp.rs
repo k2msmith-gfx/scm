@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::language::Diagnostic;
+use crate::language::{Diagnostic, Severity};
 
 /// How long a quick question waits for its answer.
 const WAIT: Duration = Duration::from_millis(1500);
@@ -859,7 +859,12 @@ pub fn diagnostics(path: &str) -> Vec<Diagnostic> {
             .diagnostics_of(&file)
             .into_iter()
             .filter(|d| d.severity < 4)
-            .map(|d| Diagnostic { start: at(d.start), end: at(d.end), message: d.message, error: d.severity == 1 })
+            .map(|d| Diagnostic {
+                start: at(d.start),
+                end: at(d.end),
+                message: d.message,
+                severity: if d.severity == 1 { Severity::Error } else { Severity::Warning },
+            })
             .collect()
     })
 }
@@ -1223,12 +1228,12 @@ mod tests {
         assert_eq!(sig, "fn frobnicate(x: u32) -> u32");
         assert!(doc.contains("Frobs it."), "{doc}");
         let t1 = Instant::now();
-        while t1.elapsed() < Duration::from_secs(60) && !diagnostics(&path).iter().any(|d| d.error) {
+        while t1.elapsed() < Duration::from_secs(60) && !diagnostics(&path).iter().any(|d| d.is_error()) {
             std::thread::sleep(Duration::from_millis(200));
         }
         let diags = diagnostics(&path);
         eprintln!("diagnostics: {diags:?}\n{}", status(&path, "rust"));
-        assert!(diags.iter().any(|d| d.error && d.start.0 == 4), "{diags:?}");
+        assert!(diags.iter().any(|d| d.is_error() && d.start.0 == 4), "{diags:?}");
         stop(None);
         let _ = std::fs::remove_dir_all(&dir);
     }

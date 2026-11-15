@@ -15,6 +15,7 @@
 //! convert one into the other later.
 
 pub mod index;
+pub mod scope;
 pub mod text;
 
 pub use index::{Index, Site};

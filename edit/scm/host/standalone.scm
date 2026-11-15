@@ -139,6 +139,24 @@ Every ray file of the same checkout shares it, so they all start over."
 (define (ray-buffer? buf)
   (equal? (%buffer-dialect (editor-pane-id) buf) "ray"))
 
+; Which image the WARNINGS judge a buffer against (22-warnings) — where its
+; sends go, without starting anything to find out: a ray file's ray and a
+; Scheme file's scm once they run. Before its scm runs a Scheme file is
+; judged against this image, which binds all that plain scm does and more,
+; so it can miss a warning but not invent one; a ray file before its ray
+; runs is not judged, since this image has none of ray's verbs.
+(set! *buffer-image*
+  (lambda (buf)
+    (let ((p (buffer-path buf))
+          (running (lambda (c) (and c (%remote-address c) c))))
+      (cond ((not p) #f)
+            ((hash-table-ref/default *attached-backends* buf #f)
+              => (lambda (b) (or (%alist-ref b :conn #f) 'self)))
+            ((or (string-prefix? "*" p) (editor-own-file? p)) 'self)
+            ((ray-buffer? buf) (running (hash-table-ref/default *ray-servers* (ray-dir p) #f)))
+            ((scheme-path? p) (or (running *scm-files*) 'self))
+            (else #f)))))
+
 (set! *buffer-backend*
   (lambda (buf)
     (let ((p (buffer-path buf)))
@@ -383,7 +401,11 @@ Every ray file of the same checkout shares it, so they all start over."
 (define (edit-open-files files)
   "The file tree at startup: rooted at the git checkout the first FILE is
   in — or the one the editor was started in — showing that file."
-  (files-open-root (if (pair? files) (let ((d (files-dir-of (car files)))) d) "."))
+  (let ((root (files-open-root (if (pair? files) (let ((d (files-dir-of (car files)))) d) "."))))
+    ; M-. and M-? search the checkout the tree shows — every Scheme file in
+    ; it, not only the ones opened (E8): references over the files opened
+    ; so far would be a fraction of them. The index skips target/ and .git.
+    (%xref-index (list root)))
   (when (pair? files) (files-reveal (car files))))
 
 (define (files-dir-of p)

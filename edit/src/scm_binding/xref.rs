@@ -28,6 +28,16 @@ thread_local! {
     static INDEX: RefCell<Index> = RefCell::new(Index::default());
 }
 
+/// Whether any indexed file defines NAME (E8's warnings).
+pub(super) fn defines(name: &str) -> bool {
+    INDEX.with(|ix| ix.borrow().defines(name))
+}
+
+/// The call shape an indexed file gives NAME, `(f a b)`, if one does.
+pub(super) fn signature(name: &str) -> Option<String> {
+    INDEX.with(|ix| ix.borrow().signature(name))
+}
+
 prim! {
     /// `(%xref-index paths)` — replace the index with PATHS: each a `.scm`
     /// file, or a directory walked for them. Answers how many names it
@@ -79,6 +89,16 @@ prim! {
 }
 
 prim! {
+    /// `(%xref-references name)` — every place NAME is USED, as
+    /// `((path line column "use") …)`, by file and position (E8): a use is
+    /// a free occurrence, so a local binding of the same name and quoted
+    /// data are not among them.
+    "%xref-references", fn xref_references(name: text) {
+        INDEX.with(|ix| Out::Arr(ix.borrow().references(&name).iter().map(site_out).collect()))
+    }
+}
+
+prim! {
     /// `(%xref-matching text limit)` — names containing TEXT, caselessly,
     /// shortest first, at most LIMIT: `((name path line column form) …)`.
     "%xref-matching", fn xref_matching(query: text, limit: num) {
@@ -125,6 +145,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         xref_index::install(interp)?,
         xref_update::install(interp)?,
         xref_sites::install(interp)?,
+        xref_references::install(interp)?,
         xref_matching::install(interp)?,
         text_definitions::install(interp)?,
     ])

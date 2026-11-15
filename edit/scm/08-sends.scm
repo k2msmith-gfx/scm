@@ -186,6 +186,9 @@
   ;; What the forms printed goes to the transcript above the value, kept
   ;; when one of them raises — the REPL's own rule (08-editor).
   (let ((printed (string-trim-right (%alist-ref r :output ""))))
+    ; What the image binds may have changed — even a send that failed may
+    ; have defined something first (22-warnings).
+    (warnings-after-send!)
     (define (failed msg)
       (set! *send-failed* #t)
       (*transcript-append* (string-append "error: " msg) :error)

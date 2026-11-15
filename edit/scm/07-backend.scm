@@ -112,9 +112,13 @@ answer from its live bindings."
 text) is true; the modeline says \"Scheme (DIALECT)\"."
   (set! *dialect-detectors* (append *dialect-detectors* (list (cons dialect test)))))
 
+; Run with each buffer a file opens into, once its language is known: the
+; warnings (22-warnings) judge it from then on.
+(define *buffer-opened-hooks* '())
+
 (define (detect-language! eid path)
   "Set the active buffer of editor EID to the language its file says it is,
-and a Scheme file's dialect."
+and a Scheme file's dialect; then *buffer-opened-hooks*."
   (let ((text (%text (%editor-text eid)))
         (buf (%editor-active-buffer eid)))
     (when-let ((hit (find (lambda (d) ((cdr d) path text)) *language-detectors*)))
@@ -123,7 +127,8 @@ and a Scheme file's dialect."
       eid buf
       (or (and (equal? (%buffer-language eid buf) "scheme")
                (and-let* ((hit (find (lambda (d) ((cdr d) path text)) *dialect-detectors*))) (car hit)))
-          ""))))
+          ""))
+    (for-each (lambda (h) (guard (e (#t #f)) (h buf))) *buffer-opened-hooks*)))
 
 ; Languages that are not Scheme at all (20-rust): this image's names, docs
 ; and signatures mean nothing in them, so completion offers the buffer's own

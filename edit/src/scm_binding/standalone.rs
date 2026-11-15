@@ -668,6 +668,60 @@ mod tests {
     /// binding printed #<procedure>, which the reading view showed as a bare
     /// `#` (Kevin, 2026-11-14: "C-a - #"), and labels filed by key alone let
     /// the minibuffer's C-a name the editor's.
+    /// M-? lists the uses of the name at point across the indexed files —
+    /// uses, not words — with each line, and RET goes to one (E8).
+    #[test]
+    fn find_references_lists_the_uses() {
+        app::resize(800, 600, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-refs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.scm"), "(define (slab w) (box w))\n(slab 1)\n").unwrap();
+        std::fs::write(dir.join("b.scm"), "(let ((slab 2)) slab)\n'slab\n(map slab xs)\n").unwrap();
+        // As the standalone roots it: the real path (/var is /private/var).
+        let d = std::fs::canonicalize(&dir).unwrap().to_string_lossy().replace('\\', "/");
+        s.call(&format!("(%xref-index (list \"{d}\")) (open-path \"{d}/a.scm\") (editor-goto 1 1 2)"));
+        assert_eq!(s.eval_to_string("(length (reference-sites \"slab\"))").unwrap(), "2", "uses, not words");
+        s.key("M-S-/");
+        let prompt = s.eval_to_string("(%state-ref *edit* :prompt)").unwrap();
+        assert_eq!(prompt, "\"2 uses of slab: \"");
+        let shown = s.eval_to_string("(%state-ref (%edit :comp) :cands)").unwrap();
+        assert!(shown.contains("a.scm:2  (slab 1)") && shown.contains("b.scm:3  (map slab xs)"), "the list is up, each with its line: {shown}");
+        let labels = s.eval_to_string("(map (lambda (st) (%list-ref/default st 1 #f)) (reference-sites \"slab\"))").unwrap();
+        assert_eq!(labels, "(1 2)", "a.scm line 2, b.scm line 3");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Scheme file is judged as it is typed (E8): a name nothing binds and
+    /// a call with the wrong count are warnings, M-g n goes to them, the
+    /// modeline counts them — and a fix clears them.
+    #[test]
+    fn a_scheme_file_warns_before_it_runs() {
+        app::resize(800, 600, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-warn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("w.scm");
+        std::fs::write(&f, "(define (cube x) (* x x x))\n(cube 1 2)\n(dispaly (cube 3))\n(let ((y 2)) (list y 'zz))\n").unwrap();
+        let f = std::fs::canonicalize(&f).unwrap().to_string_lossy().replace('\\', "/");
+        s.call(&format!("(open-path \"{f}\")"));
+        let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
+        app::draw(&mut fb);
+        let warnings = |s: &mut Session| s.eval_to_string("(filter (lambda (d) (= (cadddr d) 2)) (%editor-diagnostics 1))").unwrap();
+        let w = warnings(&mut s);
+        assert!(w.contains("(1 1 \"cube takes 1 argument, given 2\" 2)"), "{w}");
+        assert!(w.contains("(2 1 \"dispaly is not defined"), "{w}");
+        assert_eq!(w.matches("is not defined").count(), 1, "y and 'zz are not warned of: {w}");
+        s.call("(%editor-goto-line 1 0) (goto-diagnostic)");
+        assert_eq!(s.eval_to_string("(%editor-cursor 1)").unwrap(), "(1 1)", "M-g n goes to the first");
+        // Fixed, the warnings go.
+        s.call("(%editor-set-text 1 \"(define (cube x) (* x x x))\\n(cube 1)\\n(display (cube 3))\\n\")");
+        app::draw(&mut fb);
+        assert_eq!(warnings(&mut s), "()");
+        s.call("(set-editor-warnings #f)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn every_help_row_names_its_command() {
         app::resize(800, 600, 1.0);
@@ -757,6 +811,16 @@ mod tests {
         assert!(t.iter().any(|l| l == "=> #t"), "ray's verbs are there: {t:?}");
         let name = s.eval_to_string("(%alist-ref (backend-of (%editor-active-buffer 1)) :name #f)").unwrap();
         assert!(name.starts_with("\"ray at "), "{name}");
+        // Judged against RAY's image now that it runs (E8): its verbs are
+        // bound, a typo of one is not, and what was sent counts.
+        s.call("(%editor-set-text 1 \"(add-shpere \\\"s\\\")\\n(add-sphere \\\"s\\\")\\n(cube 2 3)\\n\")");
+        let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
+        app::draw(&mut fb);
+        let w = s.eval_to_string("(map caddr (%editor-diagnostics 1))").unwrap();
+        assert!(w.contains("add-shpere is not defined"), "{w}");
+        assert!(!w.contains("add-sphere is"), "ray's verb is bound: {w}");
+        assert!(w.contains("cube takes 1 argument, given 2"), "what was sent counts: {w}");
+        s.call("(%editor-set-text 1 \"(include \\\"parts/cube.scm\\\")\\n(cube 2)\\n\")");
         // M-x ray-restart: the next send meets a fresh ray, without cube.
         s.call("(ray-restart) (%editor-goto-line 1 1) (eval-defun)");
         assert!(s.settle(30.0), "a fresh ray answers");

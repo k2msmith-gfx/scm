@@ -1152,6 +1152,48 @@ if wanted). Types: Scheme has none to check.
 So W1 is tested on real code before any warning is drawn, an unknown macro
 silences what is inside it, and `M-x set-editor-warnings #f` turns them off.
 
+**E8 as built** (Kevin, 2026-11-15).
+- **W1** is `scm-text/src/scope.rs`: a form tree over the token scan (a
+  vector `#(…)` is its own node, since a `match` pattern binds inside one)
+  and the walk above. `scope_corpus` (ignored; `SCOPE_CORPUS`,
+  `SCOPE_NAMES`) runs it over a corpus against an image's names: ray's
+  examples and prelude, 359 files and 30,543 free uses, leave 20 names
+  unbound — all real (modeler verbs in modeler scripts, `lab-option`,
+  which rock-lab.scm asks its caller to define). Two more went once ray
+  defined its asides at boot (`fit-deviation`, `unkink-deviation`: ray's
+  `ASIDES`), which a fresh image had not bound until a verb ran.
+  scm's own leaves only the host demos' verbs. Two bugs it found: `+inf.0`
+  read as a name, and `let-syntax` not binding its macros.
+- **W2**: the index records each file's uses (`Index::references`), with a
+  count of defining files for a fast "defined anywhere?" (`defines`).
+  `M-?` (bound `M-S-/`) lists them in the minibuffer as `file:LINE  the
+  line` — typing narrows, RET goes, M-, comes back. The standalone indexes
+  its checkout at startup (`edit-open-files`).
+- **W3**: `%syntax-names`, new in scm, is the half of what is bound that
+  `apropos` leaves out (the compiler's forms and every macro). The facts
+  are one Scheme form (`*image-facts-form*`) run in this image or over the
+  wire — `(apropos)`, `(%syntax-names)`, `(signature …)` of each — after
+  every send (`send-answer`), never while a remote one runs.
+- **W4**: `scm_binding/warn.rs`, a second watcher (the widget's slot is a
+  list now). It judges against the image, this file's definitions, the
+  index, and the `.scm` files BESIDE the file (its folder and the folders
+  in it, read once and kept until one changes): a part opened without its
+  scene loaded uses its siblings' `fd` and `concrete`, which only the
+  loaded scene would otherwise bind. An arity counts every argument for a
+  procedure without keyword parameters, since ray names things with
+  keywords (`(plate :main-plate …)`); for one with them, only "too many"
+  is sure. A send marks its image's buffers stale, judged when next drawn,
+  so it re-judges one buffer and not every one open.
+  `Diagnostic.error` became a `Severity` (error, warning, open form); the
+  theme has `text_warning` (One Dark yellow); M-g n / M-g p step through
+  every mark; the modeline counts warnings. In the standalone a Scheme file
+  is judged against its scm once it runs and against the editor's image
+  (a superset of plain scm's) before; a ray file only once its ray runs.
+- Over the 71 files of `examples/models/fallingwater/`, opened in the
+  modeler with nothing loaded (`warnings_on_real_files`, ignored): three
+  files warn, each truly — rock-lab.scm's caller-defined names, and the
+  two rock-x experiment files' driver-defined ones.
+
 **Still open.**
 - **In scm** (each is a change in the scm repo):
   - a sent form locates as `<input>:L:C`, because `eval-string` takes no
