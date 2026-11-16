@@ -464,6 +464,28 @@ acts only while the editor holds typing. Call it once the pane exists."
   (%editor-set-vi (if on 1 0))
   (echo "editor vi mode " (if on "on" "off")))
 
+;; LINE NUMBERS down the editor's left side (Kevin, 2026-11-16): on by
+;; default; the modeline's right end gives the cursor's LINE:COLUMN either way.
+(define *line-numbers* :absolute)
+
+(define (set-line-numbers (mode #f))
+  "The editor's line numbers. MODE #t or :absolute numbers each line;
+  :relative counts from the cursor's line, as vi's relativenumber — what a
+  5j or d3k counts — with the cursor's line keeping its own number; #f
+  hides them. As M-x, with no MODE, it turns them off, or back on as they
+  were. On by default; put (set-line-numbers :relative) or
+  (set-line-numbers #f) in your init.scm to start otherwise."
+  (define m
+    (cond ((not (given? mode)) (if (eq? *line-numbers* #f) :absolute #f))
+          ((eq? mode #t) :absolute)
+          (else mode)))
+  (case m
+    ((:absolute :relative #f)
+     (set! *line-numbers* m)
+     (%editor-set-line-numbers (case m ((:absolute) 1) ((:relative) 2) (else 0)))
+     (echo "line numbers " (if m (keyword->string m) "off")))
+    (else (echo "set-line-numbers: :absolute, :relative or #f, not " (*show-value* m)))))
+
 ; C-x C-s: save the editor buffer when the editor is focused (global — a
 ; pane-local C-x prefix would shadow C-x C-f/C-x i while typing there).
 (define (editor-focused?) (equal? (%focused-pane) (editor-pane-id)))

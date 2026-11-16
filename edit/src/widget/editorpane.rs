@@ -101,6 +101,10 @@ struct Doc {
     editor: Editor<'static>,
     /// The metrics px last applied to the buffer.
     applied_px: f32,
+    /// The line-number column's width in physical pixels, as the last draw
+    /// laid it out (0 with numbers off, or in a markdown or picture
+    /// buffer): the mouse and the completion popup offset by it.
+    gutter: f32,
     /// Modified since the last set_text / mark_saved.
     dirty: bool,
     /// An insert-coalescing change is open (see the module doc).
@@ -273,6 +277,7 @@ impl Doc {
             md: None,
             editor: Editor::new(Buffer::new_empty(Metrics::new(14.0, 14.0 * LEADING))),
             applied_px: 0.0,
+            gutter: 0.0,
             dirty: false,
             insert_run: false,
             undo: Vec::new(),
@@ -504,7 +509,7 @@ pub fn cursor_window_pos(id: u32) -> Option<(f32, f32, f32)> {
         pane.editor.shape_as_needed(fs, false);
         pane.editor.cursor_position().map(|(cx, cy)| {
             let line_h = pane.editor.with_buffer(|b| b.metrics().line_height);
-            (rect.x as f32 + pad + cx as f32, rect.y as f32 + pad + cy as f32, line_h)
+            (rect.x as f32 + pad + pane.gutter + cx as f32, rect.y as f32 + pad + cy as f32, line_h)
         })
     })
 }
@@ -1603,12 +1608,13 @@ pub fn is_markdown(id: u32) -> bool {
 }
 
 /// Window coords → buffer coords for the mouse actions (the buffer's
-/// origin sits at the pane rect + padding).
-fn to_buffer_xy(id: u32, x: f64, y: f64) -> (i32, i32) {
+/// origin sits at the pane rect + padding, right of the line numbers'
+/// `gutter`).
+fn to_buffer_xy(id: u32, gutter: f32, x: f64, y: f64) -> (i32, i32) {
     let pad = PAD * crate::host::ui_scale();
     let r = crate::host::rect(id).unwrap_or_default();
     (
-        (x - r.x as f64 - pad as f64) as i32,
+        (x - r.x as f64 - pad as f64 - gutter as f64) as i32,
         (y - r.y as f64 - pad as f64) as i32,
     )
 }
@@ -1844,7 +1850,7 @@ pub fn act(id: u32, kind: &str, arg: Option<&str>, x: f64, y: f64) -> Option<Str
             }
             "click" | "double-click" | "triple-click" | "drag" => {
                 pane.close_insert_run();
-                let (bx, by) = to_buffer_xy(id, x, y);
+                let (bx, by) = to_buffer_xy(id, pane.gutter, x, y);
                 let action = match kind {
                     "click" => Action::Click { x: bx, y: by },
                     "double-click" => Action::DoubleClick { x: bx, y: by },
@@ -2044,6 +2050,39 @@ thread_local! {
     /// ~/.config/modeler/init.scm opts out at boot (the prim registers
     /// before init runs; the wrapper verb loads later, in unify.scm).
     static VI: Cell<bool> = const { Cell::new(true) };
+}
+
+/// Line numbers down the editor's left side (Kevin, 2026-11-16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineNumbers {
+    Off,
+    /// Each line's own number.
+    Absolute,
+    /// Distance from the cursor's line, as vi's `relativenumber` — what a
+    /// `5j` or `d3k` counts; the cursor's line keeps its own number.
+    Relative,
+}
+
+thread_local! {
+    /// ON by default; `(set-line-numbers …)` changes it live.
+    static LINE_NUMBERS: Cell<LineNumbers> = const { Cell::new(LineNumbers::Absolute) };
+}
+
+pub fn line_numbers() -> LineNumbers {
+    LINE_NUMBERS.with(|l| l.get())
+}
+
+pub fn set_line_numbers(mode: LineNumbers) {
+    LINE_NUMBERS.with(|l| l.set(mode));
+    crate::host::mark_dirty();
+}
+
+/// The line-number column's width for a buffer of `lines` lines: room for
+/// the widest number (three digits at least, so it does not jump at line
+/// 10 and 100) and a cell's gap before the text.
+fn gutter_width(lines: usize, advance: f32) -> f32 {
+    let digits = lines.max(1).to_string().len().max(3);
+    ((digits + 1) as f32 * advance).round()
 }
 
 pub fn vi_on() -> bool {
@@ -3074,13 +3113,21 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
             draw_video(fb, rect, scale, pad, ml_h, ml_px, ml_adv, &theme, v, &pane.name);
             return;
         }
+        let advance = crate::text::mono_metrics(px).0;
+        let numbered = line_numbers() != LineNumbers::Off && pane.md.is_none();
+        pane.gutter = if numbered {
+            gutter_width(pane.editor.with_buffer(|b| b.lines.len()), advance)
+        } else {
+            0.0
+        };
+        let gutter = pane.gutter;
         pane.editor.with_buffer_mut(|buffer| {
             if pane.applied_px != px {
                 buffer.set_metrics(Metrics::new(px, (px * LEADING).round()));
                 pane.applied_px = px;
             }
             buffer.set_size(
-                Some(rect.w as f32 - 2.0 * pad),
+                Some(rect.w as f32 - 2.0 * pad - gutter),
                 Some(rect.h as f32 - 2.0 * pad - ml_h),
             );
         });
@@ -3118,10 +3165,10 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
             let a = theme.text_accent;
             Color::rgba((a >> 16) as u8, (a >> 8) as u8, a as u8, 0x50)
         };
-        let (ox, oy) = (rect.x as f32 + pad, rect.y as f32 + pad);
+        let (ox, oy) = (rect.x as f32 + pad + gutter, rect.y as f32 + pad);
         // Clip to the padded interior so long lines can't bleed into a
-        // neighboring pane.
-        let (cx0, cy0) = (rect.x as i32, rect.y as i32);
+        // neighboring pane — or, scrolled sideways, into the line numbers.
+        let (cx0, cy0) = (rect.x as i32 + gutter as i32, rect.y as i32);
         let (cx1, cy1) =
             ((rect.x + rect.w) as i32, (rect.y + rect.h) as i32 - ml_h as i32);
         let fbw = fb.width as i32;
@@ -3148,6 +3195,42 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
             },
         };
         editor.render(&mut renderer, text_color, cursor_color, selection_color, text_color);
+
+        // The line numbers, right-aligned in the gutter on each line's first
+        // row (a wrapped line's other rows have none), level with its text;
+        // the cursor's line in the body ink, the rest dim.
+        let cursor = pane.editor.cursor();
+        if numbered {
+            let ascent = crate::text::mono_ascent(px);
+            let right = rect.x as f32 + pad + gutter - advance;
+            let relative = line_numbers() == LineNumbers::Relative;
+            pane.editor.with_buffer(|buffer| {
+                // Where a baseline sits in its row, from a line with text:
+                // cosmic-text gives an EMPTY line no ascent, and its number
+                // drew a row-half too high.
+                let drop = buffer
+                    .layout_runs()
+                    .find(|r| !r.glyphs.is_empty())
+                    .map_or(ascent, |r| r.line_y - r.line_top);
+                let mut last = None;
+                for run in buffer.layout_runs() {
+                    if last == Some(run.line_i) {
+                        continue;
+                    }
+                    last = Some(run.line_i);
+                    let y = oy + run.line_top + drop - ascent;
+                    if y + run.line_height < cy0 as f32 || y > cy1 as f32 {
+                        continue;
+                    }
+                    let here = run.line_i == cursor.line;
+                    let n = if relative && !here { run.line_i.abs_diff(cursor.line) } else { run.line_i + 1 };
+                    let label = n.to_string();
+                    let x = right - label.len() as f32 * advance;
+                    let ink = if here { theme.text_ink } else { theme.text_dim };
+                    crate::text::draw_mono_line(fb, x, y, px, ink, &label);
+                }
+            });
+        }
 
         // What the reader cannot read (E3f), underlined: in the error ink for
         // text that will not read, and faintly for a form left open — which
@@ -3228,7 +3311,17 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
         // right while the pane holds typing focus. Replaces the old floating
         // badge and corner dirty dot.
         let left = modeline_left(pane, &diags);
-        draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, &theme, &left, vi_label.as_deref());
+        // The cursor's line and column, 1-based as vi counts them, before
+        // the vi mode.
+        let col = pane.editor.with_buffer(|b| {
+            b.lines.get(cursor.line).map_or(0, |l| l.text().get(..cursor.index).map_or(0, |t| t.chars().count()))
+        });
+        let at = format!("{}:{}", cursor.line + 1, col + 1);
+        let right = match vi_label {
+            Some(mode) => format!("{at}  {mode}"),
+            None => at,
+        };
+        draw_modeline(fb, rect, scale, pad, ml_h, ml_px, ml_adv, &theme, &left, Some(&right));
     });
 }
 
@@ -3508,6 +3601,39 @@ mod tests {
     /// Copy, cut and a drag on a buffer that never had text: nothing to
     /// take, and no panic (cosmic-text indexes the first line, and a fresh
     /// buffer has none).
+    /// The line numbers take a column on the left, and a click still lands
+    /// on the character under it — with the column, without it, and with
+    /// a buffer long enough to widen it.
+    #[test]
+    fn a_click_lands_on_its_character_beside_the_line_numbers() {
+        let id = 994;
+        let rect = Rect { x: 0, y: 0, w: 600, h: 300 };
+        crate::host::testing::set_rect(id, rect);
+        let mut fb = Framebuffer::new(600, 300);
+        let advance = crate::text::mono_metrics(crate::textpane::font_px()).0;
+        let mut click_at_char = |n: f32| {
+            draw(id, &mut fb, rect, true);
+            let gutter = with_pane(id, |_, pane, _| pane.gutter);
+            act(id, "click", None, f64::from(PAD + gutter + (n + 0.3) * advance), f64::from(PAD + 4.0));
+            (gutter, cursor(id))
+        };
+        set_text(id, "(abcdef ghij)");
+        set_line_numbers(LineNumbers::Absolute);
+        let (gutter, at) = click_at_char(4.0);
+        assert_eq!(gutter, gutter_width(1, advance));
+        assert!(gutter >= 4.0 * advance - 1.0, "three digits and a gap: {gutter}");
+        assert_eq!(at, (0, 4), "the fifth character, past the numbers");
+        set_line_numbers(LineNumbers::Off);
+        let (gutter, at) = click_at_char(4.0);
+        assert_eq!((gutter, at), (0.0, (0, 4)), "no column, the same character");
+        set_text(id, &"(x)\n".repeat(1200));
+        set_line_numbers(LineNumbers::Relative);
+        let (gutter, _) = click_at_char(1.0);
+        assert_eq!(gutter, gutter_width(1201, advance), "four digits widen it");
+        assert_eq!(cursor(id), (0, 1));
+        set_line_numbers(LineNumbers::Absolute);
+    }
+
     #[test]
     fn copy_on_an_empty_buffer_copies_nothing() {
         let id = 993;

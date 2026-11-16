@@ -157,6 +157,20 @@ prim! {
 }
 
 prim! {
+    /// `(%editor-set-line-numbers mode)` — the editor's line numbers: 0 off,
+    /// 1 each line's own number, 2 relative to the cursor's line.
+    "%editor-set-line-numbers", fn editor_set_line_numbers(a0: num) {
+        use crate::editorpane::LineNumbers;
+        crate::editorpane::set_line_numbers(match a0 as i64 {
+            0 => LineNumbers::Off,
+            2 => LineNumbers::Relative,
+            _ => LineNumbers::Absolute,
+        });
+        Out::Nil
+    }
+}
+
+prim! {
     /// `(%editor-set-vi on)` — global vi-mode toggle for editor panes (modit,
     /// COSMIC's vi engine: NORMAL/INSERT/VISUAL, motions, operators, text
     /// objects). `(%editor-vi-mode id)` reads the mode badge text ("" = off).
@@ -670,6 +684,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         editor_set_language::install(interp)?,
         buffer_language::install(interp)?,
         editor_set_vi::install(interp)?,
+        editor_set_line_numbers::install(interp)?,
         editor_vi_mode::install(interp)?,
         editor_goto_line::install(interp)?,
         editor_select_line::install(interp)?,
