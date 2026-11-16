@@ -445,6 +445,11 @@ answers in a REPL panel, completion and describe from the live image, `M-.`,
 a terminal pane, a file tree, and Rust with `rust-analyzer`. It is the same
 editor ray's modeler docks beside its 3D view.
 
+[`docs/film/edit-demo.mp4`](docs/film/edit-demo.mp4) is a four-minute tour,
+filmed by the editor itself (`edit/tools/film_demo.py`): the panes, Scheme,
+Guile, a ray scene and Rust, the menus, completion and warnings, the
+SLIME-style REPL, and themes.
+
 ### Building it
 
 It needs Rust 1.88 or later (rustup) and nothing else: no Nix, no LLVM, no C
