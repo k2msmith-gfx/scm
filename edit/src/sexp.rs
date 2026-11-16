@@ -11,6 +11,7 @@
 //! is never mistaken for code here either, and half-typed text degrades
 //! instead of failing.
 
+use scm_text::scope;
 use scm_text::text::{Doc, Kind, Token};
 
 /// Replace `start..end` (chars) with `text`; the cursor lands at `point`.
@@ -460,6 +461,296 @@ impl Sexps {
     }
 }
 
+impl Sexps {
+    /// The form a macro expansion is asked about: the list starting at the
+    /// point, else the innermost list around it.
+    pub fn form_at(&self, p: usize) -> Option<(usize, usize)> {
+        if let Some((s, e)) = self.next_datum(p)
+            && s == p
+            && self.toks.iter().any(|t| t.start == s && matches!(t.kind, Kind::Open | Kind::Prefix))
+        {
+            return Some((s, e));
+        }
+        let (open, close) = self.list(p)?;
+        Some((open.start, close.end))
+    }
+
+    /// The top-level form the point is in or at the start of — what C-M-q
+    /// re-indents.
+    pub fn toplevel_at(&self, p: usize) -> Option<(usize, usize)> {
+        let mut at = p;
+        let mut outer = None;
+        while let Some((open, close)) = self.list(at) {
+            outer = Some((open.start, close.end));
+            at = open.start;
+        }
+        outer.or_else(|| self.next_datum(p).filter(|&(s, _)| !self.slice(p, s).contains('\n')))
+    }
+
+    /// The line numbers (0-based) whose first character is inside a string
+    /// or a block comment: their indentation is the text's, not the code's.
+    pub fn lines_in_text(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut line = 0;
+        for (i, c) in self.chars.iter().enumerate() {
+            if *c == '\n' {
+                line += 1;
+                let start = i + 1;
+                if self.toks.iter().any(|t| {
+                    (t.kind == Kind::Str || (t.kind == Kind::Comment && self.slice(t.start, t.start + 2) == "#|"))
+                        && t.start < start
+                        && start < t.end
+                }) {
+                    out.push(line);
+                }
+            }
+        }
+        out
+    }
+}
+
+// ── Pretty-printing (an expansion comes back on one line) ──────────────────
+
+enum Node {
+    Atom(String),
+    /// Opener text (`(`, `#(`, `[`), the elements, the closer.
+    List(String, Vec<Node>, String),
+    Prefixed(String, Box<Node>),
+}
+
+impl Node {
+    fn flat(&self) -> String {
+        match self {
+            Node::Atom(a) => a.clone(),
+            Node::List(o, xs, c) => format!("{o}{}{c}", xs.iter().map(Node::flat).collect::<Vec<_>>().join(" ")),
+            Node::Prefixed(p, x) => format!("{p}{}", x.flat()),
+        }
+    }
+
+    fn head(&self) -> Option<&str> {
+        match self {
+            Node::List(_, xs, _) => match xs.first() {
+                Some(Node::Atom(a)) => Some(a),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+fn nodes(text: &str) -> Vec<Node> {
+    let doc = Doc::new(text);
+    let chars: Vec<char> = text.chars().collect();
+    let slice = |t: &Token| chars[t.start..t.end].iter().collect::<String>();
+    let toks: Vec<Token> = doc.tokens().iter().filter(|t| t.kind != Kind::Comment).copied().collect();
+    fn one(toks: &[Token], i: &mut usize, slice: &dyn Fn(&Token) -> String) -> Option<Node> {
+        let t = toks.get(*i)?;
+        *i += 1;
+        Some(match t.kind {
+            Kind::Open => {
+                let mut xs = Vec::new();
+                while *i < toks.len() && toks[*i].kind != Kind::Close {
+                    if let Some(n) = one(toks, i, slice) {
+                        xs.push(n);
+                    }
+                }
+                let close = toks.get(*i).map_or(")".to_string(), slice);
+                *i += 1;
+                Node::List(slice(t), xs, close)
+            }
+            Kind::Prefix => Node::Prefixed(slice(t), Box::new(one(toks, i, slice).unwrap_or(Node::Atom(String::new())))),
+            Kind::Close => return None,
+            _ => Node::Atom(slice(t)),
+        })
+    }
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < toks.len() {
+        if let Some(n) = one(&toks, &mut i, &slice) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Forms whose body indents by two under the head rather than lining up
+/// with the first argument — how they are written by hand.
+fn body_form(head: &str) -> bool {
+    matches!(
+        head,
+        "define" | "define*" | "define-syntax" | "define-record-type" | "lambda" | "lambda*" | "let" | "let*"
+            | "letrec" | "letrec*" | "let-values" | "let*-values" | "when" | "unless" | "do" | "case" | "begin"
+            | "syntax-rules" | "guard" | "parameterize" | "match" | "if-let" | "when-let" | "with-exception-handler"
+    )
+}
+
+fn render(n: &Node, col: usize, width: usize, out: &mut String) {
+    let flat = n.flat();
+    if col + flat.chars().count() <= width {
+        out.push_str(&flat);
+        return;
+    }
+    match n {
+        Node::Atom(a) => out.push_str(a),
+        Node::Prefixed(p, x) => {
+            out.push_str(p);
+            render(x, col + p.chars().count(), width, out);
+        }
+        Node::List(o, xs, c) => {
+            out.push_str(o);
+            let inner = col + o.chars().count();
+            let Some((first, rest)) = xs.split_first() else {
+                out.push_str(c);
+                return;
+            };
+            render(first, inner, width, out);
+            // A head and its first argument share the line; the rest line up
+            // under that argument, or go two in for a body form. A list of
+            // lists (a let's bindings) lines up under its first.
+            let (same_line, under) = match n.head() {
+                Some(h) if body_form(h) => (1, col + 2),
+                Some(h) if rest.len() > 1 => (1, inner + h.chars().count() + 1),
+                _ => (0, inner),
+            };
+            let mut at = inner + first.flat().chars().count();
+            for (k, x) in rest.iter().enumerate() {
+                if k < same_line {
+                    out.push(' ');
+                    render(x, at + 1, width, out);
+                    at = col + width; // whatever follows breaks
+                } else {
+                    out.push('\n');
+                    out.push_str(&" ".repeat(under));
+                    render(x, under, width, out);
+                }
+            }
+            let _ = at;
+            out.push_str(c);
+        }
+    }
+}
+
+/// TEXT's forms laid out to fit WIDTH columns, Lisp style: a form that fits
+/// on its line stays there; one that does not breaks after its head and
+/// first argument.
+pub fn pretty(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    for (k, n) in nodes(text).iter().enumerate() {
+        if k > 0 {
+            out.push('\n');
+        }
+        render(n, 0, width, &mut out);
+    }
+    out
+}
+
+// ── Rename ─────────────────────────────────────────────────────────────────
+
+/// What renaming the name at the point would change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rename {
+    pub name: String,
+    /// A top-level name — its definitions and every free use, which other
+    /// files may share — rather than a local bound by one form here.
+    pub global: bool,
+    /// The occurrences, as char ranges, in order.
+    pub sites: Vec<(usize, usize)>,
+}
+
+/// Is the occurrence at `start` a FREE use when `sub` (which begins at
+/// `base`) is read alone?
+fn free_in(text: &[char], base: usize, end: usize, start: usize) -> bool {
+    let sub: String = text[base..end].iter().collect();
+    scope::references(&Doc::new(&sub)).iter().any(|r| r.start + base == start)
+}
+
+/// Every top-level definition of NAME and every free use of it in TEXT.
+pub fn global_sites(text: &str, name: &str) -> Vec<(usize, usize)> {
+    let doc = Doc::new(text);
+    let toplevel = |at: usize| doc.tokens().iter().any(|t| t.start <= at && at < t.end && t.depth <= 1);
+    let mut sites: Vec<(usize, usize)> = scope::references(&doc)
+        .into_iter()
+        .filter(|r| r.name == name)
+        .map(|r| (r.start, r.end))
+        .collect();
+    let n = name.chars().count();
+    sites.extend(
+        doc.definitions()
+            .into_iter()
+            .filter(|d| d.name == name && toplevel(d.start))
+            .map(|d| (d.name_at, d.name_at + n)),
+    );
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
+impl Sexps {
+    /// What renaming the name at `p` would change, or None off a name.
+    pub fn rename_at(&self, text: &str, p: usize) -> Option<Rename> {
+        let doc = Doc::new(text);
+        let (name, s, _) = doc.symbol_at(p)?;
+        let global_here = global_sites(text, &name);
+        if global_here.iter().any(|&(a, _)| a == s) {
+            return Some(Rename { name, global: true, sites: global_here });
+        }
+        // A local: the smallest list around it where it is no longer free
+        // is the form that binds it.
+        let binder = |at: usize| -> Option<(usize, usize)> {
+            let mut q = at;
+            while let Some((open, close)) = self.list(q) {
+                if !free_in(&self.chars, open.start, close.end, at) {
+                    return Some((open.start, close.end));
+                }
+                q = open.start;
+            }
+            None
+        };
+        let (b0, b1) = binder(s)?;
+        let sites = self
+            .toks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| {
+                t.kind == Kind::Atom
+                    && t.start >= b0
+                    && t.end <= b1
+                    && self.slice(t.start, t.end) == name
+                    && !(*i > 0 && self.toks[i - 1].kind == Kind::Prefix && self.toks[i - 1].end == t.start)
+            })
+            .map(|(_, t)| (t.start, t.end))
+            .filter(|&(a, _)| binder(a) == Some((b0, b1)))
+            .collect();
+        Some(Rename { name, global: false, sites })
+    }
+}
+
+/// The change that puts NEW at every site (char ranges, in order) of
+/// TEXT, with `p` carried along.
+pub fn rename_change(text: &str, sites: &[(usize, usize)], new: &str, p: usize) -> Change {
+    let chars: Vec<char> = text.chars().collect();
+    let (Some(&(first, _)), Some(&(_, last))) = (sites.first(), sites.last()) else {
+        return Change { start: p, end: p, text: String::new(), point: p };
+    };
+    let mut out = String::new();
+    let mut at = first;
+    let mut point = p;
+    let n = new.chars().count() as isize;
+    for &(s, e) in sites {
+        out.extend(&chars[at..s]);
+        out.push_str(new);
+        if e <= p {
+            // A site before the point moves it by the length difference.
+            point = (point as isize + n - (e - s) as isize) as usize;
+        } else if s < p {
+            // The point inside the renamed site: to its start.
+            point -= p - s;
+        }
+        at = e;
+    }
+    Change { start: first, end: last, text: out, point }
+}
+
 /// M-;: comment lines `l0..=l1` with `;; ` at their shared indent, or —
 /// when every non-blank one is already a comment — take the comment off.
 /// `lines` is the whole buffer; the answer is the new text of those lines.
@@ -590,6 +881,54 @@ mod tests {
         assert_eq!(run("(f |())", Sexps::delete_forward).unwrap(), "(f |)");
         assert_eq!(run("(f |(x))", Sexps::delete_forward).unwrap(), "(f (|x))");
         assert_eq!(run("(f x|)", Sexps::delete_forward).unwrap(), "(f x)|");
+    }
+
+    #[test]
+    fn form_and_toplevel_at() {
+        let s = Sexps::new("(define (f x)\n  (when x (g x)))\n(h)");
+        assert_eq!(s.form_at(16), Some((16, 30)), "at a list's opener, that list");
+        assert_eq!(s.form_at(22), Some((16, 30)), "inside it, the list around");
+        assert_eq!(s.toplevel_at(25), Some((0, 31)));
+        assert_eq!(s.toplevel_at(32), Some((32, 35)));
+    }
+
+    #[test]
+    fn pretty_breaks_what_does_not_fit() {
+        assert_eq!(pretty("(f   a  b)", 40), "(f a b)");
+        let p = pretty("(let ((tmp x) (other (long-call y z))) (set! x y) (set! y tmp))", 30);
+        assert_eq!(p, "(let ((tmp x)\n      (other (long-call y z)))\n  (set! x y)\n  (set! y tmp))");
+        let q = pretty("(some-function argument-one argument-two argument-three)", 30);
+        assert_eq!(q, "(some-function argument-one\n               argument-two\n               argument-three)");
+    }
+
+    fn renamed(src: &str, new: &str) -> Option<(bool, String)> {
+        let p = src.chars().position(|c| c == '|').unwrap();
+        let text: String = src.chars().filter(|&c| c != '|').collect();
+        let r = Sexps::new(&text).rename_at(&text, p)?;
+        let c = rename_change(&text, &r.sites, new, p);
+        let chars: Vec<char> = text.chars().collect();
+        let mut out: String = chars[..c.start].iter().collect();
+        out.push_str(&c.text);
+        out.extend(&chars[c.end..]);
+        Some((r.global, out))
+    }
+
+    #[test]
+    fn rename_follows_scope() {
+        // A local: only the form that binds it, and not a shadowing one.
+        let src = "(define (f |x) (let ((y x)) (+ x y (let ((x 2)) x))))\n(define (g x) x)";
+        assert_eq!(
+            renamed(src, "n").unwrap(),
+            (false, "(define (f n) (let ((y n)) (+ n y (let ((x 2)) x))))\n(define (g x) x)".into())
+        );
+        // A top-level name: its definition and every free use, not a local
+        // that shadows it or the symbol quoted.
+        let src = "(define (sl|ab w) w)\n(slab 1)\n(let ((slab 2)) slab)\n'slab\n(map slab xs)";
+        assert_eq!(
+            renamed(src, "plate").unwrap(),
+            (true, "(define (plate w) w)\n(plate 1)\n(let ((slab 2)) slab)\n'slab\n(map plate xs)".into())
+        );
+        assert_eq!(renamed("(f \"te|xt\")", "z"), None, "not on a name");
     }
 
     #[test]

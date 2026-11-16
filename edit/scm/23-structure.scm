@@ -93,6 +93,13 @@
   (if c |(do-it) #f) becomes (do-it)  (M-r)."
   (sexp-run "raise" "no expression at the point inside a list"))
 
+(define (indent-defun)
+  "Re-indent every line of the top-level form the point is in — or, with
+  a selection, every selected line (in any language) — to the column the
+  newline would give it (C-M-q). A line that starts inside a string keeps
+  its own indentation."
+  (sexp-run "indent-defun" "no form at the point"))
+
 ; ── Comments ───────────────────────────────────────────────────────────────
 (define (comment-dwim)
   "Comment the selected lines — or the point's line — with ;; at their
@@ -142,4 +149,5 @@
     ("M-s" splice-sexp)
     ("M-r" raise-sexp)
     ("M-;" comment-dwim)
-    ("C-M-;" comment-sexp))))
+    ("C-M-;" comment-sexp)
+    ("C-M-q" indent-defun))))

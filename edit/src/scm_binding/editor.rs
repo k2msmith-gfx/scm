@@ -167,7 +167,45 @@ prim! {
             crate::editorpane::SexpOut::NotLisp => Out::Num(0.0),
             crate::editorpane::SexpOut::Done => Out::Num(1.0),
             crate::editorpane::SexpOut::Killed(text) => Out::Text(text),
+            crate::editorpane::SexpOut::Text(text) => Out::Text(text),
         }
+    }
+}
+
+prim! {
+    /// `(%editor-rename-info id)` — the name at the point and what renaming
+    /// it would touch here: `(name global? count)`, global? 1 for a
+    /// top-level name; #f off a name.
+    "%editor-rename-info", fn editor_rename_info(id: num) {
+        match crate::editorpane::rename_info(id as u32) {
+            Some((name, global, n)) => Out::Many(vec![Out::Text(name), Out::Num(if global { 1.0 } else { 0.0 }), Out::Num(n as f64)]),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
+    /// `(%editor-rename id new)` — rename the name at the point (a local in
+    /// its binding form, a top-level name throughout the buffer); answers
+    /// how many places changed.
+    "%editor-rename", fn editor_rename(id: num, new: opt_text) {
+        Out::Num(crate::editorpane::rename_at_point(id as u32, &new.unwrap_or_default()) as f64)
+    }
+}
+
+prim! {
+    /// `(%editor-rename-global id name new)` — rename the top-level NAME
+    /// throughout the active buffer; answers how many places changed.
+    "%editor-rename-global", fn editor_rename_global(id: num, name: opt_text, new: opt_text) {
+        Out::Num(crate::editorpane::rename_global(id as u32, &name.unwrap_or_default(), &new.unwrap_or_default()) as f64)
+    }
+}
+
+prim! {
+    /// `(%pretty text width)` — TEXT's forms laid out Lisp-style to fit
+    /// WIDTH columns (a macro expansion comes back on one line).
+    "%pretty", fn pretty(text: opt_text, width: num) {
+        Out::Text(crate::sexp::pretty(&text.unwrap_or_default(), width.max(20.0) as usize))
     }
 }
 
@@ -711,6 +749,10 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         editor_set_line_numbers::install(interp)?,
         editor_sexp::install(interp)?,
         editor_set_pairing::install(interp)?,
+        editor_rename_info::install(interp)?,
+        editor_rename::install(interp)?,
+        editor_rename_global::install(interp)?,
+        pretty::install(interp)?,
         editor_vi_mode::install(interp)?,
         editor_goto_line::install(interp)?,
         editor_select_line::install(interp)?,

@@ -170,7 +170,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust", "21-ray", "22-warnings", "23-structure"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust", "21-ray", "22-warnings", "23-structure", "24-refactor"];
 
 /// Where [`SHELL`]'s files are in the tree this binary was built from. They
 /// are read from there while it exists, so an edit to one takes effect
@@ -208,6 +208,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("21-ray", include_str!("../scm/21-ray.scm")),
     ("22-warnings", include_str!("../scm/22-warnings.scm")),
     ("23-structure", include_str!("../scm/23-structure.scm")),
+    ("24-refactor", include_str!("../scm/24-refactor.scm")),
     ("host/prelude", include_str!("../scm/host/prelude.scm")),
     ("host/standalone", include_str!("../scm/host/standalone.scm")),
     ("host/themes", include_str!("../scm/host/themes.scm")),

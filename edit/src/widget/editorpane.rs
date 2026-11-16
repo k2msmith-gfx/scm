@@ -1778,6 +1778,8 @@ pub enum SexpOut {
     Done,
     /// Deleted text, for the clipboard (the kills).
     Killed(String),
+    /// A question's answer (`form-text`).
+    Text(String),
 }
 
 /// A structural command on the active buffer, by name: the motions
@@ -1792,8 +1794,63 @@ pub fn sexp(id: u32, op: &str) -> SexpOut {
         if pane.md.is_some() || pane.image.is_some() || pane.video.is_some() {
             return SexpOut::Nothing;
         }
+        // C-M-q: re-indent the selected lines in any language; with no
+        // selection, the top-level form — a Lisp idea.
+        if op == "indent-defun" {
+            let lines_of = |e: &Editor<'static>, s: usize, t: usize| (cursor_at(e, s).line, cursor_at(e, t).line);
+            let (text, p) = text_and_point(&pane.editor);
+            let sx = crate::sexp::Sexps::new(&text);
+            let (l0, l1, first) = match pane.editor.selection_bounds() {
+                Some((a, b)) => (a.line, if b.index == 0 && b.line > a.line { b.line - 1 } else { b.line }, true),
+                None if lispy(pane.lang) => match sx.toplevel_at(p) {
+                    Some((s0, s1)) => {
+                        let (a, b) = lines_of(&pane.editor, s0, s1);
+                        (a, b, false)
+                    }
+                    None => return SexpOut::Nothing,
+                },
+                None => return SexpOut::NotLisp,
+            };
+            let skip = if lispy(pane.lang) { sx.lines_in_text() } else { Vec::new() };
+            let lang = pane.lang;
+            let c = pane.editor.cursor();
+            let mut moved_cursor = c.index as isize;
+            pane.discrete(|e| {
+                e.set_selection(Selection::None);
+                for l in l0..=l1 {
+                    if (l == l0 && !first) || skip.contains(&l) {
+                        continue;
+                    }
+                    let (target, ws, blank) = e.with_buffer(|b| {
+                        let lines: Vec<&str> = b.lines.iter().map(|x| x.text()).collect();
+                        let line = lines.get(l).copied().unwrap_or("");
+                        let ws = line.len() - line.trim_start_matches([' ', '\t']).len();
+                        (lang.indent(&lines, l, 0), ws, line.trim().is_empty())
+                    });
+                    if blank || target == ws {
+                        continue;
+                    }
+                    e.delete_range(Cursor::new(l, 0), Cursor::new(l, ws));
+                    e.insert_at(Cursor::new(l, 0), &" ".repeat(target), None);
+                    if l == c.line {
+                        moved_cursor += target as isize - ws as isize;
+                    }
+                }
+                let len = e.with_buffer(|b| b.lines.get(c.line).map_or(0, |x| x.text().len()));
+                e.set_cursor(Cursor::new(c.line, (moved_cursor.max(0) as usize).min(len)));
+            });
+            pane.dirty = true;
+            return SexpOut::Done;
+        }
         if !lispy(pane.lang) {
             return SexpOut::NotLisp;
+        }
+        if op == "form-text" {
+            let (text, p) = text_and_point(&pane.editor);
+            return match crate::sexp::Sexps::new(&text).form_at(p) {
+                Some((a, b)) => SexpOut::Text(text.chars().skip(a).take(b - a).collect()),
+                None => SexpOut::Nothing,
+            };
         }
         if op == "comment-lines" {
             let (l0, l1) = match pane.editor.selection_bounds() {
@@ -1861,6 +1918,59 @@ pub fn sexp(id: u32, op: &str) -> SexpOut {
     });
     crate::host::mark_dirty_ui();
     out
+}
+
+/// What renaming the name at the point would change: its name, whether it
+/// is top-level (shared with other files), and how many places here.
+pub fn rename_info(id: u32) -> Option<(String, bool, usize)> {
+    with_pane(id, |_, pane, _| {
+        if !lispy(pane.lang) {
+            return None;
+        }
+        let (text, p) = text_and_point(&pane.editor);
+        let r = crate::sexp::Sexps::new(&text).rename_at(&text, p)?;
+        Some((r.name, r.global, r.sites.len()))
+    })
+}
+
+/// Rename the name at the point to NEW — a local in the form that binds
+/// it, a top-level name throughout this buffer — as one undo step.
+/// Answers how many places changed.
+pub fn rename_at_point(id: u32, new: &str) -> usize {
+    let n = with_pane(id, |_, pane, _| {
+        if !lispy(pane.lang) {
+            return 0;
+        }
+        let (text, p) = text_and_point(&pane.editor);
+        let Some(r) = crate::sexp::Sexps::new(&text).rename_at(&text, p) else { return 0 };
+        let c = crate::sexp::rename_change(&text, &r.sites, new, p);
+        pane.discrete(|e| apply_change(e, &c));
+        pane.dirty = true;
+        r.sites.len()
+    });
+    crate::host::mark_dirty_ui();
+    n
+}
+
+/// Rename the top-level NAME to NEW throughout the active buffer — another
+/// file's share of a rename — as one undo step. Answers how many places.
+pub fn rename_global(id: u32, name: &str, new: &str) -> usize {
+    let n = with_pane(id, |_, pane, _| {
+        if !lispy(pane.lang) {
+            return 0;
+        }
+        let (text, p) = text_and_point(&pane.editor);
+        let sites = crate::sexp::global_sites(&text, name);
+        if sites.is_empty() {
+            return 0;
+        }
+        let c = crate::sexp::rename_change(&text, &sites, new, p);
+        pane.discrete(|e| apply_change(e, &c));
+        pane.dirty = true;
+        sites.len()
+    });
+    crate::host::mark_dirty_ui();
+    n
 }
 
 /// One named edit action from the Scheme layer. `arg` carries insert text;
@@ -3915,6 +4025,31 @@ mod tests {
         act(id, "insert", Some("%"), 0.0, 0.0);
         assert_eq!(got(id), "|(a [b])", "and back");
         set_vi(false);
+    }
+
+    #[test]
+    fn indent_defun_reindents_the_form_and_leaves_strings_alone() {
+        set_vi(false);
+        let id = 999;
+        put(id, "|(define (f x)\n(let ((y 1))\n        (g \"a\n   b\"\n y)))\n(other)");
+        // The point in the middle of the form.
+        with_pane(id, |_, pane, _| pane.editor.set_cursor(Cursor::new(1, 3)));
+        assert!(matches!(sexp(id, "indent-defun"), SexpOut::Done));
+        // The column Enter gives: the innermost open paren's, plus two.
+        assert_eq!(text(id), "(define (f x)\n  (let ((y 1))\n    (g \"a\n   b\"\n      y)))\n(other)");
+        assert!(undo(id), "one undo step");
+        assert_eq!(text(id), "(define (f x)\n(let ((y 1))\n        (g \"a\n   b\"\n y)))\n(other)");
+        put(id, "(f |(g x) y)");
+        match sexp(id, "form-text") {
+            SexpOut::Text(t) => assert_eq!(t, "(g x)"),
+            _ => panic!("the form at the point"),
+        }
+        put(id, "(define (f |x) (+ x 1))\n(f 2)");
+        assert_eq!(rename_info(id), Some(("x".into(), false, 2)));
+        assert_eq!(rename_at_point(id, "n"), 2);
+        assert_eq!(text(id), "(define (f n) (+ n 1))\n(f 2)");
+        assert_eq!(rename_global(id, "f", "g"), 2);
+        assert_eq!(text(id), "(define (g n) (+ n 1))\n(g 2)");
     }
 
     /// Guile is Lisp: pairing and the commands work there, `#:keywords`

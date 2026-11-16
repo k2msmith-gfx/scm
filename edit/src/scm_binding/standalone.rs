@@ -397,6 +397,48 @@ mod tests {
         crate::editorpane::set_vi(false);
     }
 
+    /// Macroexpand at the point asks the buffer's backend and prints the
+    /// expansion in the REPL; a top-level rename reaches another file of the
+    /// checkout, opened as a buffer and left unsaved until C-x s.
+    #[test]
+    fn macroexpand_and_rename_across_files() {
+        app::resize(800, 600, 1.0);
+        crate::editorpane::set_vi(false);
+        let dir = std::env::temp_dir().join(format!("edit-refactor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.scm"), dir.join("b.scm"));
+        std::fs::write(&a, "(define (slab w) (* w 2))\n(slab 1)\n").unwrap();
+        std::fs::write(&b, "(display (slab 3))\n(let ((slab 0)) slab)\n").unwrap();
+        let (a, b) = (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned());
+        let mut s = Session::boot(None, std::slice::from_ref(&a)).expect("boots");
+        s.call("(run-in-editor-image)");
+        s.call(&format!("(%xref-index (list {}))", lit(&dir.to_string_lossy())));
+
+        // Macroexpand: a macro this image knows, the point on its call.
+        s.call("(define-syntax swap! (syntax-rules () ((_ x y) (let ((tmp x)) (set! x y) (set! y tmp)))))");
+        s.call("(%editor-set-text 1 \"(swap! p q)\")");
+        s.call("(%editor-act 1 \"buffer-start\")");
+        s.call("(macroexpand-1-at-point)");
+        let transcript: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+        assert!(transcript.iter().any(|l| l.contains("(let ((tmp p)) (set! p q) (set! q tmp))")), "{transcript:?}");
+
+        // Rename across files: a.scm's slab, the point on its definition.
+        s.call(&format!("(%editor-set-text 1 {})", lit(&std::fs::read_to_string(&a).unwrap())));
+        s.call("(%editor-act 1 \"buffer-start\")");
+        for _ in 0..9 {
+            s.call("(%editor-act 1 \"right\")");
+        }
+        s.call("(rename-top-level \"slab\" \"plate\")");
+        s.text("y");
+        s.key("return");
+        assert_eq!(crate::editorpane::text(1), "(define (plate w) (* w 2))\n(plate 1)\n");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "(display (slab 3))\n(let ((slab 0)) slab)\n", "unsaved until asked");
+        s.call("(save-some-buffers)");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "(display (plate 3))\n(let ((slab 0)) slab)\n", "the shadowing let kept its own");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The bundled themes load at boot and paint the host's colours: a
     /// named one, painted over :one-dark, and an unknown name changes nothing.
     #[test]
