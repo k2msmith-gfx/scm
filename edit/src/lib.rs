@@ -14,6 +14,7 @@
 //! [`lsp`] (E7).
 
 pub mod app;
+pub mod film;
 pub mod host;
 pub mod keys;
 pub mod language;

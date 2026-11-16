@@ -420,6 +420,12 @@ pub fn start_window_size(screen: Option<(f64, f64)>) -> (f64, f64) {
 /// screen filled is too big (Kevin, 2026-11-14).
 pub const START_MAXIMIZED: bool = cfg!(target_os = "linux");
 
+/// Where the strip's icons are, as last drawn — a film's pointer aims at
+/// them (`crate::film`).
+pub fn icon_rects() -> Vec<(Icon, Rect)> {
+    with(|s| s.icons.to_vec())
+}
+
 /// Which of the strip's icons a window point is on.
 pub fn icon_at(x: f64, y: f64) -> Option<Icon> {
     with(|s| s.icons.iter().find(|(_, r)| r.w > 0 && r.contains(x, y)).map(|(i, _)| *i))

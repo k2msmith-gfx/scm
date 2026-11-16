@@ -162,6 +162,7 @@ pub mod remote;
 pub mod standalone;
 mod term;
 mod text;
+pub(crate) mod film;
 mod warn;
 mod xref;
 

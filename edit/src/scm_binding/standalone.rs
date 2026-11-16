@@ -312,6 +312,12 @@ impl Session {
         }
     }
 
+    /// Take orders from a film script (`crate::film`): input to inject,
+    /// frames to save, captions.
+    pub fn film(&mut self) -> Result<(), String> {
+        super::film::install(&mut self.interp).map_err(|e| e.to_string())
+    }
+
     /// The value of `src`, written — for tests.
     pub fn eval_to_string(&mut self, src: &str) -> Result<String, String> {
         let v = self.interp.eval(src).map_err(|e| e.to_string())?;
