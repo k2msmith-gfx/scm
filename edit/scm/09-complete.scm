@@ -92,12 +92,21 @@
                       (complete ""))))
       (cons #t words)
       (cons #f (buffer-words (car (editor-text+point)))))
-    (cons #f (symbol-candidates))))
+    ; A Scheme buffer whose image runs elsewhere asks it: a name sent only
+    ; there is in its pool and not this one's. Busy with a send, it answers
+    ; nothing, and this image's pool stands in.
+    (cons #f (or (and-let* ((b (running-image-backend buf))
+                            (complete (backend-op b :complete))
+                            (words (complete ""))
+                            ((pair? words)))
+                   words)
+                 (symbol-candidates)))))
 
 (define (editor-candidates)
   "The completion pool: this image's bindings and the API's :keywords
-  (symbol-candidates), whatever buffer the editor is on. The caller ranks
-  it against what has been typed.
+  (symbol-candidates) — or, for a Scheme buffer whose sends go to another
+  process already running (a file's scm, a ray file's ray), that image's
+  names. The caller ranks it against what has been typed.
 
   It asked `%scm-complete` for a Scheme buffer while that was a second VM's
   door (modeler-port-plan M0); from inside the one image the door leads
@@ -196,7 +205,9 @@
     (when head
       (if-let ((b (non-scheme-backend (%editor-active-buffer (editor-pane-id)))))
         (when-let ((ask (backend-op b :eldoc))) (ask))
-        (let ((sig (signature-of head))) (when sig (echo sig)))))))
+        (let* ((b (running-image-backend (%editor-active-buffer (editor-pane-id))))
+               (sig ((or (and b (backend-op b :signature)) signature-of) head)))
+          (when sig (echo sig)))))))
 
 (define (editor-token-around text point)
   "The whole symbol token spanning POINT."

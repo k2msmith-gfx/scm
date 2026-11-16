@@ -783,6 +783,18 @@ mod tests {
             assert_eq!(s.eval_to_string("(%env-ref 'cube #f)").unwrap(), "#f", "not in the editor's image");
             assert!(name(&mut s).starts_with("\"scm at "), "{}", name(&mut s));
             assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"scm λ > \"", "the REPL says where it is");
+            // Completion and eldoc answer from that scm, where `cube` now is.
+            assert_eq!(
+                s.eval_to_string("(and (member \"cube\" (editor-candidates)) #t)").unwrap(),
+                "#t",
+                "a name sent to the file's scm completes"
+            );
+            s.call("(set! *editor-eldoc* #f) (%editor-goto-line 1 1)");
+            s.key("right");
+            s.key("right");
+            s.call("(editor-eldoc)");
+            let echoed = crate::textpane::lines(app::MINIBUFFER).into_iter().any(|(_, l)| l.contains("(cube x)"));
+            assert!(echoed, "its signature is echoed: {:?}", crate::textpane::lines(app::MINIBUFFER));
         }
         super::super::remote::close_all();
         let _ = std::fs::remove_dir_all(&dir);

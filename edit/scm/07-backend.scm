@@ -157,4 +157,21 @@ the host's choice."
                                        (%buffer-language (*pane-id* :editor) buf) #f)))
         (and f (f)))
       (*buffer-backend* buf)))
+; Which IMAGE a buffer's Scheme means, as a FORWARD HOOK: 'self (this
+; image), a remote connection, or #f for none — found without starting
+; anything. The warnings judge against it (22-warnings), and completion
+; and eldoc answer from it (09-complete). The standalone says
+; (host/standalone.scm): a ray file's ray, once it runs; a Scheme file's
+; scm, once it runs, else this image, which has everything plain scm has.
+; In the modeler every Scheme file runs here.
+(define *buffer-image* (lambda (buf) (and (buffer-path buf) 'self)))
+
+(define (running-image-backend buf)
+  "The backend of the other process BUF's Scheme runs in, when that is
+running — a Scheme file's scm, a ray file's ray — else #f, and this image
+answers. Completion and eldoc ask it, so a name sent there completes and
+shows its signature; nothing is started to ask."
+  (and-let* ((img (*buffer-image* buf))
+             ((not (eq? img 'self))))
+    (backend-of buf)))
 (define *after-send* (lambda () #f))

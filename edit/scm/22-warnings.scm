@@ -11,13 +11,9 @@
 
 (define *editor-warnings* #t)
 
-; Which image a buffer is judged against, as a FORWARD HOOK: 'self (this
-; image), a remote connection, or #f for none — no warnings, rather than
-; warnings against an image the code will not run in. The standalone says
-; (host/standalone.scm): a ray file's ray, once it runs; a Scheme file's
-; scm, once it runs, else this image, which has everything plain scm has.
-; In the modeler every Scheme file runs here.
-(define *buffer-image* (lambda (buf) (and (buffer-path buf) 'self)))
+; Which image a buffer is judged against: *buffer-image* (07-backend), the
+; one its completion and eldoc answer from too. #f judges nothing, rather
+; than against an image the code will not run in.
 
 (define (image-key img)
   (if (eq? img 'self) "self" (string-append "conn:" (number->string img))))
