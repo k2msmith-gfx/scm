@@ -20,6 +20,7 @@ pub mod keys;
 pub mod language;
 pub mod lsp;
 pub mod scm_binding;
+pub mod sexp;
 pub mod theme;
 pub mod wake;
 pub mod widget;

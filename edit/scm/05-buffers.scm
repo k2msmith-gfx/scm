@@ -451,6 +451,9 @@ acts only while the editor holds typing. Call it once the pane exists."
   ; M-. and M-, (10-xref): Emacs's xref keys, pane-local.
   (bind-key "M-." 'find-definition-at-point :editor)
   (bind-key "M-," 'go-back-from-definition :editor)
+  ; The structural keys, C-M-f and the rest (23-structure, loaded later
+  ; but bound by the time this runs).
+  (bind-structure-keys)
   :editor)
 
 (define (set-editor-vi on)

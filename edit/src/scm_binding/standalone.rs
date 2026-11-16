@@ -377,6 +377,26 @@ mod tests {
 
     /// The program without its window: boot the shell over the three panes,
     /// type a form, send it, save the buffer, and draw.
+    /// The structural keys reach their commands through the keymap, on the
+    /// editor, in vi's NORMAL mode as in Emacs typing.
+    #[test]
+    fn structural_keys_run_their_commands() {
+        app::resize(800, 600, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boots");
+        s.call("(focus-scene-editor)");
+        for vi in [false, true] {
+            crate::editorpane::set_vi(vi);
+            s.call("(%editor-set-text 1 \"(a b) c\")");
+            s.call("(%editor-act 1 \"buffer-start\")");
+            s.key("C-M-d");
+            s.key("C-S-0");
+            assert_eq!(crate::editorpane::text(1), "(a b c)", "C-M-d then C-) (vi {vi})");
+            s.key("M-;");
+            assert_eq!(crate::editorpane::text(1), ";; (a b c)", "M-; (vi {vi})");
+        }
+        crate::editorpane::set_vi(false);
+    }
+
     /// The bundled themes load at boot and paint the host's colours: a
     /// named one, painted over :one-dark, and an unknown name changes nothing.
     #[test]

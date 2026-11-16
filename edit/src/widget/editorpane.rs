@@ -1661,6 +1661,203 @@ impl<F: FnMut(i32, i32, u32, u32, Color)> Renderer for PaneRenderer<'_, F> {
     }
 }
 
+// ── Structural editing (Kevin, 2026-11-16) ──────────────────────────────────
+// crate::sexp answers in CHARACTERS over the whole text; these turn the
+// editor's (line, byte) cursors into those and back, and apply its Change as
+// one edit.
+
+thread_local! {
+    /// Brackets and quotes typed in pairs (`set-paren-pairing`): ON by default.
+    static PAIRING: Cell<bool> = const { Cell::new(true) };
+}
+
+pub fn set_pairing(on: bool) {
+    PAIRING.with(|p| p.set(on));
+}
+
+/// Does this buffer read as Lisp, where expressions are the unit?
+fn lispy(lang: &'static dyn language::Language) -> bool {
+    matches!(lang.name(), "scheme" | "guile")
+}
+
+/// The buffer's text as one string, and the cursor as a char offset in it.
+fn text_and_point(e: &Editor<'static>) -> (String, usize) {
+    let c = e.cursor();
+    e.with_buffer(|b| {
+        let mut text = String::new();
+        let mut point = 0;
+        for (i, l) in b.lines.iter().enumerate() {
+            if i > 0 {
+                text.push('\n');
+            }
+            if i == c.line {
+                point = text.chars().count() + l.text().get(..c.index).map_or(0, |t| t.chars().count());
+            }
+            text.push_str(l.text());
+        }
+        (text, point)
+    })
+}
+
+/// A char offset as the editor's cursor.
+fn cursor_at(e: &Editor<'static>, mut off: usize) -> Cursor {
+    e.with_buffer(|b| {
+        for (i, l) in b.lines.iter().enumerate() {
+            let n = l.text().chars().count();
+            if off <= n {
+                let byte = l.text().char_indices().nth(off).map_or(l.text().len(), |(b, _)| b);
+                return Cursor::new(i, byte);
+            }
+            off -= n + 1;
+        }
+        let last = b.lines.len().saturating_sub(1);
+        Cursor::new(last, b.lines.get(last).map_or(0, |l| l.text().len()))
+    })
+}
+
+/// Apply a structural Change: the range replaced, the cursor placed, any
+/// selection dropped.
+fn apply_change(e: &mut Editor<'static>, c: &crate::sexp::Change) {
+    let (a, b) = (cursor_at(e, c.start), cursor_at(e, c.end));
+    e.set_selection(Selection::None);
+    if a != b {
+        e.delete_range(a, b);
+    }
+    if !c.text.is_empty() {
+        e.insert_at(a, &c.text, None);
+    }
+    let at = cursor_at(e, c.point);
+    e.set_cursor(at);
+}
+
+/// A key typed in a Lisp buffer, kept balanced: true when it was handled.
+fn pair_typed(e: &mut Editor<'static>, lang: &'static dyn language::Language, ch: char) -> bool {
+    if !PAIRING.with(|p| p.get()) || !lispy(lang) || !matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"') {
+        return false;
+    }
+    if !matches!(e.selection(), Selection::None) {
+        return false;
+    }
+    let (text, p) = text_and_point(e);
+    match crate::sexp::Sexps::new(&text).type_char(p, ch) {
+        Some(c) => {
+            apply_change(e, &c);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Backspace (or, `forward`, delete) in a Lisp buffer, kept balanced:
+/// true when it was handled.
+fn pair_deleted(e: &mut Editor<'static>, lang: &'static dyn language::Language, forward: bool) -> bool {
+    if !PAIRING.with(|p| p.get()) || !lispy(lang) || !matches!(e.selection(), Selection::None) {
+        return false;
+    }
+    let (text, p) = text_and_point(e);
+    let near = if forward { text.chars().nth(p) } else { p.checked_sub(1).and_then(|q| text.chars().nth(q)) };
+    if !matches!(near, Some('(' | ')' | '[' | ']' | '{' | '}' | '"')) {
+        return false;
+    }
+    let s = crate::sexp::Sexps::new(&text);
+    match if forward { s.delete_forward(p) } else { s.backspace(p) } {
+        Some(c) => {
+            apply_change(e, &c);
+            true
+        }
+        None => false,
+    }
+}
+
+/// What a structural command did.
+pub enum SexpOut {
+    /// Nothing to do here (no expression, no list around the point).
+    Nothing,
+    Done,
+    /// Deleted text, for the clipboard (the kills).
+    Killed(String),
+}
+
+/// A structural command on the active buffer, by name: the motions
+/// `forward` `backward` `up` `up-forward` `down` `matching`, `mark` (select
+/// the next expression, or grow the selection by one), the kills
+/// `kill-forward` `kill-backward`, and the reshapes `transpose`
+/// `slurp-forward` `slurp-backward` `barf-forward` `barf-backward` `wrap`
+/// `splice` `raise` `comment-datum` `comment-lines`. A motion with a
+/// selection extends it.
+pub fn sexp(id: u32, op: &str) -> SexpOut {
+    let out = with_pane(id, |_, pane, _| {
+        if pane.md.is_some() || pane.image.is_some() || pane.video.is_some() {
+            return SexpOut::Nothing;
+        }
+        if op == "comment-lines" {
+            let (l0, l1) = match pane.editor.selection_bounds() {
+                Some((a, b)) => (a.line, if b.index == 0 && b.line > a.line { b.line - 1 } else { b.line }),
+                None => (pane.editor.cursor().line, pane.editor.cursor().line),
+            };
+            let c = pane.editor.cursor();
+            let (new, old_end) = pane.editor.with_buffer(|b| {
+                let lines: Vec<&str> = b.lines.iter().map(|l| l.text()).collect();
+                (crate::sexp::toggle_line_comments(&lines, l0, l1), lines[l1.min(lines.len() - 1)].len())
+            });
+            pane.discrete(|e| {
+                e.set_selection(Selection::None);
+                e.delete_range(Cursor::new(l0, 0), Cursor::new(l1, old_end));
+                e.insert_at(Cursor::new(l0, 0), &new.join("\n"), None);
+                let len = e.with_buffer(|b| b.lines.get(c.line).map_or(0, |l| l.text().len()));
+                e.set_cursor(Cursor::new(c.line, c.index.min(len)));
+            });
+            pane.dirty = true;
+            return SexpOut::Done;
+        }
+        let (text, p) = text_and_point(&pane.editor);
+        let s = crate::sexp::Sexps::new(&text);
+        let moved = |pane: &mut Doc, to: Option<usize>| match to {
+            Some(q) => {
+                pane.close_insert_run();
+                let at = cursor_at(&pane.editor, q);
+                pane.editor.set_cursor(at);
+                SexpOut::Done
+            }
+            None => SexpOut::Nothing,
+        };
+        let change = match op {
+            "forward" => return moved(pane, s.forward(p)),
+            "backward" => return moved(pane, s.backward(p)),
+            "up" => return moved(pane, s.up(p)),
+            "up-forward" => return moved(pane, s.up_forward(p)),
+            "down" => return moved(pane, s.down(p)),
+            "matching" => return moved(pane, s.matching(p)),
+            "mark" => {
+                let Some(end) = s.forward(p) else { return SexpOut::Nothing };
+                if matches!(pane.editor.selection(), Selection::None) {
+                    pane.editor.set_selection(Selection::Normal(pane.editor.cursor()));
+                }
+                return moved(pane, Some(end));
+            }
+            "kill-forward" => s.kill_forward(p),
+            "kill-backward" => s.kill_backward(p),
+            "transpose" => s.transpose(p),
+            "slurp-forward" => s.slurp_forward(p),
+            "slurp-backward" => s.slurp_backward(p),
+            "barf-forward" => s.barf_forward(p),
+            "barf-backward" => s.barf_backward(p),
+            "wrap" => Some(s.wrap(p)),
+            "splice" => s.splice(p),
+            "raise" => s.raise(p),
+            "comment-datum" => s.toggle_datum_comment(p),
+            _ => None,
+        };
+        let Some(c) = change else { return SexpOut::Nothing };
+        let killed: String = text.chars().skip(c.start).take(c.end - c.start).collect();
+        pane.discrete(|e| apply_change(e, &c));
+        pane.dirty = true;
+        if op.starts_with("kill") { SexpOut::Killed(killed) } else { SexpOut::Done }
+    });
+    crate::host::mark_dirty_ui();
+    out
+}
+
 /// One named edit action from the Scheme layer. `arg` carries insert text;
 /// `x`/`y` are WINDOW coords for the mouse actions. Returns Some(text) for
 /// the actions that yield text (copy / cut / kill-eol — the Scheme side owns
@@ -1722,6 +1919,19 @@ pub fn act(id: u32, kind: &str, arg: Option<&str>, x: f64, y: f64) -> Option<Str
             let vikey = match kind {
                 "insert" => {
                     for ch in arg.unwrap_or_default().chars() {
+                        // `%`, which modit lacks: to the partner bracket, in
+                        // normal and visual modes with nothing pending.
+                        if ch == '%'
+                            && matches!(pane.vi.mode, ViMode::Normal | ViMode::Visual | ViMode::VisualLine)
+                            && pane.vi.cmd.to_string().is_empty()
+                        {
+                            let (text, p) = text_and_point(&pane.editor);
+                            if let Some(q) = crate::sexp::Sexps::new(&text).matching(p) {
+                                let at = cursor_at(&pane.editor, q);
+                                pane.editor.set_cursor(at);
+                            }
+                            continue;
+                        }
                         vi_feed(fs, pane, ViKey::Char(ch));
                     }
                     return None;
@@ -1776,6 +1986,16 @@ pub fn act(id: u32, kind: &str, arg: Option<&str>, x: f64, y: f64) -> Option<Str
                     pane.editor.start_change();
                     pane.insert_run = true;
                 }
+                // A bracket or quote typed in a Lisp buffer goes in paired,
+                // in the same typing run as the letters around it, so "(z)"
+                // still undoes as one.
+                let mut one = s.chars();
+                if let (Some(ch), None) = (one.next(), one.next())
+                    && pair_typed(&mut pane.editor, pane.lang, ch)
+                {
+                    pane.dirty = true;
+                    return None;
+                }
                 // Typing over a selection replaces it (every editor's rule).
                 pane.editor.delete_selection();
                 pane.editor.insert_string(s, None);
@@ -1826,11 +2046,21 @@ pub fn act(id: u32, kind: &str, arg: Option<&str>, x: f64, y: f64) -> Option<Str
                 None
             }
             "backspace" => {
-                pane.discrete(|e| e.action(fs, Action::Backspace));
+                let lang = pane.lang;
+                pane.discrete(|e| {
+                    if !pair_deleted(e, lang, false) {
+                        e.action(fs, Action::Backspace);
+                    }
+                });
                 None
             }
             "delete" => {
-                pane.discrete(|e| e.action(fs, Action::Delete));
+                let lang = pane.lang;
+                pane.discrete(|e| {
+                    if !pair_deleted(e, lang, true) {
+                        e.action(fs, Action::Delete);
+                    }
+                });
                 None
             }
             "left" => motion(pane, fs, Motion::Left),
@@ -2268,6 +2498,9 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
     let Doc { editor, vi, registers, search, undo, redo, dirty, owners, lang, .. } = pane;
     editor.start_change();
     let has_selection = !matches!(editor.selection(), Selection::None);
+    // Typing in INSERT mode pairs brackets as Emacs-style typing does.
+    let inserting = matches!(vi.mode, ViMode::Insert);
+    let lang_now = *lang;
     vi.parse(key, has_selection, |event| {
         let action = match event {
             ViEvent::AutoIndent => {
@@ -2291,7 +2524,12 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
                 editor.set_cursor(Cursor::new(c.line, index));
                 return;
             }
-            ViEvent::Backspace => Action::Backspace,
+            ViEvent::Backspace => {
+                if inserting && pair_deleted(editor, lang_now, false) {
+                    return;
+                }
+                Action::Backspace
+            }
             ViEvent::BackspaceInLine => {
                 if editor.cursor().index > 0 {
                     Action::Backspace
@@ -2344,7 +2582,12 @@ fn vi_feed(fs: &mut FontSystem, pane: &mut Doc, key: ViKey) {
                 }
             }
             ViEvent::Escape => Action::Escape,
-            ViEvent::Insert(c) => Action::Insert(c),
+            ViEvent::Insert(c) => {
+                if inserting && pair_typed(editor, lang_now, c) {
+                    return;
+                }
+                Action::Insert(c)
+            }
             ViEvent::NewLine => {
                 // Our lisp Enter: newline + innermost-paren indent.
                 editor.delete_selection();
@@ -3601,6 +3844,100 @@ mod tests {
     /// Copy, cut and a drag on a buffer that never had text: nothing to
     /// take, and no panic (cosmic-text indexes the first line, and a fresh
     /// buffer has none).
+    /// Structural editing through the editor: a buffer written with `|` for
+    /// the point, read back the same way.
+    fn put(id: u32, src: &str) {
+        let p = src.chars().position(|c| c == '|').unwrap();
+        set_text(id, &src.replace('|', ""));
+        with_pane(id, |_, pane, _| {
+            let at = cursor_at(&pane.editor, p);
+            pane.editor.set_cursor(at);
+        });
+    }
+
+    fn got(id: u32) -> String {
+        with_pane(id, |_, pane, _| {
+            let (text, p) = text_and_point(&pane.editor);
+            let mut chars: Vec<char> = text.chars().collect();
+            chars.insert(p, '|');
+            chars.into_iter().collect()
+        })
+    }
+
+    #[test]
+    fn brackets_pair_as_they_are_typed_and_deleted() {
+        set_vi(false);
+        let id = 995;
+        put(id, "(define x |)");
+        for ch in "(f \"a\")".chars() {
+            act(id, "insert", Some(&ch.to_string()), 0.0, 0.0);
+        }
+        assert_eq!(got(id), "(define x (f \"a\")|)", "typed whole, nothing doubled");
+        act(id, "insert", Some(")"), 0.0, 0.0);
+        assert_eq!(got(id), "(define x (f \"a\"))|", "a closer steps out");
+        assert!(undo(id));
+        assert_eq!(got(id).replace('|', ""), "(define x )", "the typing undoes as one run");
+        put(id, "(f (|))");
+        act(id, "backspace", None, 0.0, 0.0);
+        assert_eq!(got(id), "(f |)", "an empty pair goes whole");
+        act(id, "backspace", None, 0.0, 0.0);
+        assert_eq!(got(id), "(f|)", "an ordinary space is an ordinary backspace");
+        set_pairing(false);
+        put(id, "(f |)");
+        act(id, "insert", Some("("), 0.0, 0.0);
+        assert_eq!(got(id), "(f (|)", "pairing off types one");
+        set_pairing(true);
+        // A paste is never changed.
+        put(id, "|");
+        act(id, "insert", Some("(a"), 0.0, 0.0);
+        assert_eq!(got(id), "(a|");
+    }
+
+    #[test]
+    fn vi_insert_mode_pairs_and_percent_jumps() {
+        set_vi(true);
+        let id = 996;
+        put(id, "(a |b)");
+        act(id, "insert", Some("i"), 0.0, 0.0);
+        act(id, "insert", Some("("), 0.0, 0.0);
+        assert_eq!(got(id), "(a (|)b)", "INSERT mode pairs");
+        act(id, "backspace", None, 0.0, 0.0);
+        assert_eq!(got(id), "(a |b)");
+        act(id, "escape", None, 0.0, 0.0);
+        put(id, "|(a [b])");
+        act(id, "insert", Some("%"), 0.0, 0.0);
+        assert_eq!(got(id), "(a [b]|)", "% to the partner");
+        act(id, "insert", Some("%"), 0.0, 0.0);
+        assert_eq!(got(id), "|(a [b])", "and back");
+        set_vi(false);
+    }
+
+    #[test]
+    fn a_reshape_is_one_undo_and_a_kill_hands_back_its_text() {
+        set_vi(false);
+        let id = 997;
+        put(id, "(a |b) c d");
+        assert!(matches!(sexp(id, "slurp-forward"), SexpOut::Done));
+        assert_eq!(got(id), "(a |b c) d");
+        assert!(undo(id));
+        assert_eq!(got(id).replace('|', ""), "(a b) c d");
+        put(id, "(a| (b c) d)");
+        match sexp(id, "kill-forward") {
+            SexpOut::Killed(t) => assert_eq!(t, " (b c)"),
+            _ => panic!("a kill hands back its text"),
+        }
+        assert_eq!(got(id), "(a| d)");
+        put(id, "(a b|)");
+        assert!(matches!(sexp(id, "forward"), SexpOut::Nothing), "nothing after b");
+        put(id, "|(a) (b)");
+        sexp(id, "mark");
+        sexp(id, "mark");
+        assert_eq!(act(id, "copy", None, 0.0, 0.0).as_deref(), Some("(a) (b)"), "mark grows by one");
+        put(id, "  (g |x)");
+        sexp(id, "comment-lines");
+        assert_eq!(text(id), "  ;; (g x)");
+    }
+
     /// The line numbers take a column on the left, and a click still lands
     /// on the character under it — with the column, without it, and with
     /// a buffer long enough to widen it.

@@ -157,6 +157,28 @@ prim! {
 }
 
 prim! {
+    /// `(%editor-sexp id op)` — a structural command on pane ID's buffer
+    /// (`crate::editorpane::sexp` names them): #f when there was nothing to
+    /// do, the deleted text for a kill, else 1.
+    "%editor-sexp", fn editor_sexp(id: num, op: opt_text) {
+        match crate::editorpane::sexp(id as u32, &op.unwrap_or_default()) {
+            crate::editorpane::SexpOut::Nothing => Out::Nil,
+            crate::editorpane::SexpOut::Done => Out::Num(1.0),
+            crate::editorpane::SexpOut::Killed(text) => Out::Text(text),
+        }
+    }
+}
+
+prim! {
+    /// `(%editor-set-pairing on)` — type brackets and quotes in pairs in a
+    /// Lisp buffer, and delete them that way (on by default).
+    "%editor-set-pairing", fn editor_set_pairing(a0: num) {
+        crate::editorpane::set_pairing(a0 != 0.0);
+        Out::Nil
+    }
+}
+
+prim! {
     /// `(%editor-set-line-numbers mode)` — the editor's line numbers: 0 off,
     /// 1 each line's own number, 2 relative to the cursor's line.
     "%editor-set-line-numbers", fn editor_set_line_numbers(a0: num) {
@@ -685,6 +707,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         buffer_language::install(interp)?,
         editor_set_vi::install(interp)?,
         editor_set_line_numbers::install(interp)?,
+        editor_sexp::install(interp)?,
+        editor_set_pairing::install(interp)?,
         editor_vi_mode::install(interp)?,
         editor_goto_line::install(interp)?,
         editor_select_line::install(interp)?,
