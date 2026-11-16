@@ -1276,6 +1276,13 @@ mod tests {
         typed(&mut s, "");
         assert_eq!(cur(), (0, 7), "?: backward, an empty answer the last search");
         s.text("q");
+        // An armed prefix takes its key before vi does: the n of M-g n.
+        s.call("(define *got* #f) (bind-key \"C-c y n\" (lambda () (set! *got* #t) #t))");
+        s.key("C-c");
+        s.text("y");
+        s.text("n");
+        assert_eq!(s.eval_to_string("*got*").unwrap(), "#t", "the prefix's binding ran");
+        assert_eq!(cur(), (0, 7), "and the search did not step");
 
         // :s on this line, :%s on all of them.
         let ex = |s: &mut Session, cmd: &str| s.call(&format!("(editor-ex-command {})", lit(cmd)));

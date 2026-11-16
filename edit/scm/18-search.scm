@@ -391,10 +391,13 @@
   (and (editor-typing?) (equal? (%editor-vi-mode (editor-pane-id)) "NORMAL")))
 
 ; Above the editor's own text handler (09-complete's, 30), which takes every
-; key the editor is typed.
+; key the editor is typed — and below an armed prefix, which that handler
+; finishes: the n of M-g n is the diagnostics', not a search's (found
+; filming the demo, 2026-11-15).
 (add-handler *text-handlers* 35 :vi-search
   (lambda (s)
     (and (vi-normal?)
+         (not *pending-keymap*)
          (cond ((equal? s "/") (search-prompt #t #t) #t)
                ((equal? s "?") (search-prompt #f #t) #t)
                ((and (equal? s "n") *search-last*) (search-step *search-last* #t) #t)

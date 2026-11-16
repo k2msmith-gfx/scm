@@ -2995,7 +2995,8 @@ fn draw_video(
 /// ("Rust", or "Scheme (ray)" with its dialect; not for markdown, which is
 /// read, not edited), how the server
 /// watching it is ("rust-analyzer indexing (30%)"), how many warnings it
-/// has (E8), and where text that will not read is — so a mark scrolled out of view is still found (M-g n
+/// has (E8), and where text that will not read is (in another language,
+/// where its first error is) — so a mark scrolled out of view is still found (M-g n
 /// goes there). A form left open does not say: it is what typing looks
 /// like.
 fn modeline_left(doc: &Doc, diags: &[language::Diagnostic]) -> String {
@@ -3012,8 +3013,11 @@ fn modeline_left(doc: &Doc, diags: &[language::Diagnostic]) -> String {
     if let Some(mode) = watched_mode(doc) {
         left = format!("{left} · {mode}");
     }
+    // A Lisp's error is its reader's; another language's is its server's
+    // (rust-analyzer's type error), which reads fine.
     if let Some(d) = diags.iter().find(|d| d.is_error()) {
-        left = format!("{left} · unreadable at line {}", d.start.0 + 1);
+        let what = if matches!(doc.lang.name(), "scheme" | "guile") { "unreadable" } else { "error" };
+        left = format!("{left} · {what} at line {}", d.start.0 + 1);
     }
     // Warnings are counted, not placed: M-g n goes to them.
     match diags.iter().filter(|d| d.severity == language::Severity::Warning).count() {
@@ -3762,7 +3766,8 @@ mod tests {
         let unreadable = [language::Diagnostic { start: (2, 0), end: (2, 1), message: String::new(), severity: language::Severity::Error }];
         assert_eq!(
             with_pane(id, |_, pane, _| modeline_left(pane, &unreadable)),
-            "m.rs · Rust · rust-server · unreadable at line 3"
+            "m.rs · Rust · rust-server · error at line 3",
+            "a Rust error is a compiler's, not a reader's"
         );
         let warned = [
             language::Diagnostic { start: (0, 0), end: (0, 1), message: String::new(), severity: language::Severity::Warning },

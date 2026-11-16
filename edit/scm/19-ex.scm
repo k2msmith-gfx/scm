@@ -225,6 +225,7 @@
 (add-handler *text-handlers* 36 :vi-ex
   (lambda (s)
     (and (vi-normal?)
+         (not *pending-keymap*)   ; an armed prefix's key (18-search's note)
          (cond (*vi-z*
                  (set! *vi-z* #f)
                  (cond ((equal? s "Z") (ex-run "x") #t)
