@@ -349,6 +349,124 @@ struct State {
     /// default; `set-text-font` swaps both).
     family: String,
     panes: HashMap<u32, PaneState>,
+    /// Screen rows already drawn, by what they look like.
+    rows: RowCache,
+}
+
+// ── The row cache (Kevin, 2026-11-16) ──────────────────────────────────────
+// A frame redrew every glyph on screen pixel by pixel — 5.6 ms at 2x before
+// the glyph policy moved out of the pixel loop, 2.5 ms after — while a key
+// changes a row or two. So each screen row of text is drawn once, over the
+// editor's background, and kept under a hash of everything that decides its
+// pixels: each glyph's raster key, place and colour, and the frame's
+// background, ink and glyph policy. A frame copies its rows; a row whose key
+// is new (an edited line, one scrolled into view) is drawn first. A row the
+// selection touches, and a markdown buffer's (underlines), draw as before.
+
+/// One screen row of text, drawn over the background from the row's top.
+struct RowImage {
+    w: u32,
+    h: u32,
+    px: Vec<u32>,
+    /// The frame that last showed it.
+    used: u64,
+}
+
+#[derive(Default)]
+struct RowCache {
+    rows: HashMap<u64, RowImage>,
+    frame: u64,
+    /// Off: every row draws as it did before the cache (the test of it).
+    off: bool,
+}
+
+/// Rows kept: a few screens' worth, so scrolling back finds them.
+const ROW_CACHE: usize = 600;
+
+/// The key of a row whose top is at `top`: FRAME (what the whole frame
+/// shares) and each glyph as it will rasterize.
+fn row_key(frame: u64, run: &cosmic_text::LayoutRun, top: f32, h: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut s = std::collections::hash_map::DefaultHasher::new();
+    frame.hash(&mut s);
+    h.hash(&mut s);
+    (run.line_y - top).to_bits().hash(&mut s);
+    for g in run.glyphs {
+        let pg = g.physical((0., run.line_y - top), 1.0);
+        pg.cache_key.hash(&mut s);
+        pg.x.hash(&mut s);
+        pg.y.hash(&mut s);
+        g.color_opt.map(|c| c.0).hash(&mut s);
+    }
+    s.finish()
+}
+
+/// Draw a row's glyphs into a fresh image over `bg`.
+fn render_row(
+    font_system: &mut FontSystem,
+    cache: &mut SwashCache,
+    policy: GlyphPolicy,
+    run: &cosmic_text::LayoutRun,
+    top: f32,
+    h: u32,
+    bg: u32,
+    text_color: Color,
+) -> RowImage {
+    // Room past the last advance for a glyph's overhang.
+    let w = ((run.line_w + 2.0 * run.line_height).ceil() as u32).max(1);
+    let mut px = vec![bg; (w * h) as usize];
+    let mut r = PaneRenderer {
+        font_system,
+        cache,
+        policy,
+        callback: |x: i32, y: i32, ww: u32, hh: u32, color: Color| {
+            for py in y.max(0)..(y + hh as i32).min(h as i32) {
+                for pxx in x.max(0)..(x + ww as i32).min(w as i32) {
+                    blend_px(&mut px[(py as u32 * w + pxx as u32) as usize], color);
+                }
+            }
+        },
+    };
+    for g in run.glyphs {
+        r.glyph(g.physical((0., run.line_y - top), 1.0), g.color_opt.unwrap_or(text_color));
+    }
+    RowImage { w, h, px, used: 0 }
+}
+
+/// Copy a row image to (`x`, `y`) in the frame, inside the clip.
+fn blit_row(fb: &mut Framebuffer, img: &RowImage, x: i32, y: i32, clip: (i32, i32, i32, i32)) {
+    let (cx0, cy0, cx1, cy1) = clip;
+    let x0 = x.max(cx0).max(0);
+    let x1 = (x + img.w as i32).min(cx1).min(fb.width as i32);
+    if x0 >= x1 {
+        return;
+    }
+    for r in 0..img.h as i32 {
+        let py = y + r;
+        if py < cy0.max(0) || py >= cy1.min(fb.height as i32) {
+            continue;
+        }
+        let src = (r as u32 * img.w) as usize + (x0 - x) as usize;
+        let dst = (py as u32 * fb.width) as usize + x0 as usize;
+        let n = (x1 - x0) as usize;
+        fb.pixels[dst..dst + n].copy_from_slice(&img.px[src..src + n]);
+    }
+}
+
+/// Blend a rectangle (in buffer coordinates, `ox`/`oy` its origin) into the
+/// frame, inside the clip.
+fn blend_rect(fb: &mut Framebuffer, x: i32, y: i32, w: u32, h: u32, color: Color, clip: (i32, i32, i32, i32)) {
+    let (cx0, cy0, cx1, cy1) = clip;
+    let x0 = x.max(cx0).max(0);
+    let y0 = y.max(cy0).max(0);
+    let x1 = (x + w as i32).min(cx1).min(fb.width as i32);
+    let y1 = (y + h as i32).min(cy1).min(fb.height as i32);
+    for py in y0..y1 {
+        let row = py as u32 * fb.width;
+        for px_ in x0..x1 {
+            blend_px(&mut fb.pixels[(row + px_ as u32) as usize], color);
+        }
+    }
 }
 
 thread_local! {
@@ -371,6 +489,7 @@ fn build_state(font_data: Vec<u8>) -> State {
         cache: SwashCache::new(),
         family,
         panes: HashMap::new(),
+        rows: RowCache::default(),
     }
 }
 
@@ -1629,6 +1748,29 @@ struct PaneRenderer<'a, F: FnMut(i32, i32, u32, u32, Color)> {
     font_system: &'a mut FontSystem,
     cache: &'a mut SwashCache,
     callback: F,
+    /// The glyph policy, read once per frame rather than per pixel: the
+    /// mode behind them asks the host for its scale, and the weight curve
+    /// is a `powf` — per pixel, they were most of a frame (2026-11-16).
+    policy: GlyphPolicy,
+}
+
+/// How glyphs rasterize this frame: `crate::text`'s mode, resolved.
+#[derive(Clone, Copy)]
+struct GlyphPolicy {
+    hinting: bool,
+    subpixel: bool,
+    /// Coverage through the weight curve, by coverage byte.
+    weight: [u8; 256],
+}
+
+impl GlyphPolicy {
+    fn now() -> GlyphPolicy {
+        let mut weight = [0u8; 256];
+        for (a, w) in weight.iter_mut().enumerate() {
+            *w = (crate::text::weigh(a as f32 / 255.0) * 255.0).round() as u8;
+        }
+        GlyphPolicy { hinting: crate::text::hinting(), subpixel: crate::text::subpixel(true), weight }
+    }
 }
 
 impl<F: FnMut(i32, i32, u32, u32, Color)> Renderer for PaneRenderer<'_, F> {
@@ -1639,10 +1781,10 @@ impl<F: FnMut(i32, i32, u32, u32, Color)> Renderer for PaneRenderer<'_, F> {
     fn glyph(&mut self, glyph: PhysicalGlyph, color: Color) {
         let mut key = glyph.cache_key;
         let mut x = glyph.x;
-        if !crate::text::hinting() {
+        if !self.policy.hinting {
             key.flags |= CacheKeyFlags::DISABLE_HINTING;
         }
-        if !crate::text::subpixel(true) {
+        if !self.policy.subpixel {
             // Round to the nearest whole pixel: the upper two bins belong to
             // the next one over.
             if matches!(key.x_bin, SubpixelBin::Two | SubpixelBin::Three) {
@@ -1651,12 +1793,12 @@ impl<F: FnMut(i32, i32, u32, u32, Color)> Renderer for PaneRenderer<'_, F> {
             key.x_bin = SubpixelBin::Zero;
         }
         let cb = &mut self.callback;
+        let weight = &self.policy.weight;
         self.cache.with_pixels(self.font_system, key, color, |dx, dy, pixel| {
             // Coverage arrives as the pixel's alpha; the weight curve (if any)
             // applies here, where both pipelines can share it.
             let (r, g, b, a) = pixel.as_rgba_tuple();
-            let a = (crate::text::weigh(a as f32 / 255.0) * 255.0).round() as u8;
-            cb(x + dx, glyph.y + dy, 1, 1, Color::rgba(r, g, b, a));
+            cb(x + dx, glyph.y + dy, 1, 1, Color::rgba(r, g, b, weight[a as usize]));
         });
     }
 }
@@ -3536,23 +3678,79 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
         // which shape_as_needed above and this shape_until_scroll guarantee —
         // the pair Editor::draw makes for itself.
         editor.with_buffer_mut(|b| b.shape_until_scroll(&mut state.font_system, false));
-        let mut renderer = PaneRenderer {
-            font_system: &mut state.font_system,
-            cache: &mut state.cache,
-            callback: |x: i32, y: i32, w: u32, h: u32, color: Color| {
-                let x0 = (x + ox as i32).max(cx0).max(0);
-                let y0 = (y + oy as i32).max(cy0).max(0);
-                let x1 = (x + ox as i32 + w as i32).min(cx1).min(fbw);
-                let y1 = (y + oy as i32 + h as i32).min(cy1).min(fbh);
-                for py in y0..y1 {
-                    let row = py as u32 * fb.width;
-                    for px_ in x0..x1 {
-                        blend_px(&mut fb.pixels[(row + px_ as u32) as usize], color);
+        let policy = GlyphPolicy::now();
+        let (oxi, oyi) = (ox as i32, oy as i32);
+        let clip = (cx0, cy0, cx1.min(fbw), cy1.min(fbh));
+        let bg = theme.editor_bg;
+        let rows = &mut state.rows;
+        rows.frame += 1;
+        let frame = rows.frame;
+        let frame_key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (bg, text_color.0, policy.hinting, policy.subpixel, policy.weight).hash(&mut h);
+            h.finish()
+        };
+        let cacheable = pane.md.is_none() && !rows.off;
+        let sel = editor.selection_bounds();
+        let (font_system, swash) = (&mut state.font_system, &mut state.cache);
+        editor.with_buffer(|buffer| {
+            for run in buffer.layout_runs() {
+                let selected = sel.is_some_and(|(a, b)| (a.line..=b.line).contains(&run.line_i));
+                if cacheable && !selected {
+                    let top = run.line_top.floor();
+                    let h = run.line_height.ceil() as u32;
+                    let key = row_key(frame_key, &run, top, h);
+                    let img = rows
+                        .rows
+                        .entry(key)
+                        .or_insert_with(|| render_row(font_system, swash, policy, &run, top, h, bg, text_color));
+                    img.used = frame;
+                    blit_row(fb, img, oxi, oyi + top as i32, clip);
+                    continue;
+                }
+                // As cosmic-text's Editor::render draws a row: the
+                // selection under the text, decorations, then the glyphs.
+                let mut r = PaneRenderer {
+                    font_system: &mut *font_system,
+                    cache: &mut *swash,
+                    policy,
+                    callback: |x: i32, y: i32, w: u32, h: u32, color: Color| {
+                        blend_rect(fb, x + oxi, y + oyi, w, h, color, clip)
+                    },
+                };
+                if let Some((start, end)) = sel.filter(|_| selected) {
+                    let highlights: Vec<(f32, f32)> = run.highlight(start, end).collect();
+                    let full = buffer.size().0.unwrap_or(0.0) as i32;
+                    if highlights.is_empty() && run.glyphs.is_empty() && end.line > run.line_i {
+                        r.rectangle(0, run.line_top as i32, full as u32, run.line_height as u32, selection_color);
+                    } else {
+                        let n = highlights.len();
+                        for (i, (x, w)) in highlights.into_iter().enumerate() {
+                            let (min, mut max) = (x as i32, (x + w) as i32);
+                            if i + 1 == n && end.line > run.line_i {
+                                max = full;
+                            }
+                            r.rectangle(min, run.line_top as i32, (max - min).max(0) as u32, run.line_height as u32, selection_color);
+                        }
                     }
                 }
-            },
-        };
-        editor.render(&mut renderer, text_color, cursor_color, selection_color, text_color);
+                cosmic_text::render_decoration(&mut r, &run, text_color);
+                for g in run.glyphs {
+                    r.glyph(g.physical((0., run.line_y), 1.0), g.color_opt.unwrap_or(text_color));
+                }
+            }
+        });
+        // The caret, over the text (cosmic-text drew it under its row's).
+        if cursor_color.a() != 0
+            && let Some((x, y)) = pane.editor.cursor_position()
+        {
+            let line_h = pane.editor.with_buffer(|b| b.metrics().line_height) as u32;
+            blend_rect(fb, x + oxi, y + oyi, 1, line_h, cursor_color, clip);
+        }
+        if rows.rows.len() > ROW_CACHE {
+            rows.rows.retain(|_, r| r.used + 1 >= frame);
+        }
 
         // The line numbers, right-aligned in the gutter on each line's first
         // row (a wrapped line's other rows have none), level with its text;
@@ -4025,6 +4223,39 @@ mod tests {
         act(id, "insert", Some("%"), 0.0, 0.0);
         assert_eq!(got(id), "|(a [b])", "and back");
         set_vi(false);
+    }
+
+    /// The row cache draws exactly what drawing every glyph drew: the same
+    /// frame from an empty cache, from a full one, and scrolled — rows put
+    /// back at new places — with a selection that skips the cache on its rows.
+    #[test]
+    fn the_row_cache_changes_no_pixel() {
+        set_vi(false);
+        let id = 1000;
+        let rect = Rect { x: 0, y: 0, w: 640, h: 300 };
+        crate::host::testing::set_rect(id, rect);
+        let src: String = (0..60)
+            .map(|i| format!("(define (f{i} x) \"str {i}\" ; note\n  (+ x {i} #t (g x)))\n"))
+            .collect();
+        set_text(id, &src);
+        put(id, &format!("{}|{}", &src[..40], &src[40..]));
+        with_pane(id, |_, pane, _| {
+            pane.editor.set_selection(Selection::Normal(Cursor::new(1, 2)));
+        });
+        let frame = |off: bool| {
+            with_state(|st| st.rows.off = off);
+            let mut fb = Framebuffer::new(640, 300);
+            draw(id, &mut fb, rect, false);
+            fb.pixels
+        };
+        let reference = frame(true);
+        assert_eq!(frame(false), reference, "drawn into an empty cache");
+        assert_eq!(frame(false), reference, "copied from a full one");
+        assert!(with_state(|st| !st.rows.rows.is_empty()), "rows were kept");
+        scroll(id, 3.0);
+        let reference = frame(true);
+        assert_eq!(frame(false), reference, "rows reused three lines up");
+        with_state(|st| st.rows.off = false);
     }
 
     #[test]

@@ -14,6 +14,7 @@
 //!         what they should before reading the times.
 //!     … -- FILE - W H SCALE --geometry   rows and columns on screen
 //!     … -- FILE - W H SCALE --idle       a frame with nothing changed
+//!     BENCH_NODRAW=1 …                    the keys alone, no frame
 //!
 //! `edit/tools/bench/run.sh FILE OUTDIR` runs this and the Neovim side
 //! (`nvim_bench.vim`, in a hidden 57×244 terminal — 1920×1080 at 2× in
@@ -84,7 +85,10 @@ fn main() {
             for part in k.split('\u{1}') {
                 press(s, part);
             }
-            app::draw(fb);
+            // BENCH_NODRAW: the key's own cost, the frame left out.
+            if std::env::var_os("BENCH_NODRAW").is_none() {
+                app::draw(fb);
+            }
             times.push(t.elapsed().as_secs_f64());
         }
         report.push_str(name);
