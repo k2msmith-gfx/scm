@@ -209,7 +209,10 @@
     (spit path (%editor-text eid))
     (%editor-mark-saved eid)
     (unless (and own (same-file? own path)) (register-buffer buf path))
-    (%xref-update (real-file path) (%text (%editor-text eid)))
+    ; The index is Scheme's (M-., M-?): a Rust file read as Scheme put its
+    ; words among a Scheme name's uses (2026-11-15, the demo film).
+    (unless (non-scheme-buffer? buf)
+      (%xref-update (real-file path) (%text (%editor-text eid))))
     (for-each (lambda (h) (h path)) *save-hooks*)
     (*show-status* path)
     (unless (*after-save* path own) (echo "wrote " path)))

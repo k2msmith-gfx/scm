@@ -689,6 +689,13 @@ mod tests {
         assert!(shown.contains("a.scm:2  (slab 1)") && shown.contains("b.scm:3  (map slab xs)"), "the list is up, each with its line: {shown}");
         let labels = s.eval_to_string("(map (lambda (st) (%list-ref/default st 1 #f)) (reference-sites \"slab\"))").unwrap();
         assert_eq!(labels, "(1 2)", "a.scm line 2, b.scm line 3");
+        // A Rust file saved is not read as Scheme into the index.
+        std::fs::write(dir.join("c.rs"), "fn slab() {}\n").unwrap();
+        s.key("C-g");
+        s.call(&format!("(open-path \"{d}/c.rs\") (save-buffer)"));
+        let wrote = crate::textpane::lines(app::MINIBUFFER).into_iter().any(|(_, l)| l.starts_with("wrote ") && l.ends_with("c.rs"));
+        assert!(wrote, "saved");
+        assert_eq!(s.eval_to_string("(length (reference-sites \"slab\"))").unwrap(), "2", "c.rs is not Scheme");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
