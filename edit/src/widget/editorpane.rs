@@ -1773,6 +1773,8 @@ fn pair_deleted(e: &mut Editor<'static>, lang: &'static dyn language::Language, 
 pub enum SexpOut {
     /// Nothing to do here (no expression, no list around the point).
     Nothing,
+    /// Not a Lisp buffer: Rust's `;` ends a statement, not a line.
+    NotLisp,
     Done,
     /// Deleted text, for the clipboard (the kills).
     Killed(String),
@@ -1789,6 +1791,9 @@ pub fn sexp(id: u32, op: &str) -> SexpOut {
     let out = with_pane(id, |_, pane, _| {
         if pane.md.is_some() || pane.image.is_some() || pane.video.is_some() {
             return SexpOut::Nothing;
+        }
+        if !lispy(pane.lang) {
+            return SexpOut::NotLisp;
         }
         if op == "comment-lines" {
             let (l0, l1) = match pane.editor.selection_bounds() {
@@ -3910,6 +3915,26 @@ mod tests {
         act(id, "insert", Some("%"), 0.0, 0.0);
         assert_eq!(got(id), "|(a [b])", "and back");
         set_vi(false);
+    }
+
+    /// Guile is Lisp: pairing and the commands work there, `#:keywords`
+    /// and all. Rust is not, and refuses them rather than misreading `;`.
+    #[test]
+    fn structure_works_in_guile_and_refuses_rust() {
+        set_vi(false);
+        let id = 998;
+        put(id, "(define* (f #:key |x) x)");
+        assert!(set_language(id, "guile"));
+        assert!(matches!(sexp(id, "wrap"), SexpOut::Done));
+        assert_eq!(got(id), "(define* (f #:key (|x)) x)");
+        act(id, "insert", Some("("), 0.0, 0.0);
+        assert_eq!(got(id), "(define* (f #:key ((|)x)) x)", "pairs in Guile");
+        put(id, "let v = f(|a); // done");
+        assert!(set_language(id, "rust"));
+        assert!(matches!(sexp(id, "comment-lines"), SexpOut::NotLisp));
+        act(id, "insert", Some("("), 0.0, 0.0);
+        assert_eq!(got(id), "let v = f((|a); // done", "no pairing in Rust");
+        assert!(set_language(id, "scheme"));
     }
 
     #[test]

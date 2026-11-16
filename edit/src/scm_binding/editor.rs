@@ -159,10 +159,12 @@ prim! {
 prim! {
     /// `(%editor-sexp id op)` — a structural command on pane ID's buffer
     /// (`crate::editorpane::sexp` names them): #f when there was nothing to
-    /// do, the deleted text for a kill, else 1.
+    /// do, 0 in a buffer that is not Lisp, the deleted text for a kill, else
+    /// 1.
     "%editor-sexp", fn editor_sexp(id: num, op: opt_text) {
         match crate::editorpane::sexp(id as u32, &op.unwrap_or_default()) {
             crate::editorpane::SexpOut::Nothing => Out::Nil,
+            crate::editorpane::SexpOut::NotLisp => Out::Num(0.0),
             crate::editorpane::SexpOut::Done => Out::Num(1.0),
             crate::editorpane::SexpOut::Killed(text) => Out::Text(text),
         }

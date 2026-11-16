@@ -11,6 +11,7 @@
   ; nothing for it to do. A kill's text goes to the clipboard.
   (let ((r (%editor-sexp (editor-pane-id) op)))
     (cond ((string? r) (%set-clipboard r) r)
+          ((eqv? r 0) (echo "not a Scheme or Guile buffer") #f)
           (r #t)
           (else (echo none) #f))))
 
