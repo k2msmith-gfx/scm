@@ -14,8 +14,10 @@ was written for, not at the pace a machine carrying a camera managed (the
 reasoning is ray's modeler/tools/demo_loft.py, whose films this follows).
 
 The film opens a small project it writes afresh each run, so every take
-starts from the same files: shapes.scm, scene.scm (a ray scene), crate/ (a
-Rust crate), README.md, and IMAGE.png as images/fallingwater.png.
+starts from the same files: shapes.scm, scene.scm (a ray scene), greet.guile
+(GNU Guile), crate/ (a Rust crate), README.md, and IMAGE.png as
+images/fallingwater.png. The terminal runs a plain /bin/sh with a bare `$ `
+prompt, so the film shows no login banner, user, host or address.
 """
 
 import os
@@ -60,6 +62,13 @@ PROJECT = {
 (clear-scene)
 (set-camera :at [0 2 7] :look-at [0 1 0])
 (add-sphere :at [0 1 0] :radius 1 :name :ball)
+""",
+    "greet.guile": """;;; greet.guile \u2014 GNU Guile: its sends go to a Guile the editor starts.
+(use-modules (ice-9 format))
+
+(define (greet who)
+  "A greeting for WHO."
+  (format #f "hello, ~a" who))
 """,
     "crate/Cargo.toml": """[package]
 name = "shapes"
@@ -108,7 +117,10 @@ def sq(s):
 
 class Edit:
     def __init__(self, project, size="1600x1000", scale="1.25", ray=None):
-        env = dict(os.environ, EDIT_FILM_PORT=str(PORT), EDIT_FILM_SIZE=size, EDIT_FILM_SCALE=scale)
+        env = dict(os.environ, EDIT_FILM_PORT=str(PORT), EDIT_FILM_SIZE=size, EDIT_FILM_SCALE=scale,
+                   PS1="$ ", BASH_SILENCE_DEPRECATION_WARNING="1")
+        for k in ("ENV", "BASH_ENV"):
+            env.pop(k, None)
         self.proc = subprocess.Popen([str(EDIT), "shapes.scm"], cwd=project, env=env,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(200):
@@ -118,6 +130,8 @@ class Edit:
             except OSError:
                 time.sleep(0.05)
         self._read()
+        # The terminal's shell: a plain sh, nothing of the account's shown.
+        self.eval('(set! %login-shell (lambda () "/bin/sh"))')
         if ray:
             self.eval(f"(set! *ray-program* {sq(ray)})")
 
@@ -297,12 +311,24 @@ def film(out, image, fps):
 
     # ── 2. Languages ─────────────────────────────────────────────────────
     h.say("Each file is read in its own language, and the modeline says which", 0.6)
-    tree_to(h, ed, "shapes.scm"); h.nap(1.6)
+    tree_to(h, ed, "shapes.scm"); h.nap(1.2)
+    h.say("C-= and C-- make the text bigger and smaller", 0.4)
+    h.keys("C-=", "C-=", "C-=", "C-=", after=0.45); h.nap(1.2)
+    h.keys("C--", "C--", "C--", "C--", after=0.45); h.nap(0.6)
     tree_to(h, ed, "scene.scm"); h.nap(0.6)
     h.say("A ray scene reads as Scheme (ray): C-c C-b sends it to ray, where its verbs are", 0.8)
     h.keys("C-c", "C-z", after=0.6)
     h.keys("C-x", "o", after=0.4)
     h.keys("C-c", "C-b", after=3.0)
+    h.say("A Guile file goes to GNU Guile: the editor starts one, and the REPL becomes Guile's", 0.4)
+    tree_to(h, ed, "greet.guile"); h.nap(0.8)
+    h.keys("C-c", "C-b", after=2.5)
+    h.keys("C-c", "C-z", after=0.8)
+    h.type('(greet "edit")', cps=12); h.key("return", 1.6)
+    h.say("TAB completes from the Guile that is running", 0.2)
+    h.type("(string-up", cps=10); h.key("tab", 1.8); h.key("return", 0.3)
+    h.type(' (greet "guile"))', cps=12); h.key("return", 2.0)
+    h.keys("C-x", "o", after=0.4)
     h.say("Rust: rust-analyzer starts by itself when it is on the PATH", 0.4)
     tree_to(h, ed, "crate"); h.key("right", 0.4)
     tree_to(h, ed, "src"); h.key("right", 0.4)
@@ -347,14 +373,48 @@ def film(out, image, fps):
     h.key("M-x", 0.4); h.type("find-ref", cps=10); h.nap(1.6); h.key("C-g", 0.5)
     h.keys("C-x", "C-b", after=2.0); h.key("escape", 0.6)
 
-    # ── 4. Completion and editing ────────────────────────────────────────
-    h.say("Back in Scheme: TAB completes a name as you type", 0.2)
+    # ── 4. SLIME ─────────────────────────────────────────────────────────
+    h.say("SLIME's loop: C-M-x sends a definition to a running scm, and the answer lands in the REPL", 0.2)
+    h.key("C-c", 0.1); h.key("C-z", 0.8)
+    h.key("C-x", 0.1); h.key("o", 0.5)
+    h.key("C-M-x", 1.4)
+    h.key("/", 0.2); h.type("define sizes", cps=12); h.key("return", 0.3)
+    h.key("C-M-x", 1.0)
+    h.key("/", 0.2); h.type("define (cube", cps=12); h.key("return", 0.3)
+    h.key("C-M-x", 1.0)
+    h.key("/", 0.2); h.type("define (square", cps=12); h.key("return", 0.3)
+    h.key("C-M-x", 1.0)
+    h.key("/", 0.2); h.type("define (area", cps=12); h.key("return", 0.3)
+    h.key("C-M-x", 1.0)
+    h.say("C-c C-b sends the whole buffer", 0.2)
+    h.keys("C-c", "C-b", after=1.6)
+    h.say("The REPL is the same scm: what was sent is there, and TAB completes from it", 0.2)
+    h.key("C-c", 0.1); h.key("C-z", 0.5)
+    h.type("(volumes sizes)", cps=12); h.key("return", 1.6)
+    h.type("(squ", cps=10); h.key("tab", 1.6); h.key("return", 0.3)
+    h.type(" 12)", cps=10); h.key("return", 1.6)
+    h.say("An error says where it was raised; the image lives on", 0.2)
+    h.type("(cube 'two)", cps=12); h.key("return", 2.6)
+    h.key("C-x", 0.1); h.key("o", 0.5)
+    h.say("K (or C-c C-d d) describes the name under the cursor: its signature and docstring", 0.2)
+    h.key("/", 0.2); h.type("(area", cps=12); h.key("return", 0.3); h.key("w", 0.3)
+    h.key("K", 2.8)
+
+    # ── 5. Completion and editing ────────────────────────────────────────
+    h.say("TAB completes from the scm this file runs in: scale-all and volumes live only there", 0.2)
+    # Out of the search's selection first: G would stretch it, and the
+    # typing replace it.
+    h.key("escape", 0.1); h.key("escape", 0.2)
     h.key("G", 0.3); h.key("o", 0.2); h.key("return", 0.2)
     h.type("(define (report)", cps=14); h.key("return", 0.3)
     h.type("(for-e", cps=12); h.key("tab", 1.4); h.key("return", 0.3)
-    h.type(" (lambda (n) (dis", cps=12); h.key("tab", 1.2); h.key("return", 0.3)
-    h.type(" (cube n)))", cps=10); h.nap(1.6)
-    h.type(" sizes))", cps=12); h.nap(0.6)
+    h.type(" disp", cps=12); h.key("tab", 1.2); h.key("return", 0.3)
+    h.type(" (scal", cps=10); h.key("tab", 2.0); h.key("return", 0.3)
+    h.say("Inside a call, the echo area shows its signature, from the same scm", 0.2)
+    h.type(" ", cps=10); h.nap(2.4)
+    h.type("10 (vol", cps=10); h.key("tab", 1.6); h.key("return", 0.3)
+    h.type(" ", cps=10); h.nap(1.8)
+    h.type("sizes))))", cps=12); h.nap(0.6)
     h.say("Mistakes are underlined before anything runs: a name nothing defines, a wrong count", 0.3)
     h.key("return", 0.2)
     h.type("(dispaly (cube 1 2))", cps=13); h.nap(1.6)
@@ -367,34 +427,10 @@ def film(out, image, fps):
     h.key("b", 0.4)
     h.key("M-.", 1.8)
     h.key("M-,", 1.2)
-    h.key("M-S-/", 2.8); h.key("C-g", 0.5)
+    h.key("M-S-/", 2.8); h.keys("C-g", "C-g", after=0.3)  # the list, then the prompt
     h.say("M-g i lists what this file defines; typing narrows it", 0.2)
-    h.keys("M-g", "i", after=1.4); h.type("vol", cps=8); h.nap(1.0); h.key("return", 1.0)
-
-    # ── 5. SLIME ─────────────────────────────────────────────────────────
-    h.say("SLIME's loop: C-M-x sends a definition to a running scm, and the answer lands in the REPL", 0.2)
-    h.key("C-c", 0.1); h.key("C-z", 0.8)
-    h.key("C-x", 0.1); h.key("o", 0.5)
-    h.key("C-M-x", 1.4)
-    h.key("/", 0.2); h.type("define sizes", cps=12); h.key("return", 0.3)
-    h.key("C-M-x", 1.0)
-    h.key("/", 0.2); h.type("define (cube", cps=12); h.key("return", 0.3)
-    h.key("C-M-x", 1.0)
-    h.key("/", 0.2); h.type("define (square", cps=12); h.key("return", 0.3)
-    h.key("C-M-x", 1.0)
-    h.key("/", 0.2); h.type("define (area", cps=12); h.key("return", 0.3)
-    h.key("C-M-x", 1.4)
-    h.say("The REPL is the same scm: what was sent is there, and TAB completes from it", 0.2)
-    h.key("C-c", 0.1); h.key("C-z", 0.5)
-    h.type("(volumes sizes)", cps=12); h.key("return", 1.6)
-    h.type("(squ", cps=10); h.key("tab", 1.6); h.key("return", 0.3)
-    h.type(" 12)", cps=10); h.key("return", 1.6)
-    h.say("An error says where it was raised; the image lives on", 0.2)
-    h.type("(cube 'two)", cps=12); h.key("return", 2.6)
-    h.key("C-x", 0.1); h.key("o", 0.5)
-    h.say("K (or C-c C-d d) describes the name under the cursor: its signature and docstring", 0.2)
-    h.key("/", 0.2); h.type("(area", cps=12); h.key("return", 0.3); h.key("w", 0.3)
-    h.key("K", 2.8)
+    h.keys("M-g", "i", after=1.4); h.type("vol", cps=8); h.nap(1.0)
+    h.key("return", 0.4); h.key("return", 1.2)  # take the candidate, then go
 
     # ── 6. Close ─────────────────────────────────────────────────────────
     h.say(":help lists every key and command", 0.2)
