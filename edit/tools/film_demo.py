@@ -132,6 +132,9 @@ class Edit:
         self._read()
         # The terminal's shell: a plain sh, nothing of the account's shown.
         self.eval('(set! %login-shell (lambda () "/bin/sh"))')
+        # M-x load-theme remembers its choice: here, in the project's own
+        # folder, not the account's ~/.config/edit/theme.scm.
+        self.eval(f"(set! *theme-file* {sq(str(Path(project) / '.theme.scm'))})")
         if ray:
             self.eval(f"(set! *ray-program* {sq(ray)})")
 
@@ -438,6 +441,12 @@ def film(out, image, fps):
     ex, ey, ew, eh = rect(ed, E)
     h.move(ex + ew * 0.5, ey + eh * 0.5, 0.3)
     h.wheel(8, 0.2); h.nap(1.0)
+    h.key("q", 0.4)
+    tree_to(h, ed, "shapes.scm"); h.nap(0.4)
+    h.say("M-x load-theme changes the colours, TAB completing the names, and remembers the choice", 0.4)
+    for typed in ("one-d", "drac", "nano-d", "doom"):
+        h.key("M-x", 0.3); h.type("load-theme", cps=14); h.key("return", 0.5)
+        h.type(typed, cps=10); h.key("tab", 0.9); h.key("return", 0.3); h.key("return", 2.4)
     h.say("edit: in the scm repository, cargo build --release -p edit", 3.0)
     rec.finish()
     ed.close()
