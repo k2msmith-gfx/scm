@@ -405,7 +405,11 @@ Every ray file of the same checkout shares it, so they all start over."
     ; M-. and M-? search the checkout the tree shows — every Scheme file in
     ; it, not only the ones opened (E8): references over the files opened
     ; so far would be a fraction of them. The index skips target/ and .git.
-    (%xref-index (list root)))
+    ; ONLY a checkout: outside git the root is the directory itself, and
+    ; `edit` started in ~ walked the whole home directory before the window
+    ; opened (2026-11-15). There the index is the files opened and saved.
+    (when (%git-root root)
+      (%xref-index (list root))))
   (when (pair? files) (files-reveal (car files))))
 
 (define (files-dir-of p)

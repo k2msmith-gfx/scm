@@ -42,6 +42,36 @@ pub struct Theme {
     pub code_paren: u32,
 }
 
+impl Theme {
+    /// A slot by its Scheme name (`"panel-bg"` for `:panel-bg`) — the
+    /// modeler's names for the same slots, so one theme file serves both
+    /// hosts. `None` for a name that is not a slot.
+    pub fn slot_mut(&mut self, name: &str) -> Option<&mut u32> {
+        Some(match name {
+            "panel-bg" => &mut self.panel_bg,
+            "editor-bg" => &mut self.editor_bg,
+            "border-focused" => &mut self.border_focused,
+            "status-bg" => &mut self.status_bg,
+            "status-ink" => &mut self.status_ink,
+            "text-ink" => &mut self.text_ink,
+            "text-dim" => &mut self.text_dim,
+            "text-accent" => &mut self.text_accent,
+            "text-error" => &mut self.text_error,
+            "text-warning" => &mut self.text_warning,
+            "popup-bg" => &mut self.popup_bg,
+            "menu-ink" => &mut self.menu_ink,
+            "menu-key-ink" => &mut self.menu_key_ink,
+            "code-comment" => &mut self.code_comment,
+            "code-string" => &mut self.code_string,
+            "code-keyword" => &mut self.code_keyword,
+            "code-number" => &mut self.code_number,
+            "code-call" => &mut self.code_call,
+            "code-paren" => &mut self.code_paren,
+            _ => return None,
+        })
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         // One Dark — the modeler's `Theme::default`, these slots of it.
@@ -67,5 +97,19 @@ impl Default for Theme {
             code_call: 0x0061_afef,
             code_paren: 0x0082_8997,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slots_write_by_name_and_reject_typos() {
+        let mut t = Theme::default();
+        *t.slot_mut("code-string").unwrap() = 0x0012_3456;
+        assert_eq!(t.code_string, 0x0012_3456);
+        assert!(t.slot_mut("code_string").is_none());
+        assert!(t.slot_mut("viewport-bg").is_none(), "a modeler-only slot is not the editor's");
     }
 }

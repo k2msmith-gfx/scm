@@ -179,8 +179,8 @@ pub fn shell_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scm")
 }
 
-/// Every shell file, compiled in: the shell (`SHELL`) and the standalone's
-/// two host files. Since the crate moved to the scm repo (2026-11-14) ray's
+/// Every shell file, compiled in: the shell (`SHELL`), the standalone's
+/// host files and its bundled themes. Since the crate moved to the scm repo (2026-11-14) ray's
 /// modeler builds it from a git checkout in Cargo's cache, which Cargo may
 /// clear -- and a binary must not lose its shell when it does.
 const EMBEDDED: &[(&str, &str)] = &[
@@ -209,6 +209,12 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("22-warnings", include_str!("../scm/22-warnings.scm")),
     ("host/prelude", include_str!("../scm/host/prelude.scm")),
     ("host/standalone", include_str!("../scm/host/standalone.scm")),
+    ("host/themes", include_str!("../scm/host/themes.scm")),
+    ("themes/one-dark", include_str!("../scm/themes/one-dark.scm")),
+    ("themes/doom-one", include_str!("../scm/themes/doom-one.scm")),
+    ("themes/dracula", include_str!("../scm/themes/dracula.scm")),
+    ("themes/nano-light", include_str!("../scm/themes/nano-light.scm")),
+    ("themes/nano-dark", include_str!("../scm/themes/nano-dark.scm")),
 ];
 
 /// Guile's REPL server, compiled in for the same reason (see `%edit-path`).
@@ -347,7 +353,9 @@ mod tests {
     /// still has its whole shell.
     #[test]
     fn every_shell_file_is_compiled_in() {
-        for name in SHELL.iter().copied().chain(["host/prelude", "host/standalone"]) {
+        let host = ["host/prelude", "host/standalone", "host/themes"];
+        let themes = ["themes/one-dark", "themes/doom-one", "themes/dracula", "themes/nano-light", "themes/nano-dark"];
+        for name in SHELL.iter().copied().chain(host).chain(themes) {
             let (_, src) = EMBEDDED.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("{name} is not in EMBEDDED"));
             let disk = std::fs::read_to_string(shell_dir().join(format!("{name}.scm"))).expect("on disk");
             assert_eq!(*src, disk, "{name}");

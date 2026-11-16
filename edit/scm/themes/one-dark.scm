@@ -1,0 +1,22 @@
+;; One Dark (Atom, Zed) — edit's shipped colours, slot for slot
+;; src/theme.rs's Theme::default. Every other theme is painted over this.
+(define-theme :one-dark "Atom's One Dark: the shipped colours"
+  '((:editor-bg . #x282c34)
+    (:panel-bg . #x2f343e)
+    (:border-focused . #x3e4451)
+    (:status-bg . #x21252b)
+    (:status-ink . #xabb2bf)
+    (:text-ink . #xabb2bf)
+    (:text-dim . #x828997)
+    (:text-accent . #x61afef)
+    (:text-error . #xe06c75)
+    (:text-warning . #xe5c07b)
+    (:popup-bg . #x3a3f4b)
+    (:menu-ink . #xf5f7fa)
+    (:menu-key-ink . #xc3c8d0)
+    (:code-comment . #x5c6370)
+    (:code-string . #x98c379)
+    (:code-keyword . #xc678dd)
+    (:code-number . #xd19a66)
+    (:code-call . #x61afef)
+    (:code-paren . #x828997)))

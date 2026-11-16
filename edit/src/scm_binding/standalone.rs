@@ -13,6 +13,10 @@ use crate::app;
 /// the program's hooks (`host/standalone.scm`) after it.
 const HOST_PRELUDE: &str = "host/prelude";
 const HOST_SETUP: &str = "host/standalone";
+/// Its colours (`set-color`, M-x load-theme), and the themes it ships, each
+/// a `define-theme` in `edit/scm/themes/`.
+const HOST_THEMES: &str = "host/themes";
+const THEMES: &[&str] = &["themes/one-dark", "themes/doom-one", "themes/dracula", "themes/nano-light", "themes/nano-dark"];
 
 fn os_stat(path: &str) -> Val {
     let Ok(md) = std::fs::metadata(path) else { return Val::Bool(false) };
@@ -79,6 +83,16 @@ fn install_host_prims(interp: &mut scm::Interp) -> Result<(), scm::EmbedError> {
             Some(app::Panel::Repl) => Val::Keyword("repl".into()),
             None => Val::Bool(false),
         })
+    })?;
+    // `(%set-color :slot 0xRRGGBB)` / `(%get-color :slot)` — the colours,
+    // by the modeler's slot names (host/themes.scm). An unknown slot sets
+    // nothing and answers #f.
+    interp.define_fn("%set-color", |args| {
+        let set = val_text(args, 0).is_some_and(|name| app::set_color(&name, val_num(args, 1) as u32));
+        Ok(Val::Bool(set))
+    })?;
+    interp.define_fn("%get-color", |args| {
+        Ok(val_text(args, 0).and_then(|name| app::color(&name)).map_or(Val::Bool(false), |c| Val::Int(c as i64)))
     })?;
     // `(%show-files on)` / `(%files-shown?)` — the file tree's column.
     interp.define_fn("%show-files", |args| {
@@ -183,8 +197,14 @@ impl Session {
             load(&mut interp, name)?;
         }
         load(&mut interp, HOST_SETUP)?;
+        load(&mut interp, HOST_THEMES)?;
+        for name in THEMES {
+            load(&mut interp, name)?;
+        }
         let mut session = Session { interp };
         session.call("(edit-greeting)");
+        // The user's themes and the last M-x load-theme, before init.
+        session.call("(themes-boot)");
         if let Some(init) = init.filter(|p| p.exists()) {
             let path = init.to_string_lossy();
             session.call(&format!(
@@ -357,6 +377,25 @@ mod tests {
 
     /// The program without its window: boot the shell over the three panes,
     /// type a form, send it, save the buffer, and draw.
+    /// The bundled themes load at boot and paint the host's colours: a
+    /// named one, painted over :one-dark, and an unknown name changes nothing.
+    #[test]
+    fn load_theme_paints_the_colours() {
+        let mut s = Session::boot(None, &[]).expect("boots");
+        s.call("(load-theme :one-dark)");
+        assert_eq!(app::color("editor-bg"), Some(crate::theme::Theme::default().editor_bg));
+        s.call("(load-theme :dracula)");
+        assert_eq!(app::color("editor-bg"), Some(0x0019_1a21));
+        assert_eq!(app::color("code-keyword"), Some(0x00ff_79c6));
+        s.call("(load-theme :no-such-theme)");
+        assert_eq!(app::color("editor-bg"), Some(0x0019_1a21));
+        s.call("(define-theme :tweak \"one slot\" '((:code-string . #x123456)))");
+        s.call("(load-theme \"tweak\")");
+        assert_eq!(app::color("code-string"), Some(0x0012_3456));
+        assert_eq!(app::color("editor-bg"), Some(crate::theme::Theme::default().editor_bg), "painted over :one-dark");
+        assert_eq!(app::color("viewport-bg"), None);
+    }
+
     #[test]
     fn the_standalone_session_types_sends_saves_and_draws() {
         let dir = std::env::temp_dir().join(format!("edit-standalone-{}", std::process::id()));

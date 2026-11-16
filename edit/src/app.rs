@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 
 use crate::framebuffer::{Framebuffer, Rect};
+use crate::theme::Theme;
 use crate::{editorpane, textpane};
 
 /// The panes, by id. The shell asks for them by key through `*pane-id*`.
@@ -79,6 +80,8 @@ struct State {
     /// Whether the file tree shows, and its share of the width.
     files: bool,
     files_share: f32,
+    /// The colours, which `set-color` writes (host/themes.scm).
+    theme: Theme,
 }
 
 thread_local! {
@@ -99,6 +102,7 @@ thread_local! {
         share: TRANSCRIPT_SHARE,
         files: true,
         files_share: FILES_SHARE,
+        theme: Theme::default(),
     });
 }
 
@@ -137,9 +141,23 @@ impl crate::host::Host for AppHost {
     fn strip_font_px(&self, pane: u32) -> Option<f32> {
         (pane == MINIBUFFER).then(|| textpane::font_px() * MINI_SHARE / 0.94)
     }
-    fn theme(&self) -> crate::theme::Theme {
-        crate::theme::Theme::default()
+    fn theme(&self) -> Theme {
+        with(|s| s.theme)
     }
+}
+
+/// Set a colour slot by its Scheme name; false for a name that is not one.
+pub fn set_color(name: &str, value: u32) -> bool {
+    let set = with(|s| s.theme.slot_mut(name).map(|slot| *slot = value & 0x00ff_ffff).is_some());
+    if set {
+        mark_dirty();
+    }
+    set
+}
+
+/// A colour slot's value by its Scheme name.
+pub fn color(name: &str) -> Option<u32> {
+    with(|s| s.theme.slot_mut(name).copied())
 }
 
 /// Make this program the widget's host. Once, before anything draws.
