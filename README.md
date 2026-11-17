@@ -442,8 +442,13 @@ protocol's first client, so what it exercises is the protocol.
 [`edit/`](edit/) is an Emacs-shaped editor for Scheme in a window of its
 own: vi or Emacs keys, sends to a separate `scm` (or Guile, or ray) with the
 answers in a REPL panel, completion and describe from the live image, `M-.`,
-a terminal pane, a file tree, and Rust with `rust-analyzer`. It is the same
-editor ray's modeler docks beside its 3D view.
+a terminal pane, a file tree, and Rust with `rust-analyzer` and a REPL
+(evcxr). It is the same editor ray's modeler docks beside its 3D view.
+
+**It has Claude in a pane** (`M-a`): a programming assistant on your Claude
+subscription that sees the file and the cursor, reads and edits your
+buffers, runs programs with your leave, and drives the editor itself.
+[docs/agent.md](docs/agent.md) is its manual.
 
 [`docs/film/edit-demo.mp4`](docs/film/edit-demo.mp4) is a four-minute tour,
 filmed by the editor itself (`edit/tools/film_demo.py`): the panes, Scheme,
@@ -479,6 +484,8 @@ and without it the feature says so instead.
 | `guile` | a Guile file's sends |
 | `ray` | a ray scene outside a ray checkout (one inside runs that checkout's `target/release/ray`) |
 | `rust-analyzer` | a `.rs` file's completion, `M-.`, describe and underlined errors |
+| `evcxr` | a `.rs` file's sends: Rust's REPL (`cargo install evcxr_repl`; looked for in `~/.cargo/bin` too) |
+| `claude` | the agent pane: Claude Code, on your subscription login ([docs/agent.md](docs/agent.md)) |
 | `ffmpeg` | playing a movie in a buffer |
 
 `:help` (or `C-h b`) lists every key. [docs/editor-crate-plan.md](docs/editor-crate-plan.md)

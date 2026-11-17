@@ -37,6 +37,13 @@ not to reopen.
   ray's modeler, which takes the crate from this repo by git. Built in
   ray, moved here 2026-11-14 with its history. Its plan's "as built"
   sections and "Still open" list are where to start.
+- **`docs/agent.md`** — **the agent pane in `edit`: its manual.** Claude
+  Code in a column (`M-a`), on the subscription login: what it sees, its
+  tools, permission, the code blocks, every slash command and hook.
+  `docs/agent-panel-plan.md` is the plan and the record — the measurements
+  each decision rests on, stage by stage, and A5 (the modeler taking this
+  pane in place of its own), which is NOT done. If you change what the
+  agent does, change `docs/agent.md`.
 - **`docs/cl-plan.md`** — **PROPOSED, nothing built, and not this
   language.** A subset of Common Lisp in Rust, scoped to "runs most portable
   CL". It lives here because its C0 decisions are decisions about *this*
