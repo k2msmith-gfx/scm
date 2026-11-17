@@ -7,7 +7,9 @@
 //! The layout is fixed — the editor over the bottom PANEL over a minibuffer
 //! — and the panel shows a terminal or the REPL (the transcript with a
 //! prompt), never both, or is hidden: the two icons at the strip's right end
-//! choose, as the modeler's dock toggles do.
+//! choose, as the modeler's dock toggles do. Two columns stand beside
+//! them: the file tree on the left and the AGENT's conversation on the
+//! right (docs/agent-panel-plan.md, A3), each with an icon of its own.
 //! rather than the modeler's docking `panes.rs`, which is tangled with its
 //! 3D panes. A shared layout is extracted only if the two start to
 //! duplicate each other.
@@ -24,6 +26,11 @@ pub const TRANSCRIPT: u32 = 2;
 pub const MINIBUFFER: u32 = 3;
 /// The file tree, a column on the left (`17-files.scm`).
 pub const FILES: u32 = 4;
+/// The agent's conversation, a column on the right (`25-agent.scm`).
+pub const AGENT: u32 = 5;
+
+/// Every pane, in the order they are drawn.
+const PANES: [u32; 5] = [EDITOR, TRANSCRIPT, MINIBUFFER, FILES, AGENT];
 
 /// What the bottom panel shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,24 +39,35 @@ pub enum Panel {
     Repl,
 }
 
-/// A strip icon: the file tree's, or one of the bottom panel's two.
+/// A strip icon: the file tree's, one of the bottom panel's two, or the
+/// agent's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     Files,
     Repl,
     Terminal,
+    Agent,
 }
 
-/// A draggable edge: the bar between the editor and the panel, or the edge
-/// between the file tree and the editor.
+/// The strip's icons, left to right.
+const ICONS: [Icon; 4] = [Icon::Files, Icon::Repl, Icon::Terminal, Icon::Agent];
+
+/// A draggable edge: the bar between the editor and the panel, the edge
+/// between the file tree and the editor, or the one between the editor and
+/// the agent.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Divider {
     Panel,
     Files,
+    Agent,
 }
 
 /// The file tree's share of the window's width, while it shows.
 const FILES_SHARE: f32 = 0.2;
+
+/// The agent's share of the window's width, while it shows: room for a
+/// reply's prose beside the source it is about.
+const AGENT_SHARE: f32 = 0.3;
 
 /// The minibuffer's text size, as a share of the panes'.
 const MINI_SHARE: f32 = 0.88;
@@ -61,7 +79,7 @@ struct State {
     /// The window, in physical pixels, and the logical-to-physical scale.
     size: (u32, u32),
     scale: f32,
-    rects: [Rect; 4],
+    rects: [Rect; 5],
     focused: u32,
     typing: Option<u32>,
     dirty: bool,
@@ -71,7 +89,7 @@ struct State {
     /// editor has the height.
     panel: Option<Panel>,
     /// Where the strip's icons were last drawn, for the click.
-    icons: [(Icon, Rect); 3],
+    icons: [(Icon, Rect); 4],
     /// The icon the pointer is over, whose tip shows above it.
     hover: Option<Icon>,
     /// The panel's share of the height above the minibuffer, which dragging
@@ -80,6 +98,9 @@ struct State {
     /// Whether the file tree shows, and its share of the width.
     files: bool,
     files_share: f32,
+    /// Whether the agent's column shows, and its share of the width.
+    agent: bool,
+    agent_share: f32,
     /// The colours, which `set-color` writes (host/themes.scm).
     theme: Theme,
 }
@@ -88,7 +109,7 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
         size: (0, 0),
         scale: 1.0,
-        rects: [Rect::default(); 4],
+        rects: [Rect::default(); 5],
         focused: EDITOR,
         typing: None,
         dirty: true,
@@ -97,11 +118,15 @@ thread_local! {
         // Hidden at startup: the editor has the height until the panel is
         // asked for (an icon, C-c C-z, running a file).
         panel: None,
-        icons: [(Icon::Files, Rect::default()), (Icon::Repl, Rect::default()), (Icon::Terminal, Rect::default())],
+        icons: ICONS.map(|i| (i, Rect::default())),
         hover: None,
         share: TRANSCRIPT_SHARE,
         files: true,
         files_share: FILES_SHARE,
+        // Hidden until asked for (its icon, M-a): no `claude` starts, and
+        // the editor has the width.
+        agent: false,
+        agent_share: AGENT_SHARE,
         theme: Theme::default(),
     });
 }
@@ -173,18 +198,20 @@ pub fn install_host() {
 
 /// Lay the panes out in a `w`×`h` window at `scale`: the minibuffer one
 /// text row high across the bottom; above it the file tree (when shown) a
-/// column on the left, and right of that the panel (when shown) under the
-/// editor.
+/// column on the left and the agent (when shown) a column on the right, and
+/// between them the panel (when shown) under the editor.
 pub fn resize(w: u32, h: u32, scale: f32) {
     // The minibuffer's strip at its own text size (`strip_font_px`).
     let row = (crate::text::mono_metrics(textpane::font_px() * MINI_SHARE * scale).1 + 10.0 * scale).ceil() as u32;
     let mini = row.min(h);
     let above = h - mini;
     let (shown, share, files, files_share) = with(|s| (s.panel.is_some(), s.share, s.files, s.files_share));
+    let (agent, agent_share) = with(|s| (s.agent, s.agent_share));
     let transcript = if shown { (above as f32 * share).round() as u32 } else { 0 };
     let editor = above - transcript;
     let left = if files { (w as f32 * files_share).round() as u32 } else { 0 };
-    let right = w - left;
+    let agent_w = if agent { ((w as f32 * agent_share).round() as u32).min(w - left) } else { 0 };
+    let right = w - left - agent_w;
     with(|s| {
         s.size = (w, h);
         s.scale = scale;
@@ -193,6 +220,7 @@ pub fn resize(w: u32, h: u32, scale: f32) {
             Rect { x: left, y: editor, w: right, h: transcript },
             Rect { x: 0, y: above, w, h: mini },
             Rect { x: 0, y: 0, w: left, h: above },
+            Rect { x: left + right, y: 0, w: agent_w, h: above },
         ];
         s.dirty = true;
     });
@@ -202,7 +230,7 @@ pub fn resize(w: u32, h: u32, scale: f32) {
     #[cfg(test)]
     {
         crate::host::testing::set_window(w, h);
-        for id in [EDITOR, TRANSCRIPT, MINIBUFFER, FILES] {
+        for id in PANES {
             match rect(id) {
                 Some(r) => crate::host::testing::set_rect(id, r),
                 None => crate::host::testing::clear_rect(id),
@@ -217,20 +245,20 @@ pub fn rect(id: u32) -> Option<Rect> {
 }
 
 /// What a pane is, as `%pane-at` names it: "editor", "term" for the panel
-/// while it shows a terminal, or "text" for the REPL's transcript or the
-/// minibuffer.
+/// while it shows a terminal, or "text" for the REPL's transcript, the
+/// minibuffer, the file tree or the agent.
 pub fn kind_name(id: u32) -> Option<&'static str> {
     match id {
         EDITOR => Some("editor"),
         TRANSCRIPT if terminal_showing() => Some("term"),
-        TRANSCRIPT | MINIBUFFER | FILES => Some("text"),
+        TRANSCRIPT | MINIBUFFER | FILES | AGENT => Some("text"),
         _ => None,
     }
 }
 
 /// The pane under a window point.
 pub fn pane_at(x: f64, y: f64) -> Option<u32> {
-    [EDITOR, TRANSCRIPT, MINIBUFFER, FILES].into_iter().find(|&id| {
+    PANES.into_iter().find(|&id| {
         rect(id).is_some_and(|r| {
             x >= r.x as f64 && y >= r.y as f64 && x < (r.x + r.w) as f64 && y < (r.y + r.h) as f64
         })
@@ -344,8 +372,14 @@ fn bar_centre() -> Option<(f64, f64)> {
 const EDGE_GRAB: f64 = 4.0;
 
 /// The divider a window point is on, if any: the panel's bar (across the
-/// editor's width), or the file tree's right edge.
+/// editor's width), the file tree's right edge, or the agent's left one.
 pub fn divider_at(x: f64, y: f64) -> Option<Divider> {
+    if let Some(a) = rect(AGENT) {
+        let grab = EDGE_GRAB * with(|s| s.scale) as f64;
+        if (x - a.x as f64).abs() <= grab && y < (a.y + a.h) as f64 {
+            return Some(Divider::Agent);
+        }
+    }
     if let Some(f) = rect(FILES) {
         let grab = EDGE_GRAB * with(|s| s.scale) as f64;
         if (x - (f.x + f.w) as f64).abs() <= grab && y < (f.y + f.h) as f64 {
@@ -353,13 +387,13 @@ pub fn divider_at(x: f64, y: f64) -> Option<Divider> {
         }
     }
     let on_bar = bar_centre().is_some_and(|(centre, half)| (y - centre).abs() <= half);
-    let over_editor = rect(EDITOR).is_some_and(|e| x >= e.x as f64);
+    let over_editor = rect(EDITOR).is_some_and(|e| x >= e.x as f64 && x < (e.x + e.w) as f64);
     (on_bar && over_editor).then_some(Divider::Panel)
 }
 
 /// Drag a divider to the pointer: the panel's bar's centre line to `y`
-/// (8–85% of the height), or the file tree's edge to `x` (8–50% of the
-/// width).
+/// (8–85% of the height), the file tree's edge to `x` (8–50% of the
+/// width), or the agent's (12–60% of the width, from the right).
 pub fn drag_divider(d: Divider, x: f64, y: f64) {
     let (w, h, scale) = with(|s| (s.size.0, s.size.1, s.scale));
     match d {
@@ -380,12 +414,19 @@ pub fn drag_divider(d: Divider, x: f64, y: f64) {
             let share = (x / w as f64).clamp(0.08, 0.5) as f32;
             with(|s| s.files_share = share);
         }
+        Divider::Agent => {
+            if w == 0 {
+                return;
+            }
+            let share = (1.0 - x / w as f64).clamp(0.12, 0.6) as f32;
+            with(|s| s.agent_share = share);
+        }
     }
     resize(w, h, scale);
 }
 
-/// Start a mouse selection at a window point, in the REPL's transcript or
-/// the terminal, whichever the panel shows: the pane it started in, or
+/// Start a mouse selection at a window point, in the agent's conversation,
+/// or in the REPL's transcript or the terminal, whichever the panel shows: the pane it started in, or
 /// `None` (the point is elsewhere — the press is an ordinary click).
 pub fn begin_select(x: f64, y: f64) -> Option<u32> {
     // A press on an open menu picks its row; selecting the text beneath
@@ -396,7 +437,7 @@ pub fn begin_select(x: f64, y: f64) -> Option<u32> {
     let id = pane_at(x, y)?;
     match kind_name(id) {
         Some("term") => crate::termpane::begin_select(id, x, y).then_some(id),
-        Some("text") if id == TRANSCRIPT => textpane::begin_select(id, x, y).then_some(id),
+        Some("text") if id == TRANSCRIPT || id == AGENT => textpane::begin_select(id, x, y).then_some(id),
         _ => None,
     }
 }
@@ -421,6 +462,20 @@ pub fn show_files(on: bool) {
 
 pub fn files_shown() -> bool {
     with(|s| s.files)
+}
+
+/// Show or hide the agent's column; the layout follows. Its conversation —
+/// and a turn being answered — goes on while it is hidden.
+pub fn show_agent(on: bool) {
+    let (w, h, scale) = with(|s| {
+        s.agent = on;
+        (s.size.0, s.size.1, s.scale)
+    });
+    resize(w, h, scale);
+}
+
+pub fn agent_shown() -> bool {
+    with(|s| s.agent)
 }
 
 /// The size a window opens at, edit's and the modeler's: Blender's 1920×1080
@@ -456,6 +511,7 @@ impl Icon {
             Icon::Files => "file tree",
             Icon::Repl => "REPL",
             Icon::Terminal => "terminal",
+            Icon::Agent => "agent  M-a",
         }
     }
 }
@@ -479,7 +535,8 @@ pub fn hovered_icon() -> Option<Icon> {
 /// The strip's icons, right-aligned, Zed-style as the modeler draws its
 /// dock toggles: lit in accent over a faint backing while what it shows is
 /// shown, dim otherwise. The file tree is a folder; the REPL a λ; the
-/// terminal a window with a `>` and a cursor.
+/// terminal a window with a `>` and a cursor; the agent a robot's head, as
+/// the modeler's dock button for it is.
 fn draw_icons(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::theme::Theme) {
     let size = (15.0 * scale).round();
     let gap = (5.0 * scale).round();
@@ -487,15 +544,17 @@ fn draw_icons(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::them
     let margin = (28.0 * scale).round();
     let px = |v: f32| v.max(0.0).round() as u32;
     let y = strip.y as f32 + (strip.h as f32 - size) * 0.5;
-    let mut x = (strip.x + strip.w) as f32 - margin - 3.0 * size - 2.0 * gap;
+    let n = ICONS.len() as f32;
+    let mut x = (strip.x + strip.w) as f32 - margin - n * size - (n - 1.0) * gap;
     let shown = panel();
-    let mut placed = [(Icon::Files, Rect::default()), (Icon::Repl, Rect::default()), (Icon::Terminal, Rect::default())];
-    for (i, which) in [Icon::Files, Icon::Repl, Icon::Terminal].into_iter().enumerate() {
+    let mut placed = ICONS.map(|i| (i, Rect::default()));
+    for (i, which) in ICONS.into_iter().enumerate() {
         let r = Rect { x: px(x), y: px(y), w: size as u32, h: size as u32 };
         let on = match which {
             Icon::Files => files_shown(),
             Icon::Repl => shown == Some(Panel::Repl),
             Icon::Terminal => shown == Some(Panel::Terminal),
+            Icon::Agent => agent_shown(),
         };
         let ink = if on { theme.text_accent } else { theme.text_dim };
         if on {
@@ -525,6 +584,19 @@ fn draw_icons(fb: &mut Framebuffer, strip: Rect, scale: f32, theme: &crate::them
                     ink,
                 );
             }
+            Icon::Agent => {
+                // A robot's head: an antenna, a box, two eyes.
+                let top = (ih * 0.28).max(2.0);
+                let mid = ix + iw * 0.5;
+                let line = scale.round().max(1.0);
+                fb.fill_rect(Rect { x: px(mid - line * 0.5), y: px(iy), w: px(line), h: px(top) }, ink);
+                fb.stroke_rect(Rect { x: px(ix), y: px(iy + top), w: px(iw), h: px(ih - top) }, ink);
+                let eye = (iw * 0.18).max(1.0);
+                let ey = iy + top + (ih - top) * 0.5 - eye * 0.5;
+                for ex in [ix + iw * 0.28 - eye * 0.5, ix + iw * 0.72 - eye * 0.5] {
+                    fb.fill_rect(Rect { x: px(ex), y: px(ey), w: px(eye), h: px(eye) }, ink);
+                }
+            }
         }
         placed[i] = (which, r);
         x += size + gap;
@@ -542,7 +614,7 @@ pub fn draw(fb: &mut Framebuffer) {
     let theme = crate::theme::Theme::default();
     fb.fill_rect(Rect { x: 0, y: 0, w: fb.width, h: fb.height }, theme.panel_bg);
     let focused = focused();
-    for id in [EDITOR, TRANSCRIPT, MINIBUFFER, FILES] {
+    for id in PANES {
         let Some(r) = rect(id) else { continue };
         let lit = focused == id;
         if id == EDITOR {
@@ -557,6 +629,11 @@ pub fn draw(fb: &mut Framebuffer) {
     if let Some(f) = rect(FILES) {
         let w = with(|s| s.scale).round().max(1.0) as u32;
         fb.fill_rect(Rect { x: f.x + f.w - w, y: f.y, w, h: f.h }, theme.status_bg);
+    }
+    // And one down the agent's, on its left.
+    if let Some(a) = rect(AGENT) {
+        let w = with(|s| s.scale).round().max(1.0) as u32;
+        fb.fill_rect(Rect { x: a.x, y: a.y, w, h: a.h }, theme.status_bg);
     }
     // A rule over the minibuffer, so the echo line reads as its own strip
     // and not the transcript's last row.

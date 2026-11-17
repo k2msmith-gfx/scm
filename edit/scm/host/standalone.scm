@@ -14,6 +14,7 @@
       ((:transcript :repl :terminal) 2)
       ((:minibuffer) 3)
       ((:files) 4)
+      ((:agent) 5)
       (else #f))))
 (set! *pane-key*
   (lambda (id)
@@ -22,6 +23,7 @@
       ((2) :transcript)
       ((3) :minibuffer)
       ((4) :files)
+      ((5) :agent)
       (else #f))))
 
 ; ── The file tree: the left column (17-files) ──────────────────────────────
@@ -393,10 +395,104 @@ Every ray file of the same checkout shares it, so they all start over."
       (%show-panel (if (and b (equal? (%alist-ref b :name #f) "the terminal")) :terminal :repl)))))
 
 (define (other-pane)
-  "Move the keyboard between the editor and the bottom panel — C-x o."
-  (cond ((not (equal? (%typing-pane) (editor-pane-id))) (focus-scene-editor))
-        ((%panel) (show-panel (%panel)))
-        (else (echo "the panel is hidden — C-c C-z shows the REPL"))))
+  "Move the keyboard round the panes that show — C-x o: the editor, the
+  bottom panel, the agent, and the editor again."
+  (let ((at (%typing-pane)))
+    (cond ((equal? at 5) (focus-scene-editor))
+          ((and (equal? at 2) (%agent-shown?)) (focus-agent))
+          ((equal? at 2) (focus-scene-editor))
+          ((%panel) (show-panel (%panel)))
+          ((%agent-shown?) (focus-agent))
+          (else (echo "nothing else is showing — C-c C-z shows the REPL, M-a the agent")))))
+
+; ── The agent: a column on the right (25-agent) ────────────────────────────
+; Kevin, 2026-11-16: Claude Code, on the subscription login, as a
+; programming assistant in the editor. Hidden until asked for — its icon at
+; the strip's right end, or M-a — and nothing is started until the first
+; request. Its conversation goes on while the column is hidden.
+(define (agent-greeting)
+  (agent-append "Claude, in this project. Ask in English; RET sends." :dim)
+  (agent-append "It reads and edits the project's files, and asks here before it runs a program or touches a file outside it." :dim)
+  (agent-append "Escape interrupts · C-l or /new starts over · /model, /status, /login · /help" :dim))
+
+(set! *agent-shown*
+  (lambda (id)
+    (%show-agent #t)
+    (when (zero? (%pane-row-count id)) (agent-greeting))))
+
+(define (toggle-agent)
+  "Go to the agent — show its column and give its prompt the keyboard — or,
+  from its prompt, hide it and go back to the editor: M-a, and the robot
+  icon at the strip's right end. A turn it is answering goes on while it is
+  hidden."
+  (if (and (%agent-shown?) (agent-typing?))
+    (begin (%show-agent #f) (focus-scene-editor))
+    (focus-agent)))
+(bind-key "M-a" 'toggle-agent)
+
+(define (agent-icon-click)
+  ; The strip's icon is a plain toggle, as the others are: lit, it hides.
+  (if (%agent-shown?)
+    (begin (%show-agent #f) (focus-scene-editor))
+    (focus-agent)))
+(bind-agent-keys)
+
+(define (agent-copy)
+  "Copy the agent pane's selection — or, with none, its input line — to
+  the clipboard: Cmd-C there, and Copy on its menu. Drag to select."
+  (let ((s (%pane-selection 5)))
+    (cond (s (%set-clipboard s) (%pane-clear-selection 5) (echo "copied " (string-length s) " chars") s)
+          ((%editing-pane? 5) (edit-copy-line) (%edit :text))
+          (else (echo "nothing selected — drag to select") #f))))
+(bind-key "s-c" 'agent-copy :agent)
+(bind-key "s-v" 'agent-paste :agent)
+
+; A click in the agent's column gives its prompt the keyboard.
+(add-handler
+  *click-handlers*
+  50
+  :agent-focus
+  (lambda (x y . _)
+    (let ((hit (%pane-at x y)))
+      (and (not (menu-open?)) hit (equal? (car hit) 5)
+           (begin (focus-agent) #t)))))
+
+; THE CONVERSATION SURVIVES A RESTART: its id is filed by the directory it
+; runs in, in ~/.config/edit/agent-sessions.scm, and the next request there
+; resumes it. C-l forgets it.
+(define *agent-session-file* "~/.config/edit/agent-sessions.scm")
+(define *agent-sessions-read* #f)
+
+(define (agent-sessions-load)
+  (unless *agent-sessions-read*
+    (set! *agent-sessions-read* #t)
+    (guard (e (#t #f))
+      (let ((path (expand-home *agent-session-file*)))
+        (when (file-exists? path)
+          (for-each (lambda (kv) (when (and (pair? kv) (string? (car kv)) (string? (cdr kv)))
+                                   (hash-table-set! *agent-sessions* (car kv) (cdr kv))))
+                    (call-with-input-file path read)))))))
+
+(define (agent-sessions-save)
+  (guard (e (#t (echo "agent: could not save " *agent-session-file* ": " (*show-value* e))))
+    (spit (expand-home *agent-session-file*)
+          (string-append
+            ";; The agent's conversations, by the directory each runs in (edit, 25-agent).\n"
+            (let ((out (open-output-string)))
+              (write (filter cdr (map (lambda (dir) (cons dir (hash-table-ref/default *agent-sessions* dir #f)))
+                                      (hash-table-keys *agent-sessions*)))
+                     out)
+              (get-output-string out))
+            "\n"))))
+
+(set! *agent-session-ref*
+  (lambda (dir) (agent-sessions-load) (hash-table-ref/default *agent-sessions* dir #f)))
+(set! *agent-session-set!*
+  (lambda (dir id)
+    (agent-sessions-load)
+    (unless (equal? id (hash-table-ref/default *agent-sessions* dir #f))
+      (hash-table-set! *agent-sessions* dir id)
+      (agent-sessions-save))))
 
 (define (edit-open-files files)
   "The file tree at startup: rooted at the git checkout the first FILE is
@@ -434,6 +530,7 @@ Every ray file of the same checkout shares it, so they all start over."
       ((1) :editor)
       ((2) (if (equal? kind "term") :terminal :transcript))
       ((4) :files)
+      ((5) :agent)
       (else #f))))
 
 (define (toggle-markdown-view)
@@ -484,6 +581,15 @@ Every ray file of the same checkout shares it, so they all start over."
           ((video-buffer?) :video)
           ((backend-of (%editor-active-buffer id)) :editor)
           (else #f))))
+(define-menu
+  :agent
+  (list (list "New conversation" new-conversation "C-l")
+        (list "Interrupt" agent-interrupt "Esc")
+        (list "Copy" agent-copy "s-c")
+        (list "Paste" agent-paste "s-v")
+        (list "back to the editor" focus-scene-editor "C-x o")
+        (list "hide" toggle-agent "M-a")))
+(set-pane-menu! :agent (lambda (x y id shift) :agent))
 (set-pane-menu! :terminal (lambda (x y id shift) :terminal))
 (set-pane-menu! :transcript (lambda (x y id shift) :transcript))
 
@@ -503,4 +609,5 @@ Every ray file of the same checkout shares it, so they all start over."
   (*transcript-append* "*scratch* and your init.scm run in the editor's image." :dim)
   (*transcript-append* "C-M-x / C-x C-e / C-c C-b send, C-h b lists every key, C-x C-c quits." :dim)
   (*transcript-append* "This is the REPL (C-c C-z). The icons at the bottom right swap it for a terminal, or hide" :dim)
-  (*transcript-append* "the panel; C-x o moves the keyboard. Right-click a pane for its menu, hold or drag for the pie." :dim))
+  (*transcript-append* "the panel; C-x o moves the keyboard. Right-click a pane for its menu, hold or drag for the pie." :dim)
+  (*transcript-append* "M-a, or the robot icon, opens the agent: Claude, as a programming assistant in this project." :dim))

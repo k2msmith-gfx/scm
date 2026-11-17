@@ -268,6 +268,7 @@ impl App {
                 self.session.call(match app::icon_at(x, y) {
                     Some(app::Icon::Terminal) => "(toggle-panel :terminal)",
                     Some(app::Icon::Files) => "(toggle-files)",
+                    Some(app::Icon::Agent) => "(agent-icon-click)",
                     _ => "(toggle-panel :repl)",
                 });
             }
@@ -321,7 +322,7 @@ impl App {
             if let Some(d) = &self.display {
                 d.window.set_cursor(match over {
                     Some(app::Divider::Panel) => winit::window::CursorIcon::NsResize,
-                    Some(app::Divider::Files) => winit::window::CursorIcon::EwResize,
+                    Some(app::Divider::Files | app::Divider::Agent) => winit::window::CursorIcon::EwResize,
                     None => winit::window::CursorIcon::Default,
                 });
             }

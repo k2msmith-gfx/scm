@@ -179,6 +179,7 @@ EOF"#;
             (set! *pane-id* (lambda (key) (case key ((:minibuffer) 7) ((:editor) 3) ((:agent) 9) (else #f))))
             (bind-editor-keys :minibuffer)
             (bind-agent-keys)
+            (register-buffer (%editor-active-buffer 3) #f)
             (define shown #f)
             (set! *agent-shown* (lambda (id) (set! shown id)))
             (define ended '())
@@ -214,7 +215,10 @@ EOF"#;
         assert!(first.contains("--permission-mode\nacceptEdits\n") && first.contains("--permission-prompt-tool\nstdio\n"), "{first}");
         assert!(first.contains("--model\nhaiku\n") && !first.contains("--resume"), "{first}");
         assert_eq!(starts(), 1);
-        assert!(file("stdin").contains(r#""content":"fix""#), "{}", file("stdin"));
+        // What is sent is the request, with what the editor shows in front.
+        let sent: serde_json::Value = serde_json::from_str(file("stdin").lines().next().unwrap()).unwrap();
+        let sent = sent["message"]["content"].as_str().unwrap().to_string();
+        assert!(sent.starts_with("<editor>\nfile: ") && sent.ends_with("</editor>\n\nfix"), "{sent}");
 
         // The next request continues that conversation, in the same
         // process; what the host prepares is what is sent.

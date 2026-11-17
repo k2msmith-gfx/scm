@@ -100,6 +100,12 @@ fn install_host_prims(interp: &mut scm::Interp) -> Result<(), scm::EmbedError> {
         Ok(Val::Bool(false))
     })?;
     interp.define_fn("%files-shown?", |_| Ok(Val::Bool(app::files_shown())))?;
+    // `(%show-agent on)` / `(%agent-shown?)` — the agent's column.
+    interp.define_fn("%show-agent", |args| {
+        app::show_agent(!matches!(args.first(), Some(Val::Bool(false)) | None));
+        Ok(Val::Bool(false))
+    })?;
+    interp.define_fn("%agent-shown?", |_| Ok(Val::Bool(app::agent_shown())))?;
     // `(%git-ignored dir)` — what git ignores under DIR, relative to it, an
     // ignored directory once with a trailing `/` (ray's prim of the same
     // name, which a standalone without ray answers itself); () outside git.
@@ -300,6 +306,15 @@ impl Session {
         if typing == Some(app::EDITOR) && crate::editorpane::vi_escape(app::EDITOR) {
             return true;
         }
+        // The agent, working: Escape at its prompt interrupts the turn and
+        // KEEPS the keyboard there — the next thing typed is likely what it
+        // should do instead. Here rather than on the Scheme chain, which
+        // this function returns before reaching (the modeler's lesson: its
+        // handler there took two presses). Idle, Escape leaves, as below.
+        if typing == Some(app::AGENT) && crate::agent::busy() {
+            self.call("(agent-interrupt)");
+            return true;
+        }
         if typing.is_some() && typing != Some(app::EDITOR) {
             self.call("(on-escape)");
             app::release_typing();
@@ -360,8 +375,10 @@ mod tests {
         // Right-aligned 28 px in (clear of the OS resize corner): 15 px
         // squares, 5 px apart, on the strip.
         let (right, y) = ((m.x + m.w) as f64 - 28.0, m.y as f64 + m.h as f64 / 2.0);
-        // Left to right: the file tree's, the REPL's, the terminal's.
-        ((right - 2.0 * (15.0 + 5.0) - 7.5, y), (right - 15.0 - 5.0 - 7.5, y), (right - 7.5, y))
+        // Left to right: the file tree's, the REPL's, the terminal's — and
+        // then the agent's, which is the one at the right end.
+        let slot = |from_right: f64| (right - from_right * (15.0 + 5.0) - 7.5, y);
+        (slot(3.0), slot(2.0), slot(1.0))
     }
 
     /// The window's opening size (Kevin, 2026-11-14): 1920×1080 on the Mac's
@@ -1477,6 +1494,108 @@ mod tests {
         s.text("n");
         assert_eq!(cur(), (1, 2), "n: the next");
         s.text("q");
+    }
+
+    /// The agent in the standalone (docs/agent-panel-plan.md, A3): M-a opens
+    /// its column and gives it the keyboard; a request carries what the
+    /// editor shows — the file, the cursor, the selection, what is unsaved —
+    /// and is answered into the column; the conversation is filed for the
+    /// next start; Escape at its prompt interrupts a turn and keeps the
+    /// keyboard, and, idle, goes back to the editor.
+    #[test]
+    fn the_agent_has_a_column_and_knows_what_the_editor_shows() {
+        let turn = r#"      echo '{"type":"system","subtype":"init","session_id":"s-1"}'
+      echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"It doubles x."}]}}'
+      echo '{"type":"result","is_error":false,"result":"It doubles x.","session_id":"s-1","num_turns":1}'"#;
+        let bin = crate::agent::fake_claude("column", &crate::agent::fake_conversation(turn));
+        let dir = bin.parent().unwrap().to_string_lossy().into_owned();
+        let src = format!("{dir}/double.scm");
+        std::fs::write(&src, "(define (double x)\n  (* 2 x))\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        app::show_agent(false);
+        let mut s = Session::boot(None, std::slice::from_ref(&src)).expect("boot");
+        s.call(&format!(r#"(set! *agent-session-file* "{dir}/sessions.scm")
+                           (define ended '())
+                           (set! *agent-turn-ended* (lambda (status) (set! ended (cons status ended))))
+                           (set! *agent-profile* (lambda () (agent-profile-extend (agent-code-profile) :bin "{dir}/claude")))"#));
+        let editor_w = app::rect(app::EDITOR).unwrap().w;
+        assert!(app::rect(app::AGENT).is_none(), "hidden until asked for");
+
+        // M-a: the column, the keyboard, a word of welcome.
+        s.key("M-a");
+        let column = app::rect(app::AGENT).expect("the agent shows");
+        assert_eq!(column.x + column.w, 1200, "on the right");
+        assert_eq!(app::rect(app::EDITOR).unwrap().w, editor_w - column.w, "the editor gave it the width");
+        assert_eq!(app::typing(), Some(app::AGENT));
+        assert_eq!(app::pane_at(1190.0, 100.0), Some(app::AGENT));
+        assert!(app::icon_rects().iter().any(|(i, r)| *i == app::Icon::Agent && r.w > 0) || {
+            let mut fb = crate::framebuffer::Framebuffer::new(1200, 700);
+            app::draw(&mut fb);
+            app::icon_rects().iter().any(|(i, r)| *i == app::Icon::Agent && r.w > 0)
+        });
+        let rows = |s: &mut Session| s.eval_to_string("(map (lambda (i) (%pane-row-text 5 i)) (iota (%pane-row-count 5)))").unwrap();
+        assert!(rows(&mut s).contains("asks here before it runs a program"), "{}", rows(&mut s));
+
+        // A request, with an unsaved edit in the buffer and the cursor on
+        // its second line.
+        s.call(r#"(%editor-replace 1 1 0 1 0 ";; ") (%editor-goto-line 1 1)"#);
+        assert_eq!(s.eval_to_string("(%editor-dirty? 1)").unwrap(), "1");
+        for c in "what does this do".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("return");
+        let wait = |s: &mut Session, what: &str| {
+            let t0 = std::time::Instant::now();
+            while s.eval_to_string(what).as_deref() != Ok("#t") {
+                assert!(t0.elapsed() < std::time::Duration::from_secs(20), "never: {what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                s.poll();
+            }
+        };
+        wait(&mut s, "(pair? ended)");
+        assert!(rows(&mut s).contains("It doubles x."), "{}", rows(&mut s));
+        let sent: serde_json::Value = serde_json::from_str(std::fs::read_to_string(format!("{dir}/stdin")).unwrap().lines().next().unwrap()).unwrap();
+        let sent = sent["message"]["content"].as_str().unwrap().to_string();
+        assert!(sent.contains("double.scm (unsaved edits) — scheme"), "{sent}");
+        assert!(sent.contains("cursor: line 2, column ") && sent.contains(" of 3 lines"), "{sent}");
+        assert!(sent.contains("that line: ") && sent.contains(";; ") && sent.contains("(* 2 x))"), "{sent}");
+        assert!(sent.ends_with("</editor>\n\nwhat does this do"), "{sent}");
+        let argv = std::fs::read_to_string(format!("{dir}/argv")).unwrap();
+        assert!(argv.contains("--permission-prompt-tool\nstdio\n"), "{argv}");
+
+        // (EDIT_AGENT_SHOT=out.png keeps this frame, to look at.)
+        if let Ok(out) = std::env::var("EDIT_AGENT_SHOT") {
+            s.call(r#"(agent-event '("ask" "q" "Bash" "cargo test -p edit" "This command requires approval"))"#);
+            let mut fb = crate::framebuffer::Framebuffer::new(1200, 700);
+            app::draw(&mut fb);
+            fb.save_png(&out).expect("saved");
+            s.call("(set! *agent-asks* '())");
+        }
+
+        // The conversation is filed by its directory, for the next start.
+        let filed = std::fs::read_to_string(format!("{dir}/sessions.scm")).expect("filed");
+        assert!(filed.contains("\"s-1\"") && filed.contains(&dir), "{filed}");
+        s.call(r#"(set! *agent-sessions-read* #f) (set! *agent-sessions* (make-hash-table equal?))"#);
+        assert_eq!(s.eval_to_string("(*agent-session-ref* (%alist-ref (agent-code-profile) :cwd #f))").as_deref(), Ok("\"s-1\""), "and read back");
+
+        // Escape while it works: interrupted, and the keyboard stays.
+        s.call(r#"(set! ended '()) (agent-submit "a long job")"#);
+        wait(&mut s, r#"(if (member "working" (map (lambda (i) (%pane-row-text 5 i)) (iota (%pane-row-count 5)))) #t #f)"#);
+        assert!(s.escape(), "Escape is the agent's");
+        wait(&mut s, "(pair? ended)");
+        assert!(rows(&mut s).contains("— interrupted —"));
+        assert_eq!(app::typing(), Some(app::AGENT), "still at its prompt");
+        // Idle, Escape leaves for the editor; M-a then hides the column.
+        assert!(s.escape());
+        assert_eq!(app::typing(), Some(app::EDITOR));
+        s.key("M-a");
+        assert_eq!(app::typing(), Some(app::AGENT), "M-a from the editor comes back to it");
+        s.key("M-a");
+        assert!(app::rect(app::AGENT).is_none());
+        assert_eq!(app::rect(app::EDITOR).unwrap().w, editor_w);
+        crate::agent::stop();
+        app::show_agent(false);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The terminal runs the LOGIN shell, not $SHELL: under `nix develop`

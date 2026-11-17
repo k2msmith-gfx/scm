@@ -13,8 +13,10 @@
 ;                        runs, what it may do, what its prompt adds. The
 ;                        default is the CODE profile, below; a host builds
 ;                        on it with agent-profile-extend.
-;   *agent-prepare*      what you typed -> the message sent (the modeler
-;                        puts the scene and matching examples in front)
+;   *agent-prepare*      what you typed -> the message sent. Here: what
+;                        the editor shows, then the request
+;                        (agent-with-editor-context). The modeler puts its
+;                        scene and matching examples in front as well.
 ;   *agent-row*          (kind a b) -> (style text), or #f for the row
 ;                        below: how this host shows a step
 ;   *agent-session-ref* / *agent-session-set!*
@@ -24,7 +26,7 @@
 ;   *agent-turn-ended*   (status) once a turn is over: "done", "error" or
 ;                        "cancelled"
 (define *agent-shown* (lambda (id) #f))
-(define *agent-prepare* (lambda (text) text))
+(define *agent-prepare* (lambda (text) (agent-with-editor-context text)))
 (define *agent-row* (lambda (kind a b) #f))
 (define *agent-turn-ended* (lambda (status) #f))
 
@@ -38,7 +40,64 @@
 ; and :arg, which may repeat. A key that is absent is the CLI's own default.
 
 (define agent-editor-note
-  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor.")
+  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. A file marked as having unsaved edits is NEWER in the editor than on disk: what you read from disk may be stale, so say so and ask them to save (C-x C-s) before you edit it.")
+
+; ── What the editor shows, for the agent ───────────────────────────────────
+; The agent reads files itself; what it cannot see is the USER — which file
+; is in front of them, where the cursor is, what is selected, what else is
+; open and which of it is not saved. That rides in front of every request,
+; and stays small: names and a selection, never a file's contents. In the
+; REQUEST, not the system prompt, which must not change from turn to turn
+; if it is to stay cached.
+(define *agent-selection-limit* 4000)
+
+(define (agent-editor-context)
+  "(agent-editor-context)  ->  a string, or #f with no editor pane
+
+What the editor shows, as the agent is told it: the buffer in front, its
+language, the cursor's line and column and that line's text, the selection
+when there is one, and the other buffers open — each marked when it has
+edits that are not saved."
+  (let ((eid (editor-pane-id)))
+    (and eid
+         (let* ((buf (%editor-active-buffer eid))
+                (dirty (lambda (b)
+                         (any (lambda (row) (and (equal? (car row) b) (positive? (cadr row))))
+                              (%editor-buffer-list eid))))
+                (label (lambda (b)
+                         (string-append (or (buffer-path b) (%text (buffer-name b)))
+                                        (if (dirty b) " (unsaved edits)" ""))))
+                (cursor (%editor-cursor eid))
+                (lines (string-split (%editor-text eid) "\n"))
+                (line (%list-ref/default lines (car cursor) ""))
+                (language (%buffer-language eid buf))
+                (selection (%editor-act eid "copy"))
+                (others (filter (lambda (b) (not (equal? b buf))) (%buffer-mru eid))))
+           (string-append
+             "<editor>\n"
+             "file: " (label buf)
+             (if (and (string? language) (not (equal? language ""))) (string-append " — " language) "")
+             "\n"
+             "cursor: line " (number->string (+ 1 (car cursor)))
+             ", column " (number->string (+ 1 (cadr cursor)))
+             " of " (number->string (length lines)) " lines\n"
+             ; (Its indentation kept: where in the line the cursor is matters.)
+             "that line: " (if (> (string-length line) 300) (substring line 0 300) line) "\n"
+             (if (and (string? selection) (not (equal? selection "")))
+                 (string-append "selection:\n" (%agent-cut selection *agent-selection-limit*) "\n")
+                 "")
+             (if (null? others)
+                 ""
+                 (string-append "also open: "
+                                (apply string-append
+                                       (cdr (apply append (map (lambda (b) (list ", " (label b))) others))))
+                                "\n"))
+             "</editor>")))))
+
+(define (agent-with-editor-context text)
+  "TEXT as a request, with what the editor shows in front of it."
+  (let ((context (guard (e (#t #f)) (agent-editor-context))))
+    (if context (string-append context "\n\n" text) text)))
 
 (define (agent-project-dir)
   "Where the agent runs: the git checkout the buffer's file is in, else

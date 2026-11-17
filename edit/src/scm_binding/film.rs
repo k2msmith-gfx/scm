@@ -27,7 +27,7 @@ pub fn install(interp: &mut scm::Interp) -> Result<(), scm::EmbedError> {
     interp.define_fn("%film-icon", |args| {
         let want = val_text(args, 0).unwrap_or_default();
         let found = crate::app::icon_rects().into_iter().find(|(i, _)| {
-            matches!((i, want.as_str()), (crate::app::Icon::Files, "files") | (crate::app::Icon::Repl, "repl") | (crate::app::Icon::Terminal, "terminal"))
+            matches!((i, want.as_str()), (crate::app::Icon::Files, "files") | (crate::app::Icon::Repl, "repl") | (crate::app::Icon::Terminal, "terminal") | (crate::app::Icon::Agent, "agent"))
         });
         Ok(match found {
             Some((_, r)) => Val::List(vec![Val::Float(r.x as f64 + r.w as f64 / 2.0), Val::Float(r.y as f64 + r.h as f64 / 2.0)]),

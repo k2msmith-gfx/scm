@@ -1,7 +1,8 @@
 # The agent panel in `edit` — plan, 2026-11-16
 
-**Status, 2026-11-17: A0 measured; A1 and A2 built** (below, "A1 and A2
-as built"), not yet hosted by either program — that is A3. Kevin accepted
+**Status, 2026-11-17: A0 measured; A1, A2 and A3 built** (below, "A1 and
+A2 as built", "A3 as built"): the standalone has the agent; the modeler
+still has its own (A5). Kevin accepted
 the recommendations on D1–D7 on 2026-11-16 and then changed two of them,
 both recorded where they stand: **D1 is one process per CONVERSATION**, and
 **D3 is ask in the pane**, for programs and for files outside the project.
@@ -158,7 +159,7 @@ Each leaves both hosts green. Sizes are guesses until A0.
 | **A0** | **Measure the CLI.** A scratch script against the real `claude`: does `--resume` work across cwd-keyed sessions the way `ai.rs` assumes in 2.1.x; what `--permission-mode acceptEdits` / `plan` do under `-p`; what `--permission-prompt-tool` asks of an MCP tool; what `--include-partial-messages` emits; whether one `--input-format stream-json` process can take turn after turn and be interrupted without being killed. | a table in this file under "A0 as measured"; D1 and D3 answered with evidence |
 | **A1** ✔ | **The bridge.** `edit/src/agent.rs` ported from `ai.rs`: spawn, stderr drain, stream parse, metrics de-duplicated by message id, cancel, stale-session retry, `claude auth`. `Bridge::over(reader)` for tests. The Messages-API backend and the one-shot mode are NOT ported (D5). | unit tests over canned `.jsonl` (text, tool use, tool result with an image, compaction, error result, a stream cut mid-line); a `sleep` child killed by `cancel()` reports `Cancelled`; no real turn spent |
 | **A2** ✔ | **Prims and pane.** `scm_binding/agent.rs` (`%agent-send`, `-poll`, `-cancel`, `-busy?`, `-session`, `-session-set`, `-reset`, `-auth`, `-auth-pending`, `-auth-input`); `25-agent.scm` in `SHELL` and `EMBEDDED`; the profile. | a bare-interpreter test drives `agent-submit` against a fake `claude` (a shell script that prints canned events, named by `EDIT_CLAUDE_BIN`) and asserts the transcript rows; `/status` against a fake `auth` |
-| **A3** | **The standalone hosts it.** A fifth pane id and a right dock in `app.rs` (D2), an icon, `M-a`, `%show-dock`; Escape in `Session::escape` cancels a busy turn when the agent holds typing; session id stored per project root. | `cargo run -p edit -- FILE`, `M-a`, `/login`, a real question about the open file answered, restart, the conversation resumes. Kevin's use is the gate |
+| **A3** ✔ | **The standalone hosts it.** A fifth pane id and a right dock in `app.rs` (D2), an icon, `M-a`, `%show-dock`; Escape in `Session::escape` cancels a busy turn when the agent holds typing; session id stored per project root. | `cargo run -p edit -- FILE`, `M-a`, `/login`, a real question about the open file answered, restart, the conversation resumes. Kevin's use is the gate |
 | **A4** | **It edits, and the editor notices.** (The permission posture is built: see "as built".) Auto-revert of an unmodified buffer whose file changed on disk, and a loud refusal to revert a modified one; the turn's changed files listed in the transcript. | the agent fixes a planted bug in an open buffer; the buffer shows the fix without `:e!`; a buffer with unsaved edits is not overwritten |
 | **A5** | **The modeler takes it.** `14-ai.scm` sets the profile; `ai.rs`, the `%ai-*` prims, `Wake::Ai` and the pane half of `08-editor.scm` go; `MODELER_AI_*` variables keep working through the profile; Escape's kernel branch calls `edit::agent`. | ray's `test_agent_pane.py`, `test_agent_mcp.py`, `test_agent_during_render.py` (19/19) and `test_ai_catalog_modes.py` pass unchanged; `ai_census.py` and `ai_ab.py` still read the stream log; one real turn resumes a pre-existing `:ai-session` |
 | **A6** | **Editor tools for the agent** (D4). An MCP server the binary itself provides (`edit --mcp`, stdio, reaching the running editor as `14-remote` reaches `scm --serve`): open buffers and unsaved text, selection, cursor, diagnostics, open-file-at-line, eval in the attached backend; and the WRITE side the modeler's agent already has for the scene editor (`editor_write`, `editor_replace`, `editor_send`): replace a region or a whole buffer in place, each agent edit ONE undo step. | the agent answers "what is wrong with the form at point" from an UNSAVED buffer, fixes it in the buffer, and one `u` takes the fix back |
@@ -292,10 +293,45 @@ ever not `claude.ai`; the API-key variables never reach the child.
   in the request (`*agent-prepare*`), and the footer's `cache … read / …
   new` is where a prefix that has stopped caching shows.
 
-**Not done, and A3's:** the standalone has no pane for it yet (`app.rs`),
-Escape is not wired to `agent-interrupt`, and the session id is kept in
-memory only. Nothing draws until a host calls `(remote-poll)` on its wake,
-which the standalone already does.
+## A3 as built (2026-11-17)
+
+`cargo run --release -p edit -- FILE`, then **M-a** or the robot icon at
+the right end of the status strip.
+
+- **A fifth pane, a column on the right** (`app.rs`: `AGENT = 5`, 30% of
+  the width, its left edge draggable 12–60%), hidden until asked for, so no
+  `claude` starts and the editor keeps the width. `Icon::Agent` is the
+  fourth strip icon — a robot's head, as the modeler's dock button is — lit
+  while the column shows.
+- **M-a goes to the agent from anywhere, and from its own prompt hides it**;
+  the icon is a plain toggle. `C-x o` goes round the panes that show. A
+  click in the column takes the keyboard; a drag selects and Cmd-C copies.
+- **Escape at its prompt interrupts a turn and keeps the keyboard there**,
+  in `Session::escape` — the kernel, not the Scheme chain, which that
+  function returns before reaching. Idle, Escape goes back to the editor.
+- **The conversation survives a restart**: its id is filed by directory in
+  `~/.config/edit/agent-sessions.scm` and the next request there resumes
+  it. `C-l` and `/new` forget it.
+- **Every request says what the editor shows** (Kevin: *"the agent should
+  have access to buffers, what the user is typing and where"*): an
+  `<editor>` block in front of the request — the file in front, its
+  language, the cursor's line and column and that line's text, the
+  selection, the other buffers open, and which have edits not saved. It is
+  the shell's (`agent-editor-context`, 25-agent), so the modeler gets it
+  too, and it rides in the REQUEST so the cached system prompt does not
+  change. It is names and a selection, never a file's contents: the agent
+  reads files itself. **What it still cannot do is read a buffer's UNSAVED
+  text or write into a buffer** — it is told when a file is newer in the
+  editor than on disk and asks for a save. That is A6's, and with the
+  process's own control channel proven for permissions, A6 should try
+  `--mcp-config` with an SDK-style server on the same channel before a
+  second process.
+
+Tested by `the_agent_has_a_column_and_knows_what_the_editor_shows`
+(`standalone.rs`), against the stand-in; `EDIT_AGENT_SHOT=out.png` on that
+test keeps a frame to look at. **Not yet done by a person:** a real
+conversation from the window — that is the stage's exit criterion and it
+is Kevin's.
 
 ## Risks
 
