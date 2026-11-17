@@ -375,6 +375,10 @@ struct RowImage {
 #[derive(Default)]
 struct RowCache {
     rows: HashMap<u64, RowImage>,
+    /// The line-number column's labels, kept the same way: by the label,
+    /// its ink, the size, the frame's background and glyph policy, and
+    /// where it falls within a pixel.
+    labels: HashMap<u64, RowImage>,
     frame: u64,
     /// Off: every row draws as it did before the cache (the test of it).
     off: bool,
@@ -3864,6 +3868,11 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
         // the cursor's line in the body ink, the rest dim.
         let cursor = pane.editor.cursor();
         if numbered {
+            let labels_on = !state.rows.off;
+            let labels = &mut state.rows.labels;
+            if labels.len() > ROW_CACHE {
+                labels.retain(|_, r| r.used + 1 >= frame);
+            }
             let ascent = crate::text::mono_ascent(px);
             let right = rect.x as f32 + pad + gutter - advance;
             let relative = line_numbers() == LineNumbers::Relative;
@@ -3890,7 +3899,30 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, _focused: bool) {
                     let label = n.to_string();
                     let x = right - label.len() as f32 * advance;
                     let ink = if here { theme.text_ink } else { theme.text_dim };
-                    crate::text::draw_mono_line(fb, x, y, px, ink, &label);
+                    if !labels_on {
+                        crate::text::draw_mono_line(fb, x, y, px, ink, &label);
+                        continue;
+                    }
+                    // Drawn once at its place within a pixel (draw_mono_line
+                    // rounds each pen from x, and the baseline from y), so
+                    // the copy lands every pixel where drawing it would.
+                    let (fx, fy) = (x.floor(), y.floor());
+                    let key = {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        (&label, ink, frame_key, px.to_bits(), (x - fx).to_bits(), (y - fy).to_bits(), run.line_height.to_bits()).hash(&mut h);
+                        h.finish()
+                    };
+                    let img = labels.entry(key).or_insert_with(|| {
+                        let w = ((label.len() + 1) as f32 * advance).ceil() as u32;
+                        let h = run.line_height.ceil() as u32;
+                        let mut f = Framebuffer::new(w, h);
+                        f.fill_rect(Rect { x: 0, y: 0, w, h }, bg);
+                        crate::text::draw_mono_line(&mut f, x - fx, y - fy, px, ink, &label);
+                        RowImage { w, h, px: f.pixels, used: 0 }
+                    });
+                    img.used = frame;
+                    blit_row(fb, img, fx as i32, fy as i32, (0, 0, fbw, fbh));
                 }
             });
         }
@@ -4443,7 +4475,8 @@ mod tests {
 
     /// The row cache draws exactly what drawing every glyph drew: the same
     /// frame from an empty cache, from a full one, and scrolled — rows put
-    /// back at new places — with a selection that skips the cache on its rows.
+    /// back at new places — with a selection that skips the cache on its rows,
+    /// the line numbers' labels included.
     #[test]
     fn the_row_cache_changes_no_pixel() {
         set_vi(false);
@@ -4468,6 +4501,7 @@ mod tests {
         assert_eq!(frame(false), reference, "drawn into an empty cache");
         assert_eq!(frame(false), reference, "copied from a full one");
         assert!(with_state(|st| !st.rows.rows.is_empty()), "rows were kept");
+        assert!(with_state(|st| !st.rows.labels.is_empty()), "and line numbers");
         scroll(id, 3.0);
         let reference = frame(true);
         assert_eq!(frame(false), reference, "rows reused three lines up");

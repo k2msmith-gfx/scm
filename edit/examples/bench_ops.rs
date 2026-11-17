@@ -15,6 +15,7 @@
 //!     … -- FILE - W H SCALE --geometry   rows and columns on screen
 //!     … -- FILE - W H SCALE --idle       a frame with nothing changed
 //!     BENCH_NODRAW=1 …                    the keys alone, no frame
+//!     BENCH_NO_NUMBERS=1 …                with the line-number column off
 //!
 //! `edit/tools/bench/run.sh FILE OUTDIR` runs this and the Neovim side
 //! (`nvim_bench.vim`, in a hidden 57×244 terminal — 1920×1080 at 2× in
@@ -43,6 +44,11 @@ fn main() {
         app::show_files(false);
     }
     app::draw(&mut fb);
+    // BENCH_NO_NUMBERS: the line-number column off, to see its share.
+    if std::env::var_os("BENCH_NO_NUMBERS").is_some() {
+        edit::editorpane::set_line_numbers(edit::editorpane::LineNumbers::Off);
+        app::draw(&mut fb);
+    }
     if std::env::args().any(|a| a == "--idle") {
         // A frame with nothing changed: what the draw costs by itself.
         let mut xs: Vec<f64> = (0..200).map(|_| { let t = Instant::now(); app::draw(&mut fb); t.elapsed().as_secs_f64() * 1000.0 }).collect();
