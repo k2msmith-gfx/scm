@@ -2280,6 +2280,140 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A Rust buffer's sends go to evcxr, as a Scheme file's go to an scm
+    /// (Kevin, 2026-11-17) — here a stand-in that speaks evcxr's framing:
+    /// the expression before the point, the item around it, the buffer and
+    /// its main(), an error with rustc's report, the REPL panel in Rust,
+    /// and a send with no evcxr to go to.
+    #[test]
+    fn a_rust_buffer_sends_to_evcxr() {
+        let bin = crate::pipe::fake_evcxr("sends");
+        let dir = bin.parent().unwrap().to_string_lossy().into_owned();
+        let src = format!("{dir}/main.rs");
+        std::fs::write(&src, "fn sq(a: i32) -> i32 {\n    a * a\n}\n\nfn main() {\n    let n = sq(3) + 1;\n    println!(\"{n}\");\n}\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, std::slice::from_ref(&src)).expect("boot");
+        s.call(&format!(r#"(rust-analyzer-stop) (set! *rust-repl-program* "{dir}/evcxr") (focus-scene-editor) (%pane-clear 2)"#));
+        assert_eq!(s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap(), "\"rust\"");
+        assert_eq!(s.eval_to_string("(%alist-ref (backend-of (%editor-active-buffer 1)) :name #f)").unwrap(), "\"evcxr\"");
+        let rows = |s: &mut Session| s.eval_to_string("(map (lambda (i) (%pane-row-text 2 i)) (iota (%pane-row-count 2)))").unwrap();
+        // Run a send and wait for evcxr's answer to reach the transcript.
+        let send = |s: &mut Session, what: &str| {
+            let before: usize = s.eval_to_string("(%pane-row-count 2)").unwrap().parse().unwrap();
+            s.call(what);
+            let t0 = std::time::Instant::now();
+            loop {
+                s.poll();
+                let all = rows(s);
+                let n: usize = s.eval_to_string("(%pane-row-count 2)").unwrap().parse().unwrap();
+                if n >= before + 2 && s.eval_to_string("(hash-table-size *rust-repl-callbacks*)").as_deref() == Ok("0") {
+                    return all;
+                }
+                assert!(t0.elapsed() < std::time::Duration::from_secs(20), "no answer to {what}:\n{all}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let nl = '\u{2028}';
+
+        // C-x C-e: the expression before the cursor — `sq(3)`, out of the
+        // middle of a statement inside main.
+        s.call("(%editor-select 1 5 12 17)");
+        let got = send(&mut s, "(eval-last-sexp)");
+        assert!(got.contains(";; sexp: sq(3)") && got.contains("=> ran: sq(3)"), "{got}");
+        assert_eq!(s.eval_to_string("(if (rust-repl-running?) 1 0)").unwrap(), "1", "the first send started it");
+        // C-M-x: the whole item the cursor is in, as ONE request — its
+        // newlines evcxr's own.
+        s.call("(%editor-goto-line 1 1)");
+        let got = send(&mut s, "(eval-defun)");
+        assert!(got.contains(&format!("=> ran: fn sq(a: i32) -> i32 {{{nl}    a * a{nl}}}")), "{got}");
+        // C-c C-b: the buffer — and main() called, since it has one.
+        let got = send(&mut s, "(eval-buffer)");
+        assert!(got.contains(&format!("println!(\\\"{{n}}\\\");{nl}}}{nl}{nl}main();")), "{got}");
+        // An error: rustc's report in the transcript, its first line the
+        // message.
+        s.call(r#"(%editor-rewrite 1 "let y = boom + 1;\n")"#);
+        s.call("(%editor-goto-line 1 0)");
+        let got = send(&mut s, "(eval-defun)");
+        assert!(got.contains("╭─[command:1:1]") && got.contains("error: [E0425] Error: cannot find value `boom` in this scope"), "{got}");
+
+        // The REPL panel is evcxr's while a Rust buffer is on screen: its
+        // prompt, and a line that leaves a bracket open waits for the rest.
+        s.call("(repl)");
+        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"rust >> \"");
+        for c in "let v = vec![1,".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("return");
+        assert_eq!(s.eval_to_string("*repl-pending*").unwrap(), "\"let v = vec![1,\\n\"", "not sent yet");
+        for c in "2];".chars() {
+            s.text(&c.to_string());
+        }
+        let got = send(&mut s, r#"(on-key "return")"#);
+        assert!(got.contains(&format!("=> ran: let v = vec![1,{nl}2];")), "{got}");
+        assert_eq!(s.eval_to_string("*repl-pending*").unwrap(), "\"\"");
+
+        // Stopped, the next send starts another; with no evcxr to start, a
+        // send says so and goes nowhere — never to this image.
+        s.call("(focus-scene-editor) (rust-repl-stop)");
+        assert_eq!(s.eval_to_string("(if (rust-repl-running?) 1 0)").unwrap(), "0");
+        s.call(r#"(%editor-rewrite 1 "sq(4)\n") (%editor-select 1 0 0 5)"#);
+        let got = send(&mut s, "(eval-last-sexp)");
+        assert!(got.contains("=> ran: sq(4)"), "{got}");
+        s.call(r#"(rust-repl-stop) (set! *rust-repl-program* "/nonexistent/evcxr") (%pane-clear 2) (eval-last-sexp)"#);
+        assert!(rows(&mut s).contains("a send goes nowhere without a REPL — `cargo install evcxr_repl`"), "{}", rows(&mut s));
+        app::show_panel(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The same against the REAL evcxr, where there is one (it compiles,
+    /// so by hand: `cargo test -p edit --lib the_real_evcxr -- --ignored
+    /// --nocapture`): a function defined, called, a value read back, and
+    /// rustc's own error for a name that is not there.
+    #[test]
+    #[ignore = "needs evcxr, and compiles Rust: slow"]
+    fn the_real_evcxr_runs_what_a_rust_buffer_sends() {
+        if crate::pipe::which("evcxr").is_none() {
+            eprintln!("no evcxr here — skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("edit-evcxr-real-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("main.rs").to_string_lossy().into_owned();
+        std::fs::write(&src, "fn sq(a: i32) -> i32 {\n    a * a\n}\n\nfn main() {\n    let n = sq(3) + 1;\n    println!(\"main says {n}\");\n}\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, std::slice::from_ref(&src)).expect("boot");
+        s.call("(rust-analyzer-stop) (focus-scene-editor) (%pane-clear 2)");
+        let send = |s: &mut Session, what: &str| {
+            let t0 = std::time::Instant::now();
+            s.call(what);
+            loop {
+                s.poll();
+                if s.eval_to_string("(hash-table-size *rust-repl-callbacks*)").as_deref() == Ok("0") {
+                    break;
+                }
+                assert!(t0.elapsed() < std::time::Duration::from_secs(180), "no answer to {what}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let all = s.eval_to_string("(map (lambda (i) (%pane-row-text 2 i)) (iota (%pane-row-count 2)))").unwrap();
+            eprintln!("{what}  ({:.1}s)\n{}\n", t0.elapsed().as_secs_f64(), all.replace("\" \"", "\n"));
+            all
+        };
+        s.call("(%editor-goto-line 1 1)");
+        let got = send(&mut s, "(eval-defun)");
+        assert!(got.contains("=> fn sq"), "a definition answers its name: {got}");
+        s.call("(%editor-select 1 5 12 17)");
+        let got = send(&mut s, "(eval-last-sexp)");
+        assert!(got.contains("=> 9"), "sq(3): {got}");
+        let got = send(&mut s, "(eval-buffer)");
+        assert!(got.contains("main says 10"), "the buffer ran, main and all: {got}");
+        s.call(r#"(%editor-rewrite 1 "let y = nope + 1;\n") (%editor-goto-line 1 0)"#);
+        let got = send(&mut s, "(eval-defun)");
+        assert!(got.contains("error: ") && got.contains("nope"), "rustc's own words: {got}");
+        s.call("(rust-repl-stop)");
+        app::show_panel(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// The terminal runs the LOGIN shell, not $SHELL: under `nix develop`
     /// $SHELL is a bash without readline, and Tab completed nothing (Kevin,
     /// 2026-11-14). Here: the login shell, then Tab completing in it.

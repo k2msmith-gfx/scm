@@ -159,6 +159,7 @@ mod clipboard;
 mod editor;
 mod lsp;
 mod menu;
+mod pipe;
 pub mod remote;
 pub mod standalone;
 mod term;
@@ -171,7 +172,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust", "21-ray", "22-warnings", "23-structure", "24-refactor", "25-agent"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust", "21-ray", "22-warnings", "23-structure", "24-refactor", "25-agent", "26-rust-repl"];
 
 /// Where [`SHELL`]'s files are in the tree this binary was built from. They
 /// are read from there while it exists, so an edit to one takes effect
@@ -211,6 +212,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("23-structure", include_str!("../scm/23-structure.scm")),
     ("24-refactor", include_str!("../scm/24-refactor.scm")),
     ("25-agent", include_str!("../scm/25-agent.scm")),
+    ("26-rust-repl", include_str!("../scm/26-rust-repl.scm")),
     ("host/prelude", include_str!("../scm/host/prelude.scm")),
     ("host/standalone", include_str!("../scm/host/standalone.scm")),
     ("host/themes", include_str!("../scm/host/themes.scm")),
@@ -286,6 +288,7 @@ pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Res
         .chain(lsp::install(interp)?)
         .chain(warn::install(interp)?)
         .chain(agent::install(interp)?)
+        .chain(pipe::install(interp)?)
     {
         installed(name);
     }
@@ -578,7 +581,8 @@ mod tests {
         std::fs::write(&rs, "fn main() {\n    let counter = 1;\n    count\n}\n").unwrap();
         let rs = rs.to_string_lossy().replace('\\', "/");
         // No language server: what this test sees must not depend on the PATH.
-        eval(&mut interp, &format!(r#"(rust-analyzer-stop) (set! helped '()) (visit-file-text "{rs}")"#));
+        // Nor an evcxr: with none, a send says where it would have gone.
+        eval(&mut interp, &format!(r#"(rust-analyzer-stop) (set! *rust-repl-program* "/nonexistent/evcxr") (set! helped '()) (visit-file-text "{rs}")"#));
         assert_eq!(eval(&mut interp, "(%buffer-language 3 (%editor-active-buffer 3))"), Val::Str("rust".into()));
         eval(&mut interp, "(%editor-goto-line 3 1) (eval-defun)");
         let sent = eval(&mut interp, "(apply string-append helped)");
@@ -596,7 +600,7 @@ mod tests {
         assert_eq!(eval(&mut interp, "(car (editor-pool))"), Val::Bool(true), "served");
         assert_eq!(eval(&mut interp, r#"(keep-candidates "count" (cdr (editor-pool)))"#), words(&["counter_of", "count_all", "Count"]));
         assert_eq!(eval(&mut interp, r#"(rank-candidates "count" (cdr (editor-pool)))"#), words(&["Count", "count_all", "counter_of"]));
-        eval(&mut interp, r#"(hash-table-set! *language-backends* "rust" rust-backend)"#);
+        eval(&mut interp, r#"(hash-table-set! *language-backends* "rust" rust-repl-backend)"#);
         assert_eq!(eval(&mut interp, "(car (editor-pool))"), Val::Bool(false), "no server: the buffer's words");
         let gl = std::env::temp_dir().join(format!("edit-guile-test-{}.scm", std::process::id()));
         std::fs::write(&gl, "(use-modules (ice-9 match))\n").unwrap();

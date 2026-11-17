@@ -293,6 +293,8 @@ Every ray file of the same checkout shares it, so they all start over."
   ; `scheme λ > ` — the λ kept for both scm images (Kevin, 2026-11-13). A
   ; continuation lines up under the form, as the prompt's width of spaces.
   (let ((p (cond ((repl-guile?) "scheme@(guile-user)> ")
+                 ; A Rust buffer's REPL is evcxr, in evcxr's own prompt.
+                 ((backend-op (repl-backend) :whole?) "rust >> ")
                  ((string-prefix? "scm at " (%alist-ref (repl-backend) :name "")) "scm λ > ")
                  (else "scheme λ > "))))
     (if (string=? *repl-pending* "") p (make-string (string-length p) #\space))))
@@ -363,10 +365,14 @@ Every ray file of the same checkout shares it, so they all start over."
     (cond
       ; A comma line is a REPL COMMAND: Guile's own run in Guile, these in
       ; scm (below) — the same names at either prompt.
-      ((and (string=? *repl-pending* "") (repl-command-line? line) (not (repl-guile?)))
+      ((and (string=? *repl-pending* "") (repl-command-line? line) (not (repl-guile?))
+            (not (backend-op (repl-backend) :whole?)))
         (set! *repl-history* (cons line *repl-history*))
         (repl-command line (repl-backend) repl-eval-print))
-      ((eq? (%read-status src) 'incomplete)
+      ; More to come: by scm's reader, or by what the backend says is whole
+      ; (evcxr's Rust: a bracket still open).
+      ((let ((whole? (backend-op (repl-backend) :whole?)))
+         (if whole? (not (whole? src)) (eq? (%read-status src) 'incomplete)))
         (set! *repl-pending* (string-append src "\n")))
       (else
         (set! *repl-pending* "")

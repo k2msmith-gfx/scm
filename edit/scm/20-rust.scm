@@ -1,8 +1,9 @@
 ;## 20-rust.scm — Rust, the editor's first language that is not Scheme.
 ;## A .rs file highlights and indents as Rust (edit's language/rust.rs,
 ;## piece 1, Kevin 2026-11-14), with nothing running beside the editor.
-;## Rust has no REPL, so a send goes nowhere and says so — it must not fall
-;## through to this image, where Rust would be read as Scheme.
+;## Rust has no REPL of its own, so a send from here goes nowhere and says
+;## so — it must not fall through to this image, where Rust would be read as
+;## Scheme. (26-rust-repl gives it one, evcxr, and takes the sends.)
 ;##
 ;## When rust-analyzer is on the PATH (rustup puts it there) it is the
 ;## language server (E7, edit's lsp.rs): it starts with the first .rs

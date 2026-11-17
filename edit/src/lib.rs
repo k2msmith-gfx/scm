@@ -20,6 +20,7 @@ pub mod host;
 pub mod keys;
 pub mod language;
 pub mod lsp;
+pub mod pipe;
 pub mod scm_binding;
 pub mod sexp;
 pub mod theme;

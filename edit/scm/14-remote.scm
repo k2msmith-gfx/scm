@@ -222,6 +222,7 @@ asks nothing."
   "Stop what the buffer's other process is evaluating — a send that runs
   away. Its answer comes back marked (stopped); the process lives on."
   (let ((b (backend-of (%editor-active-buffer (editor-pane-id)))))
-    (cond ((and b (%alist-ref b :conn #f)) => (lambda (conn) (%remote-interrupt conn) (echo "interrupted")))
+    (cond ((and b (%alist-ref b :interrupt #f)) => (lambda (interrupt) (interrupt)))   ; (evcxr's, 26-rust-repl)
+          ((and b (%alist-ref b :conn #f)) => (lambda (conn) (%remote-interrupt conn) (echo "interrupted")))
           (*remote* (%remote-interrupt *remote*) (echo "interrupted"))
           (else (echo "nothing running elsewhere to interrupt")))))

@@ -274,6 +274,23 @@ itself on the echo line."
     (editor-send src label)
     (*around-send* (lambda () (editor-send src label)) start (+ start (string-length src)))))
 
+; WHAT A SEND READS IS THE LANGUAGE'S. The scanner above reads Lisp, where
+; a form is its brackets; a language that is not one says for itself what
+; "the top-level form at the point" and "the expression before it" are
+; (26-rust-repl: a statement or item, and an expression, off rustc's own
+; tokens). Each answers (start end), characters into the text, or #f.
+(define *language-forms* (make-hash-table equal?))   ; language -> (top . before)
+
+(define (define-language-forms! language top before)
+  "Say what a send reads from a buffer in LANGUAGE: (TOP text) the
+top-level form at the point — C-M-x — and (BEFORE text) the expression
+ending just before it — C-x C-e — each as (start end) or #f."
+  (hash-table-set! *language-forms* language (cons top before)))
+
+(define (%buffer-forms)
+  (let ((eid (editor-pane-id)))
+    (hash-table-ref/default *language-forms* (%buffer-language eid (%editor-active-buffer eid)) #f)))
+
 (define (eval-last-sexp)
   "Run the expression that ends just before the cursor — C-x C-e. Runs that
   expression, which may be inside a larger form, and echoes its value.
@@ -282,7 +299,8 @@ itself on the echo line."
   anything. On a whole (add-…) form it builds, and replaces what that form
   built last time, as C-M-x does."
   (define text (%editor-text (editor-pane-id)))
-  (let ((span (editor-form-before text (editor-point text))))
+  (let ((span (let ((forms (%buffer-forms)))
+                (if forms ((cdr forms) text) (editor-form-before text (editor-point text))))))
     (if span
       (eval-owning (substring text (car span) (cadr span)) (car span) "sexp")
       (echo "no expression before point"))))
@@ -297,7 +315,8 @@ itself on the echo line."
   nothing. After changing a procedure, run the forms that CALL it again:
   shapes already built ran the old definition."
   (define text (%editor-text (editor-pane-id)))
-  (let ((span (editor-topform-at text (editor-point text))))
+  (let ((span (let ((forms (%buffer-forms)))
+                (if forms ((car forms) text) (editor-topform-at text (editor-point text))))))
     (if span
       (eval-owning (substring text (car span) (cadr span)) (car span) "defun")
       (echo "no top-level form at point"))))

@@ -1196,6 +1196,60 @@ silences what is inside it, and `M-x set-editor-warnings #f` turns them off.
   files warn, each truly — rock-lab.scm's caller-defined names, and the
   two rock-x experiment files' driver-defined ones.
 
+**Rust has a REPL: evcxr (2026-11-17).** Kevin: *"I would like edit to be
+able to launch something like evcxr and connect to it like with scm or
+guile and send rust expressions, functions, buffer to it to run. Try to
+emulate the scheme functions that do the same."* So a Rust buffer's sends
+go to an evcxr the editor starts on the first one — the same keys, the
+same transcript, the same REPL panel as a Scheme file's scm:
+
+| key | sends | from a Rust buffer |
+|---|---|---|
+| `C-x C-e` | the expression before the cursor | `sq(3)`, `p.x`, `a.b(1).c[2]`, `vec![1, 2]` — and after a `;`, the statement it ends |
+| `C-M-x`, `C-c C-c` | the top-level form around it | the whole `fn`, `impl`, `struct` or `let`, from anywhere inside it |
+| `C-c C-r` | the selection | as it stands |
+| `C-c C-b` | the buffer | all of it — and `main()` called, when it defines one |
+
+- **How it is spoken to.** evcxr has no socket and no protocol but its
+  output; started `--ide-mode --disable-readline` it ends each answer with
+  U+0091 (it worked) or U+0092 (it did not), and reads one line whose
+  U+2028s are the code's newlines (its `main`, read and then measured
+  against 0.21.1). `src/pipe.rs` is that: a REPL over pipes, answers cut at
+  the marks and given to requests in the order they were sent, the
+  program's colours and prompt taken out. Nothing in it is Rust's — another
+  line REPL with an end mark is another `%pipe-start`.
+- **What a send reads** is the language's (`define-language-forms!`,
+  08-sends): Scheme's scanner reads brackets; Rust's unit is the statement
+  or item, and the expression inside one, both read off the lexer's tokens
+  (`language/rust.rs`: `statements`, `statement_at`, `expression_before`),
+  so a brace in a string or a comment is not a brace. A scratch buffer's
+  bare `sq(3)` on a line of its own is a statement.
+- **What comes back** is a backend RESULT like any other: the last line
+  evcxr wrote is taken for the value (`=> 9`) and what came before for
+  output; a send that printed nothing answers what it defined (`=> fn sq`),
+  as a Scheme define answers its name; an error is rustc's report in the
+  transcript and its first line on the echo. Answers come LATER
+  (`:eval-async`), so the window stays live through the first compile.
+- **The REPL panel** is evcxr's while a Rust buffer is on screen: `rust >> `,
+  and a line that leaves a bracket open waits for the rest. evcxr's own
+  commands (`:dep serde = "1"`, `:vars`) go straight through.
+- `M-x rust-repl-start`, `-stop`, `-restart`, `-interrupt` (and `M-x
+  remote-interrupt`, which now asks the buffer's backend); `*rust-repl-program*`
+  and `*rust-repl-args*`. evcxr is looked for on the PATH and then in
+  cargo's bin, where `cargo install evcxr_repl` puts it and where an editor
+  started from the dock would not find it. With none, a send says how to get
+  one and goes nowhere. Completion, describe and `M-.` stay rust-analyzer's.
+- **The agent's `eval` tool** reaches it too, being the buffer's backend.
+- **It is not Cargo.** One file that is a module of a crate (`use crate::…`,
+  `mod x;`) does not load into evcxr whole, though its functions do one at
+  a time; and evcxr keeps what it was sent until `rust-repl-restart`.
+
+Tests: `language::rust` (the cutting, on a file of awkward cases),
+`pipe` (the framing, against a stand-in), `a_rust_buffer_sends_to_evcxr`
+(every key, the REPL panel, no evcxr), and against the REAL evcxr
+`the_real_evcxr_runs_what_a_rust_buffer_sends` (`#[ignore]`; passed
+2026-11-17: 2.7 s for the first send, which compiles, 0.4 s after).
+
 **Still open.**
 - **In scm** (each is a change in the scm repo):
   - a sent form locates as `<input>:L:C`, because `eval-string` takes no

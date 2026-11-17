@@ -545,9 +545,360 @@ fn callee(lines: &[&str], toks: &[Token], i: usize) -> Option<String> {
     Some(name)
 }
 
+// ── What a send sends (Kevin, 2026-11-17: Rust to a REPL, as Scheme) ───────
+// A Lisp's unit is the form, which its brackets give away. Rust's is the
+// STATEMENT or ITEM — `let x = 5;`, a whole `fn`, an `impl` block, a bare
+// expression on a line of a scratch file — and the expression inside one.
+// Both are read off the tokens, so a brace in a string or a comment is not
+// a brace.
+
+/// A stretch of the buffer, from and to a (line, byte).
+pub type Span = ((usize, usize), (usize, usize));
+
+fn text_of<'a>(lines: &[&'a str], t: &Token) -> &'a str {
+    if t.start.0 == t.end.0 { &lines[t.start.0][t.start.1..t.end.1] } else { "" }
+}
+
+/// Cut `toks` (no comments among them) into statements: each ends at a `;`
+/// outside every bracket, at the `}` that closes an item or a block
+/// expression — unless what follows carries it on (`else`, a `.method()`,
+/// a `?`, the `;` of `let p = P { x: 1 };`) — or where a line that reads as
+/// finished is followed by one that starts something new, so a scratch
+/// buffer's bare `sq(3)` on a line of its own is one.
+fn cut(lines: &[&str], toks: &[Token]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    // Open brackets; true for the `[` of an attribute, `#[…]`.
+    let mut open: Vec<bool> = Vec::new();
+    let mut after_attribute = false;
+    for (i, t) in toks.iter().enumerate() {
+        // A new line where the one before reads as finished.
+        if let (Some(s), true) = (start, open.is_empty())
+            && i > 0
+            && t.start.0 > toks[i - 1].end.0
+            && !after_attribute
+        {
+            let before = &toks[i - 1];
+            let finished = matches!(before.kind, Kind::Close | Kind::Ident | Kind::Number | Kind::Literal | Kind::Str | Kind::Char)
+                || (before.kind == Kind::Keyword && matches!(text_of(lines, before), "self" | "Self"));
+            let carries_on = match t.kind {
+                Kind::Punct(_) => true,
+                Kind::Open => lines[t.start.0].as_bytes()[t.start.1] == b'{',
+                Kind::Keyword => matches!(text_of(lines, t), "else" | "as" | "where" | "in"),
+                _ => false,
+            };
+            if finished && !carries_on {
+                out.push((s, i - 1));
+                start = None;
+            }
+        }
+        if start.is_none() {
+            start = Some(i);
+        }
+        after_attribute = false;
+        match t.kind {
+            Kind::Open => {
+                let attribute = i > 0 && toks[i - 1].kind == Kind::Punct(b'#') || (i > 1 && toks[i - 1].kind == Kind::Punct(b'!') && toks[i - 2].kind == Kind::Punct(b'#'));
+                open.push(attribute && lines[t.start.0].as_bytes()[t.start.1] == b'[');
+            }
+            Kind::Close => {
+                let attribute = open.pop().unwrap_or(false);
+                if open.is_empty() {
+                    after_attribute = attribute;
+                    let brace = lines[t.start.0].as_bytes()[t.start.1] == b'}';
+                    let carries_on = toks.get(i + 1).is_some_and(|n| match n.kind {
+                        Kind::Punct(c) => matches!(c, b';' | b'.' | b'?'),
+                        Kind::Keyword => text_of(lines, n) == "else",
+                        _ => false,
+                    });
+                    if brace && !carries_on {
+                        out.push((start.take().unwrap_or(i), i));
+                    }
+                }
+            }
+            Kind::Punct(b';') if open.is_empty() => out.push((start.take().unwrap_or(i), i)),
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, toks.len() - 1));
+    }
+    out
+}
+
+fn code(lines: &[&str]) -> Vec<Token> {
+    tokens(lines).into_iter().filter(|t| t.kind != Kind::Comment).collect()
+}
+
+/// Every top-level statement and item of the buffer, in order.
+pub fn statements(lines: &[&str]) -> Vec<Span> {
+    let toks = code(lines);
+    cut(lines, &toks).into_iter().map(|(a, b)| (toks[a].start, toks[b].end)).collect()
+}
+
+/// The top-level statement or item the point is in, else the nearest one
+/// before it — what C-M-x sends: the whole `fn` from anywhere inside it.
+pub fn statement_at(lines: &[&str], line: usize, byte: usize) -> Option<Span> {
+    let at = (line, byte);
+    let all = statements(lines);
+    all.iter().find(|(s, e)| *s <= at && at <= *e).or_else(|| all.iter().rev().find(|(_, e)| *e <= at)).copied()
+}
+
+/// The expression that ends just before the point — what C-x C-e sends, to
+/// see a value: a name, a call and whatever it is called on (`a.b(1).c`,
+/// `vec![1, 2]`, `Point::new(3)`), a bracketed group, a literal. After a
+/// `;` it is the statement the `;` ends, in whatever block the point is in.
+pub fn expression_before(lines: &[&str], line: usize, byte: usize) -> Option<Span> {
+    let at = (line, byte);
+    let toks: Vec<Token> = code(lines).into_iter().filter(|t| t.end <= at).collect();
+    let last = toks.len().checked_sub(1)?;
+    if toks[last].kind == Kind::Punct(b';') {
+        // The innermost block still open at the point holds the statement.
+        let mut depth = 0;
+        let mut from = 0;
+        for i in (0..last).rev() {
+            match toks[i].kind {
+                Kind::Close => depth += 1,
+                Kind::Open if depth == 0 => {
+                    from = i + 1;
+                    break;
+                }
+                Kind::Open => depth -= 1,
+                _ => {}
+            }
+        }
+        let (a, b) = cut(lines, &toks[from..=last]).pop()?;
+        return Some((toks[from + a].start, toks[from + b].end));
+    }
+    // The start of the bracketed group that ends at `i`.
+    let opener = |mut i: usize| {
+        let mut depth = 0;
+        loop {
+            match toks[i].kind {
+                Kind::Close => depth += 1,
+                Kind::Open => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+            i = i.checked_sub(1)?;
+        }
+    };
+    let atom = |t: &Token| matches!(t.kind, Kind::Ident | Kind::Number | Kind::Literal | Kind::Str | Kind::Char) || (t.kind == Kind::Keyword && matches!(text_of(lines, t), "self" | "Self" | "crate" | "super"));
+    let mut i = match toks[last].kind {
+        Kind::Close => opener(last)?,
+        _ if atom(&toks[last]) => last,
+        Kind::Punct(b'?') => last,
+        _ => return None,
+    };
+    // Back along what it is called on, indexed by, or a path through.
+    while i > 0 {
+        let before = &toks[i - 1];
+        let touching = before.end == toks[i].start;
+        i = match (before.kind, toks[i].kind) {
+            // `f(…)`, `v[…]`, `P { … }`, `f(1)(2)`: what the group belongs to.
+            (Kind::Ident, Kind::Open) if touching || lines[toks[i].start.0].as_bytes()[toks[i].start.1] == b'{' => i - 1,
+            (Kind::Close, Kind::Open) if touching => opener(i - 1)?,
+            // `name!(…)`.
+            (Kind::Punct(b'!'), Kind::Open) if touching && i > 1 && toks[i - 2].kind == Kind::Ident => i - 2,
+            // `x?`.
+            (_, Kind::Punct(b'?')) if touching => {
+                if before.kind == Kind::Close { opener(i - 1)? } else if atom(before) { i - 1 } else { break }
+            }
+            // `a.b`, `a::b`.
+            (Kind::Punct(b'.'), _) | (Kind::Punct(b':'), _) if i > 1 => {
+                let dots = if before.kind == Kind::Punct(b':') { 2 } else { 1 };
+                if dots == 2 && toks.get(i.wrapping_sub(2)).map(|t| t.kind) != Some(Kind::Punct(b':')) {
+                    break;
+                }
+                let Some(owner) = i.checked_sub(dots + 1) else { break };
+                if toks[owner].kind == Kind::Close {
+                    opener(owner)?
+                } else if atom(&toks[owner]) || toks[owner].kind == Kind::Punct(b'?') {
+                    owner
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        };
+    }
+    Some((toks[i].start, toks[last].end))
+}
+
+/// Is `text` whole — every bracket, string and comment closed — or is
+/// there more of it to come? What a REPL asks before it sends a line.
+pub fn complete(lines: &[&str]) -> bool {
+    let toks = tokens(lines);
+    let mut depth = 0i32;
+    for t in &toks {
+        match t.kind {
+            Kind::Open => depth += 1,
+            Kind::Close => depth -= 1,
+            _ => {}
+        }
+    }
+    depth <= 0 && !toks.last().is_some_and(|t| unclosed(lines, t))
+}
+
+/// The name `text` defines when it is one item — `fn area`, `struct P`,
+/// `let x` — so a send that prints nothing can still say what it did.
+pub fn defined_name(lines: &[&str]) -> Option<String> {
+    let toks = code(lines);
+    let mut i = 0;
+    // Past attributes and what may stand before the keyword.
+    while let Some(t) = toks.get(i) {
+        match t.kind {
+            Kind::Punct(b'#') => {
+                let mut depth = 0;
+                i += 1;
+                while let Some(t) = toks.get(i) {
+                    match t.kind {
+                        Kind::Open => depth += 1,
+                        Kind::Close => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            Kind::Keyword if matches!(text_of(lines, t), "pub" | "async" | "unsafe" | "const" | "extern" | "static") && toks.get(i + 1).is_some_and(|n| n.kind != Kind::Ident || text_of(lines, t) != "const" && text_of(lines, t) != "static") => {
+                i += 1;
+                // `pub(crate)`.
+                if toks.get(i).is_some_and(|n| n.kind == Kind::Open) {
+                    while toks.get(i).is_some_and(|n| n.kind != Kind::Close) {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    let keyword = toks.get(i)?;
+    let what = text_of(lines, keyword);
+    if !matches!(what, "fn" | "struct" | "enum" | "trait" | "type" | "mod" | "const" | "static" | "let") {
+        return None;
+    }
+    let mut n = i + 1;
+    if toks.get(n).is_some_and(|t| t.kind == Kind::Keyword && text_of(lines, t) == "mut") {
+        n += 1;
+    }
+    let name = toks.get(n).filter(|t| t.kind == Kind::Ident)?;
+    Some(format!("{what} {}", text_of(lines, name)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text(src: &str, (s, e): Span) -> String {
+        let lines: Vec<&str> = src.split('\n').collect();
+        if s.0 == e.0 {
+            return lines[s.0][s.1..e.1].to_string();
+        }
+        let mut out = lines[s.0][s.1..].to_string();
+        for l in &lines[s.0 + 1..e.0] {
+            out.push('\n');
+            out.push_str(l);
+        }
+        out.push('\n');
+        out.push_str(&lines[e.0][..e.1]);
+        out
+    }
+
+    /// The point is where `|` stands in `src`.
+    fn at(src: &str) -> (String, usize, usize) {
+        let i = src.find('|').expect("a | for the point");
+        let clean = format!("{}{}", &src[..i], &src[i + 1..]);
+        let line = src[..i].matches('\n').count();
+        let byte = i - src[..i].rfind('\n').map_or(0, |n| n + 1);
+        (clean, line, byte)
+    }
+
+    #[test]
+    fn a_buffer_is_cut_into_the_statements_a_send_sends() {
+        let src = "use std::collections::{HashMap, HashSet};\n\n/// Doc.\n#[derive(Debug)]\nstruct P { x: i32 }\n\nimpl P {\n    fn new() -> Self { P { x: 1 } }\n}\n\nfn sq(a: i32) -> i32\n{\n    a * a // } not a brace\n}\nlet p = P { x: 1 };\nlet s = \"a; }\";\nsq(3)\nsq(4)\n    .pow(2)\nif p.x > 0 { 1 } else { 2 }\nvec![1, 2].len()\nfor i in 0..3 { println!(\"{i}\"); }\nstruct U;\n";
+        let lines: Vec<&str> = src.split('\n').collect();
+        let got: Vec<String> = statements(&lines).into_iter().map(|s| text(src, s)).collect();
+        assert_eq!(
+            got,
+            [
+                "use std::collections::{HashMap, HashSet};",
+                "#[derive(Debug)]\nstruct P { x: i32 }",
+                "impl P {\n    fn new() -> Self { P { x: 1 } }\n}",
+                "fn sq(a: i32) -> i32\n{\n    a * a // } not a brace\n}",
+                "let p = P { x: 1 };",
+                "let s = \"a; }\";",
+                "sq(3)",
+                "sq(4)\n    .pow(2)",
+                "if p.x > 0 { 1 } else { 2 }",
+                "vec![1, 2].len()",
+                "for i in 0..3 { println!(\"{i}\"); }",
+                "struct U;",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_statement_at_the_point_is_the_whole_item_from_anywhere_in_it() {
+        let pick = |src: &str| {
+            let (clean, line, byte) = at(src);
+            let lines: Vec<&str> = clean.split('\n').collect();
+            statement_at(&lines, line, byte).map(|s| text(&clean, s))
+        };
+        let src = "fn a() -> i32 {\n    let y = 1;\n    y| + 1\n}\n\nfn b() {}\n";
+        assert_eq!(pick(src).as_deref(), Some("fn a() -> i32 {\n    let y = 1;\n    y + 1\n}"), "from inside its body");
+        assert_eq!(pick("fn a() {}\n|\nfn b() {}").as_deref(), Some("fn a() {}"), "between two: the one before");
+        assert_eq!(pick("let x = 5;|").as_deref(), Some("let x = 5;"));
+        assert_eq!(pick("|").as_deref(), None);
+    }
+
+    #[test]
+    fn the_expression_before_the_point() {
+        let pick = |src: &str| {
+            let (clean, line, byte) = at(src);
+            let lines: Vec<&str> = clean.split('\n').collect();
+            expression_before(&lines, line, byte).map(|s| text(&clean, s))
+        };
+        assert_eq!(pick("let y = sq(3)| + 1;").as_deref(), Some("sq(3)"), "a call");
+        assert_eq!(pick("let y = a.b(1).c[2]|;").as_deref(), Some("a.b(1).c[2]"), "and all it is called on");
+        assert_eq!(pick("x + Point::new(3, 4).norm()| ").as_deref(), Some("Point::new(3, 4).norm()"), "a path");
+        assert_eq!(pick("foo(vec![1, 2]|, 3)").as_deref(), Some("vec![1, 2]"), "a macro, inside a call's arguments");
+        assert_eq!(pick("f(a, (b + c)|)").as_deref(), Some("(b + c)"), "a group");
+        assert_eq!(pick("let n = count|;").as_deref(), Some("count"), "a name");
+        assert_eq!(pick("p.x| + 1").as_deref(), Some("p.x"));
+        assert_eq!(pick("read(path)?.len()|").as_deref(), Some("read(path)?.len()"));
+        assert_eq!(pick("s == \"a)b\"|").as_deref(), Some("\"a)b\""), "a string, brackets and all");
+        // After a `;`: the statement it ends, in the block the point is in.
+        assert_eq!(pick("fn f() {\n    let a = 1;\n    let b = g(a);|\n    b\n}").as_deref(), Some("let b = g(a);"));
+        assert_eq!(pick("let x = 5;\nprintln!(\"{x}\");|").as_deref(), Some("println!(\"{x}\");"));
+        assert_eq!(pick("x +|"), None, "an operator ends nothing");
+        assert_eq!(pick("|x"), None);
+    }
+
+    #[test]
+    fn whole_text_and_what_it_defines() {
+        let whole = |src: &str| complete(&src.split('\n').collect::<Vec<_>>());
+        assert!(whole("let x = 5;") && whole("fn f() {\n}") && whole(""));
+        assert!(!whole("fn f() {") && !whole("foo(1,") && !whole("let s = \"open") && !whole("/* open"));
+        let name = |src: &str| defined_name(&src.split('\n').collect::<Vec<_>>());
+        assert_eq!(name("fn area(w: f64) -> f64 { w }").as_deref(), Some("fn area"));
+        assert_eq!(name("#[derive(Debug)]\npub(crate) struct P { x: i32 }").as_deref(), Some("struct P"));
+        assert_eq!(name("pub async fn go() {}").as_deref(), Some("fn go"));
+        assert_eq!(name("let mut total = 0;").as_deref(), Some("let total"));
+        assert_eq!(name("const N: usize = 3;").as_deref(), Some("const N"));
+        assert_eq!(name("sq(3)"), None);
+        assert_eq!(name("impl P {}"), None);
+    }
 
     /// Each highlighted stretch of `src` as (text, class), in order.
     fn classes(src: &str) -> Vec<(String, Tok)> {
