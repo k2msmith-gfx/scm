@@ -1262,6 +1262,9 @@ same transcript, the same REPL panel as a Scheme file's scm:
 - **It is not Cargo.** One file that is a module of a crate (`use crate::…`,
   `mod x;`) does not load into evcxr whole, though its functions do one at
   a time; and evcxr keeps what it was sent until `rust-repl-restart`.
+  Telling evcxr about the PROJECT — its crate and its `[dependencies]`, by
+  `:dep`, and `crate::` as the project — is planned, not built:
+  [rust-repl-cargo-plan.md](rust-repl-cargo-plan.md).
 
 Tests: `language::rust` (the cutting, on a file of awkward cases),
 `pipe` (the framing, against a stand-in), `a_rust_buffer_sends_to_evcxr`
