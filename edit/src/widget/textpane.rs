@@ -69,14 +69,10 @@ pub enum Style {
     Block,
     /// The same, drawn token by token as `Code` is: a block of Lisp.
     BlockCode,
-    /// A code block's header: its language, and the words that act on it
-    /// when clicked, each between two [`ACTION_MARK`]s and drawn in accent.
+    /// A code block's header: its language, dim, on a ground a shade
+    /// darker than the block's.
     BlockHead,
 }
-
-/// Brackets a clickable word in a `BlockHead` row. A private-use code point
-/// no face draws, so its cell is a space.
-pub const ACTION_MARK: char = '\u{E010}';
 
 impl Style {
     pub fn parse(name: &str) -> Option<Self> {
@@ -1438,16 +1434,6 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
             }
             if matches!(style, Style::Code | Style::BlockCode) {
                 draw_code_row(fb, x0, y, px, &theme, row);
-            } else if *style == Style::BlockHead {
-                // Its language dim; the words between marks in accent, as
-                // things to click.
-                let mut action = false;
-                for (i, part) in row.split(ACTION_MARK).enumerate() {
-                    let before: usize = row.split(ACTION_MARK).take(i).map(|p| p.chars().count() + 1).sum();
-                    let ink = if action { theme.text_accent } else { theme.text_dim };
-                    text::draw_mono_line(fb, x0 + before as f32 * advance, y, px, ink, part);
-                    action = !action;
-                }
             } else {
                 text::draw_mono_line(fb, x0, y, px, style.ink(&theme), row);
             }

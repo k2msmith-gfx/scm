@@ -1842,11 +1842,11 @@ mod tests {
     }
 
     /// Code in a reply is a block (Kevin, 2026-11-17): its lines on a ground
-    /// of their own under a header that names the language, and the
-    /// header's words are clicked — copy, to the clipboard; insert, into
-    /// the buffer at the cursor; append, onto its end. As it streams, too.
+    /// of their own under a header that names the language, and the menu
+    /// on it is the block's — Copy, to the clipboard; Insert at cursor;
+    /// Append to buffer. As it streams, too.
     #[test]
-    fn code_in_a_reply_is_a_block_that_copies_and_inserts_at_a_click() {
+    fn code_in_a_reply_is_a_block_with_a_menu_of_its_own() {
         let dir = std::env::temp_dir().join(format!("edit-agent-blocks-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("main.scm").to_string_lossy().into_owned();
@@ -1885,35 +1885,46 @@ mod tests {
         assert_eq!(pixel(&fb, column.x + column.w - 20, row_y("(* x x))")), theme.editor_bg & 0x00ff_ffff);
         assert_eq!(pixel(&fb, column.x + column.w - 20, row_y("That is all.")), theme.panel_bg & 0x00ff_ffff);
 
-        // Click a word of a header: where it is, from the row as laid.
-        let advance = crate::text::mono_metrics(crate::textpane::font_px()).0 as f64;
-        let click = |s: &mut Session, head: &str, word: &str| {
-            let (y, text) = rows.iter().find(|(_, t)| t.starts_with(head)).unwrap_or_else(|| panic!("{head}: {rows:?}"));
-            let col = text.chars().collect::<String>().find(word).map(|b| text[..b].chars().count()).expect("the word");
-            s.click(column.x as f64 + crate::textpane::PAD as f64 + (col as f64 + 1.5) * advance, *y as f64 + 4.0, false, false);
+        // The menu on a block is the block's: a right-press anywhere on it
+        // — its header or a line of its code — and a quick release posts
+        // the list; RET takes its first item, Copy.
+        let x = column.x as f64 + 60.0;
+        let on = |text: &str| row_y(text) as f64 + 4.0;
+        let menu = |s: &mut Session, y: f64, item: usize| {
+            s.menu_press(x, y, false);
+            s.menu_release(x, y);
+            assert_eq!(s.eval_to_string("(menu-open?)").unwrap(), "#t", "the menu is up");
+            for _ in 0..item {
+                s.key("down");
+            }
+            s.key("return");
         };
-        click(&mut s, "rust", "copy");
+        assert_eq!(s.eval_to_string(&format!("(agent-menu-at {x} {})", on("(* x x))"))).unwrap(), ":agent-block");
+        assert_eq!(s.eval_to_string(&format!("(agent-menu-at {x} {})", on("That is all."))).unwrap(), ":agent", "prose has the pane's own menu");
+        menu(&mut s, on("fn sq"), 0);
         assert_eq!(s.eval_to_string("copied").unwrap(), r#""fn sq(x: i64) -> i64 { x * x }""#);
-        click(&mut s, "scheme", "copy");
-        assert_eq!(s.eval_to_string("copied").unwrap(), r#""(define (sq x)\n  (* x x))""#);
+        menu(&mut s, on("scheme"), 0);
+        assert_eq!(s.eval_to_string("copied").unwrap(), r#""(define (sq x)\n  (* x x))""#, "from its header, too");
+        menu(&mut s, on("(* x x))"), 0);
+        assert_eq!(s.eval_to_string("copied").unwrap(), r#""(define (sq x)\n  (* x x))""#, "and from its last line: the whole block");
 
-        // insert: at the cursor, one undo.
+        // Insert at cursor: one undo.
         s.call("(%editor-goto-line 1 1)");
-        click(&mut s, "scheme", "insert");
+        menu(&mut s, on("(define (sq x)"), 1);
         assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define (sq x)\n  (* x x))\n(define b 2)\n");
         assert_eq!(s.eval_to_string("(%editor-undo 1)").unwrap(), "1");
         assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define b 2)\n", "one undo");
-        // append: at the end, after a blank line.
-        click(&mut s, "rust", "append");
+        // Append to buffer: at the end, after a blank line.
+        menu(&mut s, on("fn sq"), 2);
         assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define b 2)\n\nfn sq(x: i64) -> i64 { x * x }\n");
         // A buffer that has never held text has no lines at all, and an
         // insertion into it panicked the program (Kevin, 2026-11-17): each
         // way in, on a fresh one.
-        for (way, expect) in [("insert", "fn sq(x: i64) -> i64 { x * x }\n"), ("append", "fn sq(x: i64) -> i64 { x * x }\n")] {
+        for way in [1, 2] {
             s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b))");
             assert_eq!(crate::editorpane::text(app::EDITOR), "");
-            click(&mut s, "rust", way);
-            assert_eq!(crate::editorpane::text(app::EDITOR), expect, "{way} into a fresh buffer");
+            menu(&mut s, on("fn sq"), way);
+            assert_eq!(crate::editorpane::text(app::EDITOR), "fn sq(x: i64) -> i64 { x * x }\n", "item {way} into a fresh buffer");
         }
         s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b))");
         s.call(r#"(%editor-rewrite 1 "(a)\n(b)")"#);
@@ -1921,11 +1932,9 @@ mod tests {
         // A range past the end of the text is held to the text there is.
         s.call(r#"(%editor-replace 1 7 99 9 99 "!")"#);
         assert_eq!(crate::editorpane::text(app::EDITOR), "(a)\n(b)!");
-
-        // A click on the header's language, or on the code, is only a click
-        // in the pane.
+        // A plain click on a block is only a click in the pane.
         s.call("(set! copied #f)");
-        click(&mut s, "scheme", "scheme");
+        s.click(x, on("(* x x))"), false, false);
         assert_eq!(s.eval_to_string("copied").unwrap(), "#f");
         app::show_agent(false);
         let _ = std::fs::remove_dir_all(dir);

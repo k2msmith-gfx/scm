@@ -413,6 +413,7 @@ Every ray file of the same checkout shares it, so they all start over."
 (define (agent-greeting)
   (agent-append "Claude, in this project. Ask in English; RET sends." :dim)
   (agent-append "It reads and edits the project's files, and asks here before it runs a program or touches a file outside it." :dim)
+  (agent-append "Right-click a code block in a reply to copy it, or to put it in your buffer." :dim)
   (agent-append "Escape interrupts · C-l or /new starts over · /auto stops it asking · /usage, /model, /status · /help" :dim))
 
 (set! *agent-shown*
@@ -631,7 +632,8 @@ Every ray file of the same checkout shares it, so they all start over."
         (list "Paste" agent-paste "s-v")
         (list "back to the editor" focus-scene-editor "C-x o")
         (list "hide" toggle-agent "M-a")))
-(set-pane-menu! :agent (lambda (x y id shift) :agent))
+; (On a code block of a reply, the block's own menu: 25-agent.)
+(set-pane-menu! :agent (lambda (x y id shift) (agent-menu-at x y)))
 (set-pane-menu! :terminal (lambda (x y id shift) :terminal))
 (set-pane-menu! :transcript (lambda (x y id shift) :transcript))
 

@@ -40,7 +40,7 @@
 ; and :arg, which may repeat. A key that is absent is the CLI's own default.
 
 (define agent-editor-note
-  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. A fenced code block in your reply is drawn as a block the user can copy, or put into their buffer, with one click: put an example they may want to use in one, name its language on the fence, and keep it to code that stands on its own. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. You also have the editor's own tools (mcp__edit__*): buffers, buffer_read, buffer_edit, buffer_write, buffer_save, buffer_close, diagnostics, open_file, eval, and — to drive the editor itself — editor_commands, editor_command and editor_eval. When the user asks for something of the EDITOR (a colour theme, the REPL, the terminal, a file opened, a buffer saved or closed) do it with these rather than explaining how: open_file opens a file in a buffer, buffer_save and buffer_close save and close one, and editor_command runs a UI command such as load-theme or repl (editor_commands lists them). A file marked as having unsaved edits is NEWER in the editor than on disk: Read would show you a stale copy and Edit would be refused by the editor, so read it with buffer_read and change it with buffer_edit, which edits the buffer in place where the user watches and can undo. For a file with no unsaved edits either way works, and the editor reloads it as soon as you change it on disk. After a change, diagnostics tells you what the editor now finds wrong.")
+  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. A fenced code block in your reply is drawn as a block the user can copy, or put into their buffer, from its menu: put an example they may want to use in one, name its language on the fence, and keep it to code that stands on its own. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. You also have the editor's own tools (mcp__edit__*): buffers, buffer_read, buffer_edit, buffer_write, buffer_save, buffer_close, diagnostics, open_file, eval, and — to drive the editor itself — editor_commands, editor_command and editor_eval. When the user asks for something of the EDITOR (a colour theme, the REPL, the terminal, a file opened, a buffer saved or closed) do it with these rather than explaining how: open_file opens a file in a buffer, buffer_save and buffer_close save and close one, and editor_command runs a UI command such as load-theme or repl (editor_commands lists them). A file marked as having unsaved edits is NEWER in the editor than on disk: Read would show you a stale copy and Edit would be refused by the editor, so read it with buffer_read and change it with buffer_edit, which edits the buffer in place where the user watches and can undo. For a file with no unsaved edits either way works, and the editor reloads it as soon as you change it on disk. After a change, diagnostics tells you what the editor now finds wrong.")
 
 ; ── What the editor shows, for the agent ───────────────────────────────────
 ; The agent reads files itself; what it cannot see is the USER — which file
@@ -814,24 +814,21 @@ exactly as it is; when the agent changed that file, the pane says so —
 (define *agent-stream* #f)
 
 ; CODE IN A REPLY (Kevin, 2026-11-17: "formatted differently than other
-; text … and a little glyph … that when you click on it, it gets copied").
-; A fenced block — ```lang … ``` — is drawn as a block: a header row naming
-; its language and offering what can be done with it, then its lines on the
-; editor's own ground. The header's words are clicked:
-;   copy     the block to the clipboard
-;   insert   into the buffer on screen, at the cursor
-;   append   to the end of that buffer, after a blank line
-; A row's style is where the block is remembered: a click reads the rows
+; text"). A fenced block — ```lang … ``` — is drawn as a block: a header row
+; naming its language, then its lines on the editor's own ground. THE MENU
+; on a block is the block's (Kevin, the same day: "rather than the
+; copy/insert/paste buttons, use a context sensitive radial/linear menu"):
+; a right-press anywhere on it — a click for the list, a hold or a drag for
+; the pie — offers
+;   Copy               the block to the clipboard
+;   Insert at cursor   into the buffer on screen
+;   Append to buffer   onto its end, after a blank line
+; A row's style is where the block is remembered: the menu reads the rows
 ; under the header back, so nothing has to be kept beside the transcript.
-(define *agent-mark* (string (integer->char #xE010)))   ; the widget's ACTION_MARK
-(define *agent-block-actions* '("copy" "insert" "append"))
 (define *agent-lisps* '("scheme" "scm" "lisp" "elisp" "emacs-lisp" "clojure" "racket" "janet" "guile"))
 
 (define (%agent-block-head language)
-  (string-append
-    (if (equal? language "") "code" language)
-    (apply string-append
-           (map (lambda (action) (string-append "  " *agent-mark* action *agent-mark*)) *agent-block-actions*))))
+  (if (equal? language "") "code" language))
 
 (define (%agent-fence line)
   ; The language a fence line opens with ("" for none), or #f: not a fence.
@@ -890,16 +887,6 @@ exactly as it is; when the agent changed that file, the pane says so —
           (loop (+ i 1) (cons (%pane-row-text id i) acc))
           (%agent-join (reverse acc) "\n")))))
 
-(define (%agent-head-action head col)
-  ; The action word of header text HEAD that column COL is on, or #f.
-  (let loop ((i 0) (inside #f) (start 0))
-    (cond ((>= i (string-length head)) #f)
-          ((string=? (substring head i (+ i 1)) *agent-mark*)
-            (if (and inside (>= col start) (< col i))
-                (substring head start i)
-                (loop (+ i 1) (not inside) (+ i 1))))
-          (else (loop (+ i 1) inside start)))))
-
 (define (agent-block-act action code)
   "Do ACTION — \"copy\", \"insert\" or \"append\" — with CODE, a block of a
   reply: to the clipboard, into the buffer on screen at the cursor, or onto
@@ -931,20 +918,48 @@ exactly as it is; when the agent changed that file, the pane says so —
           (echo "appended " (lines) " to " (name) " — undo takes it back"))))
     action))
 
-; A click on a block header's word does it. Above the click that gives the
-; pane the keyboard (50), which a click anywhere else in the pane still is.
-(add-handler
-  *click-handlers*
-  60
-  :agent-block
-  (lambda (x y . _)
-    (let* ((id (agent-id))
-           (hit (and id (not (menu-open?)) (%pane-at x y)))
-           (at (and hit (equal? (car hit) id) (%pane-line-at id x y))))
-      (and at
-           (equal? (%pane-row-style id (car at)) "block-head")
-           (let ((action (%agent-head-action (%pane-row-text id (car at)) (cadr at))))
-             (and action (begin (agent-block-act action (agent-block-text (car at))) #t)))))))
+; The block a menu was opened on: its header's row.
+(define *agent-menu-block* #f)
+
+(define (agent-block-at x y)
+  "The transcript row of the header of the code block under window point
+  (X, Y), or #f when the point is not on a block."
+  (let* ((id (agent-id))
+         (at (and id (%pane-line-at id x y))))
+    (and at
+         (let loop ((row (car at)))
+           (let ((style (%pane-row-style id row)))
+             (cond ((equal? style "block-head") row)
+                   ((and (member style '("block" "block-code")) (> row 0)) (loop (- row 1)))
+                   (else #f)))))))
+
+(define (agent-menu-at x y)
+  "(agent-menu-at X Y)  ->  :agent-block or :agent
+
+Which menu a right-press at (X, Y) in the agent pane opens: the block's,
+on a code block — which it remembers, for the item chosen — and the pane's
+anywhere else. What a host hands set-pane-menu! for the pane."
+  (let ((block (agent-block-at x y)))
+    (set! *agent-menu-block* block)
+    (if block :agent-block :agent)))
+
+(define (%agent-on-menu-block action)
+  (if *agent-menu-block*
+      (agent-block-act action (agent-block-text *agent-menu-block*))
+      (echo "no code block there")))
+
+(define (agent-block-copy)
+  "Copy the code block the menu was opened on to the clipboard."
+  (%agent-on-menu-block "copy"))
+(define (agent-block-insert)
+  "Put the code block the menu was opened on into the buffer on screen, at
+  the cursor — one undo takes it back."
+  (%agent-on-menu-block "insert"))
+(define (agent-block-append)
+  "Put the code block the menu was opened on at the end of the buffer on
+  screen, after a blank line — one undo takes it back."
+  (%agent-on-menu-block "append"))
+
 
 (define (agent-drop-pending)
   (let ((pending *agent-pending*) (id (agent-id)))
@@ -1284,6 +1299,12 @@ transcript. Call it once the host's agent pane exists."
       (list "pageup" (lambda () (%pane-scroll (agent-id) 8)) "scroll-back")
       (list "pagedown" (lambda () (%pane-scroll (agent-id) -8)) "scroll-forward")))
   :agent)
+
+(define-menu
+  :agent-block
+  (list (list "Copy" agent-block-copy)
+        (list "Insert at cursor" agent-block-insert)
+        (list "Append to buffer" agent-block-append)))
 
 (define-menu
   :agent

@@ -488,19 +488,30 @@ other text … and a little glyph … that when you click on it, it gets
 copied … AND/OR … copies it directly into the edit buffer at the point or
 after the last function"*). A fenced block is drawn as one: a header row
 naming its language, then its lines on the editor's own ground, set in
-from the pane's — Lisp token-coloured, anything else in plain ink. The
-header's words are clicked: **copy** (the clipboard), **insert** (the
-buffer on screen, at the cursor) and **append** (its end, after a blank
-line); an insertion is one undo step. It is a block while it streams — a
-fence half written is already a header.
+from the pane's — Lisp token-coloured, anything else in plain ink. It is
+a block while it streams — a fence half written is already a header.
+
+**What is done with a block is on its MENU.** First built as three words
+in the header to click; Kevin, on trying it: *"rather than the
+copy/insert/paste buttons, use a context sensitive radial/linear menu. If
+you menu on that block, the menu comes up."* So a right-press anywhere on a
+block — its header or any line of it — opens `:agent-block`, as a list on
+a click and the pie on a hold or a drag, like every other menu here:
+**Copy** (the clipboard), **Insert at cursor** (the buffer on screen) and
+**Append to buffer** (its end, after a blank line); an insertion is one
+undo step. Anywhere else in the pane the menu is the pane's own.
+`agent-menu-at` is what a host hands `set-pane-menu!`.
 
 In the widget (`textpane.rs`): three row styles, `block`, `block-code` and
 `block-head`, a band of ground under a row that has one, and
 `%pane-line-at`, which a transcript had no answer to before (the row under
 a point was the file tree's question only). The block is remembered
-nowhere but the rows: a click reads the styled rows under its header back.
-(`code_in_a_reply_is_a_block_that_copies_and_inserts_at_a_click`, with
-real clicks at where the words were drawn.) **Not done:** colouring by the
+nowhere but the rows: the menu reads the styled rows under its header back.
+(`code_in_a_reply_is_a_block_with_a_menu_of_its_own`, with real
+right-presses on the rows as drawn.) **A crash found in use and fixed:**
+Insert into a buffer that had never held text took the program down —
+cosmic-text's `delete_range` indexes a line, and such a buffer has none;
+`replace_range` now holds its range to the text there is. **Not done:** colouring by the
 block's language beyond Lisp — the editor has a `Language` for Rust and
 could lend it.
 
