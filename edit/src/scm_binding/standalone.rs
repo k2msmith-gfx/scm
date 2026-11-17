@@ -913,6 +913,18 @@ mod tests {
                 "#t",
                 "a name sent to the file's scm completes"
             );
+            // C-c C-d d on a function with a docstring, sent to that scm:
+            // on its name, and on an argument of a call of it.
+            s.call(r#"(%editor-rewrite 1 "(define (area w h) \"The area of a W by H rectangle.\" (* w h))\n(area 2 3)\n")"#);
+            s.call("(%editor-goto-line 1 0) (eval-defun)");
+            assert!(s.settle(10.0), "scm answers");
+            for (from, to, what) in [(1, 5, "on the name"), (6, 7, "on an argument")] {
+                s.call(&format!("(%pane-clear 2) (%editor-select 1 1 {from} {to}) (editor-describe)"));
+                let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+                assert!(t.iter().any(|l| l.starts_with("── (doc area)")), "{what}: {t:?}");
+                assert!(t.iter().any(|l| l.contains("The area of a W by H rectangle.")), "{what}: {t:?}");
+            }
+            s.call(r#"(%editor-rewrite 1 "(define (cube x) (* x x x))\n(cube 3)\n")"#);
             // And at the REPL, which evaluates there too: TAB on `cu`
             // offers the function just sent (Kevin, 2026-11-17: it did
             // not — the prompt's names were this image's).

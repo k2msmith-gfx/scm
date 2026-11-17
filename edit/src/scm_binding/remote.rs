@@ -684,7 +684,27 @@ mod guile_tests {
         let b = "(backend-of (%editor-active-buffer 1))";
         assert_eq!(s.eval_to_string(&format!("((backend-op {b} :doc) \"sq\")")).unwrap(), "\"Squares X.\"");
         assert_eq!(s.eval_to_string(&format!("((backend-op {b} :signature) \"sq\")")).unwrap(), "\"(sq x #:key by)\"");
-        // The REPL follows the buffer: Guile's prompt, Guile's image.
+        // C-c C-d d itself, on the name and on an argument of a call of
+        // it: Guile's docstring in the transcript, its signature echoed.
+        let echo = || crate::textpane::lines(crate::app::MINIBUFFER).last().map(|(_, l)| l.clone()).unwrap_or_default();
+        for (from, to, what) in [(1, 3, "on the name"), (4, 5, "on an argument")] {
+            s.call(&format!("(%pane-clear 2) (%editor-select 1 1 {from} {to}) (editor-describe)"));
+            let t = transcript();
+            assert!(t.iter().any(|l| l.starts_with("── (doc sq)")) && t.iter().any(|l| l == "Squares X."), "{what}: {t:?}");
+            assert_eq!(echo(), "(sq x #:key by)", "{what}");
+        }
+        // TAB in the buffer offers Guile's names: what was sent there, and
+        // Guile's own (`define*` is Guile's; scm has none).
+        let pool = s.eval_to_string("(editor-candidates)").unwrap();
+        assert!(pool.contains("\"sq\"") && pool.contains("\"define*\""), "the buffer's pool is Guile's");
+        // The REPL follows the buffer: Guile's prompt, Guile's image — and
+        // TAB at it offers what was sent to Guile.
+        s.call("(repl)");
+        s.text("s");
+        s.text("q");
+        s.key("tab");
+        assert_eq!(s.eval_to_string("(and (%edit :comp) (member \"sq\" (%comp :cands)) #t)").unwrap(), "#t", "sq completes at Guile's REPL");
+        s.key("C-g");
         s.call("(repl)");
         for c in "(sq 3)".chars() {
             s.text(&c.to_string());

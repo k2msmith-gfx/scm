@@ -166,12 +166,22 @@ the host's choice."
 ; In the modeler every Scheme file runs here.
 (define *buffer-image* (lambda (buf) (and (buffer-path buf) 'self)))
 
+; A language whose buffers send to a process of the language's own (Guile,
+; 15-guile) says here whether that process is RUNNING: language -> a thunk
+; answering its backend, or #f when it is not — asked without starting it.
+(define *language-running* (make-hash-table equal?))
+
 (define (running-image-backend buf)
   "The backend of the other process BUF's Scheme runs in, when that is
-running — a Scheme file's scm, a ray file's ray — else #f, and this image
-answers. Completion and eldoc ask it, so a name sent there completes and
-shows its signature; nothing is started to ask."
-  (and-let* ((img (*buffer-image* buf))
-             ((not (eq? img 'self))))
-    (backend-of buf)))
+running — a Scheme file's scm, a ray file's ray, a Guile buffer's Guile —
+else #f, and this image answers. Completion and eldoc ask it, so a name
+sent there completes and shows its signature; nothing is started to ask."
+  (let ((running (hash-table-ref/default *language-running*
+                                         (%buffer-language (*pane-id* :editor) buf) #f)))
+    (if running
+        ; (Unless the buffer was attached somewhere else by hand.)
+        (if (hash-table-ref/default *attached-backends* buf #f) (backend-of buf) (running))
+        (and-let* ((img (*buffer-image* buf))
+                   ((not (eq? img 'self))))
+          (backend-of buf)))))
 (define *after-send* (lambda () #f))

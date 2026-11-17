@@ -40,6 +40,13 @@ starting it before then."
     (guard (e (#t (unavailable-backend "guile" e)))
       (remote-backend (guile-start) "guile"))))
 
+; Completion, the argument hint and the REPL's TAB ask the Guile that is
+; running, and start none to ask (07-backend's running-image-backend): a
+; Guile buffer's names are Guile's, not this image's (found 2026-11-17 —
+; they had been scm's, or the separate scm's for a Guile FILE).
+(hash-table-set! *language-running* "guile"
+  (lambda () (and *guile* (%remote-address *guile*) (remote-backend *guile* "guile"))))
+
 (define (guile-mode)
   "Treat this buffer as GNU Guile — M-x guile-mode: Guile's keywords
 highlight, scm's read marks go, and its sends evaluate in a Guile the
