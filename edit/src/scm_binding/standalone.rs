@@ -1908,6 +1908,32 @@ mod tests {
         menu(&mut s, on("(* x x))"), 0);
         assert_eq!(s.eval_to_string("copied").unwrap(), r#""(define (sq x)\n  (* x x))""#, "and from its last line: the whole block");
 
+        // The MARKING menu, as on every other pane: held, the pie is drawn
+        // round the press — Copy up, the other two below — and the drag's
+        // direction picks; flicked, it picks without ever being drawn.
+        s.call("(set! copied #f)");
+        let y = on("fn sq");
+        s.menu_press(x, y, false);
+        s.menu_hold();
+        assert!(crate::textpane::overlay_active(), "the pie is up");
+        if let Ok(out) = std::env::var("EDIT_AGENT_SHOT") {
+            let mut fb = crate::framebuffer::Framebuffer::new(1200, 700);
+            app::draw(&mut fb);
+            fb.save_png(&out.replace(".png", "-pie.png")).expect("saved");
+        }
+        s.menu_drag(x, y - 60.0);
+        s.menu_release(x, y - 60.0);
+        assert_eq!(s.eval_to_string("copied").unwrap(), r#""fn sq(x: i64) -> i64 { x * x }""#, "up is Copy");
+        assert!(!crate::textpane::overlay_active(), "and the pie is gone");
+        // A flick down and to the right, never held: Insert at cursor.
+        s.call("(%editor-goto-line 1 1)");
+        let y = on("(define (sq x)");
+        s.menu_press(x, y, false);
+        s.menu_drag(x + 52.0, y + 30.0);
+        s.menu_release(x + 52.0, y + 30.0);
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define (sq x)\n  (* x x))\n(define b 2)\n", "a flick is enough");
+        assert_eq!(s.eval_to_string("(%editor-undo 1)").unwrap(), "1");
+
         // Insert at cursor: one undo.
         s.call("(%editor-goto-line 1 1)");
         menu(&mut s, on("(define (sq x)"), 1);
