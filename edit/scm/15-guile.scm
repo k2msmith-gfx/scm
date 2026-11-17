@@ -47,6 +47,62 @@ starting it before then."
 (hash-table-set! *language-running* "guile"
   (lambda () (and *guile* (%remote-address *guile*) (remote-backend *guile* "guile"))))
 
+; ── Guile's reader reads Guile's buffers ───────────────────────────────────
+; (Kevin, 2026-11-17.) scm's reader marks a Scheme buffer as you type; it
+; cannot mark a Guile one — it rejects `#:key` — so the kernel marks only
+; the brackets there (language/guile.rs). What Guile itself cannot read —
+; `#\notachar`, a bad `#` form, a string never closed — is asked of the
+; GUILE THAT IS RUNNING, with its reader as it is now, read-hash-extend and
+; all: the kernel keeps each Guile file's newest text (%read-pending), this
+; puts it to Guile when Guile is idle, and the answer comes back a mark
+; (%read-result). One question at a time; none is started to ask; a text
+; that changed while it was being read is asked about again.
+(define *guile-read-check* #t)   ; #f: brackets only
+(define %guile-reading #f)       ; a question is out
+
+; Read TEXT to its end, in Guile: #t, or (line column message) where its
+; reader stopped. Sent with each question, so it needs nothing of the
+; serve.scm the Guile was started with.
+(define %guile-read-form
+  "((lambda (text)
+      (let ((p (open-input-string text)))
+        (catch #t
+          (lambda () (let loop () (if (eof-object? (read p)) #t (loop))))
+          (lambda (key . args)
+            (list (port-line p) (port-column p)
+                  (catch #t
+                    (lambda () (apply simple-format #f (cadr args) (caddr args)))
+                    (lambda _ (symbol->string key))))))))
+    ")
+
+(define (%guile-read-message text)
+  ; Guile's own words, without the "#<unknown port>:3:9: " it puts in front.
+  (let ((at (string-contains text ": ")))
+    (if (and at (string-prefix? "#<" text)) (substring text (+ at 2) (string-length text)) text)))
+
+(define (guile-read-poll)
+  ; Put the next changed Guile buffer to Guile, when Guile can take it.
+  (when (and *guile-read-check* (not %guile-reading)
+             *guile* (%remote-address *guile*) (zero? (%remote-running *guile*)))
+    (and-let* ((next (%read-pending "guile")))
+      (let ((path (car next)) (version (cadr next)) (text (caddr next)))
+        (guard (e (#t (set! %guile-reading #f)))
+          (set! %guile-reading #t)
+          (hash-table-set! *remote-callbacks*
+            (cons *guile* (%remote-eval-async *guile* (string-append %guile-read-form (*show-value* text) ")") #f))
+            (lambda (r)
+              (set! %guile-reading #f)
+              (let ((said (and (eq? (%alist-ref r :status #f) 'ok)
+                               (guard (e (#t #f)) (read (open-input-string (%alist-ref r :printed "#t")))))))
+                (if (and (pair? said) (= (length said) 3))
+                    (%read-result path version (car said) (cadr said) (%guile-read-message (caddr said)))
+                    (%read-result path version #f #f "")))
+              ; The next one waiting, or this one again if it has changed.
+              (guile-read-poll))))))))
+
+(%read-watch "guile")
+(set! *wake-hooks* (cons guile-read-poll *wake-hooks*))
+
 (define (guile-mode)
   "Treat this buffer as GNU Guile — M-x guile-mode: Guile's keywords
 highlight, scm's read marks go, and its sends evaluate in a Guile the

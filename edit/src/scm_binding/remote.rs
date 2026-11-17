@@ -664,6 +664,65 @@ mod guile_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// With Guile on the PATH: a Guile FILE is read by Guile's own reader
+    /// (Kevin, 2026-11-17) — what it cannot read is marked where it
+    /// stopped, with its own words; its keywords are not marked; the mark
+    /// goes when the text is mended; and with no Guile running the
+    /// brackets are still marked, by the editor.
+    #[test]
+    fn guile_reads_a_guile_buffer_and_marks_what_it_cannot() {
+        if !guile_on_path() {
+            eprintln!("guile is not on the PATH (nix develop has it): skipped");
+            return;
+        }
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-guile-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mod.scm");
+        std::fs::write(&file, "(define-module (m))\n(define* (f #:key (n 1)) n)\n(define c #\\notachar)\n(f #:n 2)\n").unwrap();
+        s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
+        assert_eq!(s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap(), "\"guile\"");
+        let marks = |s: &mut super::super::standalone::Session| s.eval_to_string("(map (lambda (d) (list (car d) (cadddr d) (caddr d))) (%editor-diagnostics 1))").unwrap();
+        // Read until Guile has answered for the text as it stands.
+        let read = |s: &mut super::super::standalone::Session| {
+            let t0 = std::time::Instant::now();
+            loop {
+                let got = marks(s);
+                s.poll();
+                if s.settle(10.0) && s.eval_to_string("(if (or %guile-reading (%read-pending \"guile\")) 1 0)").as_deref() == Ok("0") {
+                    return marks(s);
+                }
+                assert!(t0.elapsed() < std::time::Duration::from_secs(20), "Guile never answered: {got}");
+            }
+        };
+        // No Guile yet: nothing is marked, and nothing was started to ask.
+        assert_eq!(marks(&mut s), "()", "its keywords are not errors");
+        s.poll();
+        assert_eq!(s.eval_to_string("(if *guile* 1 0)").unwrap(), "0", "none was started to ask");
+        // A send starts it; from then on Guile reads the buffer.
+        s.call("(%editor-goto-line 1 1) (eval-defun)");
+        assert!(s.settle(30.0), "Guile answers");
+        let got = read(&mut s);
+        assert!(got.starts_with("((2 1 "), "an error (1) on line 3: {got}");
+        assert!(got.to_lowercase().contains("notachar") || got.to_lowercase().contains("character"), "in Guile's own words: {got}");
+        // Mended: the mark goes.
+        s.call(r##"(%editor-edit 1 "#\\notachar" "#\\a")"##);
+        assert_eq!(read(&mut s), "()");
+        // A string never closed: only the reader knows; marked quietly (0).
+        s.call(r#"(%editor-edit 1 "(f #:n 2)" "(display \"open")"#);
+        let got = read(&mut s);
+        assert!(got.contains("never closed") && got.contains(" 0 "), "{got}");
+        // A bracket is the editor's to mark, Guile or no Guile, and at once.
+        s.call(r#"(%editor-edit 1 "(display \"open" "(f #:n 2))")"#);
+        assert!(marks(&mut s).contains("closes nothing"), "{}", marks(&mut s));
+        s.call("(guile-stop)");
+        s.call(r#"(%editor-edit 1 "(f #:n 2))" "(f #:n 2")"#);
+        let got = marks(&mut s);
+        assert!(got.contains("never closed") && got.starts_with("((3 0 "), "the opener, with no Guile running: {got}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// With Guile on the PATH: a Guile buffer's sends evaluate in Guile —
     /// its own syntax included — and describe asks it.
     #[test]

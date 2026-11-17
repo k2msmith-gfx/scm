@@ -248,7 +248,7 @@ pub(crate) fn read_by_form(read: fn(&str) -> ReadCheck, lines: &[&str], scan: &S
 /// The text ends inside a form: the outermost bracket left open, which is
 /// where the missing closer belongs — or, with none, the string or `#|`
 /// comment still open.
-fn open_end(lines: &[&str], scan: &Scan) -> Vec<Diagnostic> {
+pub(super) fn open_end(lines: &[&str], scan: &Scan) -> Vec<Diagnostic> {
     let mut open: Vec<&ParenPos> = Vec::new();
     for p in &scan.parens {
         if matches!(p.ch, b'(' | b'[' | b'{') {

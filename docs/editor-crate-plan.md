@@ -1269,6 +1269,38 @@ Tests: `language::rust` (the cutting, on a file of awkward cases),
 `the_real_evcxr_runs_what_a_rust_buffer_sends` (`#[ignore]`; passed
 2026-11-17: 2.7 s for the first send, which compiles, 0.4 s after).
 
+**Guile's reader reads Guile's buffers (2026-11-17).** scm's reader marks a
+Scheme buffer as you type; it could not mark a Guile one — it rejects
+`#:key` and `#{sym}#`, and would underline every keyword argument — so a
+Guile buffer had no read marks at all. Kevin: *"lets add the guile reader
+check support first."* Now it has them, from two places:
+
+- **Brackets, from the editor, at once** (`language/guile.rs`). A closer
+  that closes nothing, or the wrong kind, is an error where it stands; a
+  form left open is marked quietly at its outermost opener, as scm's Scheme
+  marks one. It needs no reader and no Guile, so it works in a buffer that
+  has never been sent.
+- **Everything else, from Guile itself** (`scm_binding/readcheck.rs`,
+  15-guile): `#\notachar`, a bad `#` form, a string or `#|` never closed.
+  The watcher keeps each Guile FILE buffer's newest text; when the Guile
+  that is running is idle the shell puts the text to it — one question at a
+  time, as an ordinary `eval` of a form that only READS, so the protocol
+  did not change and an older `serve.scm` answers it — and where Guile's
+  reader stopped comes back as a mark with Guile's own words. It is the
+  LIVE reader, `read-hash-extend` and all. A text that changed while it was
+  being read is asked about again; a mark made of an older text is not
+  shown. No Guile is started to ask: until the first send a Guile buffer
+  shows its brackets only.
+
+`M-g n` goes to a mark and the modeline counts it, as for Scheme.
+`(set! *guile-read-check* #f)` leaves the brackets alone. Not done: a
+buffer with no file is not asked about (a watcher hears file buffers), and
+the warnings — a name nothing binds, a wrong count of arguments — are still
+scm's Scheme only. The same two-part shape is what SBCL would use.
+
+Tests: `brackets_are_marked_with_no_reader_to_ask`, and against a real
+Guile `guile_reads_a_guile_buffer_and_marks_what_it_cannot`.
+
 **Still open.**
 - **In scm** (each is a change in the scm repo):
   - a sent form locates as `<input>:L:C`, because `eval-string` takes no
@@ -1278,7 +1310,6 @@ Tests: `language::rust` (the cutting, on a file of awkward cases),
     here: one request in flight per connection);
   - a break cannot resume later.
 - **Here:**
-  - Guile buffers have no reader marks;
   - modit has no Ctrl keys, so vi's C-d / C-u / C-r do nothing (C-r is the
     backward search);
   - search is plain text within a line, with no regex and no matches

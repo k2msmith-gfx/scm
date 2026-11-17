@@ -160,6 +160,7 @@ mod editor;
 mod lsp;
 mod menu;
 mod pipe;
+mod readcheck;
 pub mod remote;
 pub mod standalone;
 mod term;
@@ -289,6 +290,7 @@ pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Res
         .chain(warn::install(interp)?)
         .chain(agent::install(interp)?)
         .chain(pipe::install(interp)?)
+        .chain(readcheck::install(interp)?)
     {
         installed(name);
     }
