@@ -104,6 +104,17 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         let lines: Vec<&str> = text.split('\n').collect();
         Ok(Val::List(rust::statements(&lines).into_iter().map(|s| span(&lines, Some(s))).collect()))
     })?;
+    // `(%rust-describe text name)` — (signature doc) for the item called
+    // NAME that Rust TEXT defines, its doc the comment above it ("" when it
+    // has none); #f when TEXT defines no such item.
+    interp.define_fn("%rust-describe", |args: &[Val]| {
+        let text = val_text(args, 0).unwrap_or_default();
+        let lines: Vec<&str> = text.split('\n').collect();
+        Ok(match rust::describe(&lines, &val_text(args, 1).unwrap_or_default()) {
+            Some((signature, doc)) => Val::List(vec![Val::Str(signature), Val::Str(doc)]),
+            None => Val::Bool(false),
+        })
+    })?;
     // `(%rust-complete? text)` — is Rust TEXT whole: every bracket, string
     // and comment closed?
     interp.define_fn("%rust-complete?", |args: &[Val]| {
@@ -129,6 +140,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         "%rust-statement-at",
         "%rust-expression-before",
         "%rust-statements",
+        "%rust-describe",
         "%rust-complete?",
         "%rust-defined-name",
     ])

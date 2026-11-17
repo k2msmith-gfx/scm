@@ -2295,6 +2295,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Describe in a Rust buffer with no language server to ask (Kevin,
+    /// 2026-11-17): a function's doc comment and signature come straight
+    /// from the source — the name at the point, or, on an argument, the
+    /// call it is in; from the buffer as it stands, and from the file
+    /// beside it.
+    #[test]
+    fn describe_reads_a_rust_items_doc_comment_from_the_source() {
+        let dir = std::env::temp_dir().join(format!("edit-rust-describe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("main.rs").to_string_lossy().into_owned();
+        std::fs::write(&main, "/// The area of a rectangle.\n///\n/// Both sides in metres.\n#[must_use]\npub fn area(w: f64, h: f64) -> f64 {\n    w * h\n}\n\nfn bare() {}\n\nfn main() {\n    let a = area(2.0, 3.0);\n    bare();\n    let n = helper::count(a);\n}\n").unwrap();
+        std::fs::write(dir.join("helper.rs"), "/// How many whole units fit.\npub fn count(x: f64) -> usize { x as usize }\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, std::slice::from_ref(&main)).expect("boot");
+        s.call("(rust-analyzer-stop) (focus-scene-editor)");
+        let describe = |s: &mut Session, line: usize, from: usize, to: usize| {
+            s.call(&format!("(%pane-clear 2) (%editor-select 1 {line} {from} {to}) (editor-describe)"));
+            let rows = s.eval_to_string("(map (lambda (i) (%pane-row-text 2 i)) (iota (%pane-row-count 2)))").unwrap();
+            let echo = crate::textpane::lines(app::MINIBUFFER).last().map(|(_, l)| l.clone()).unwrap_or_default();
+            (rows, echo)
+        };
+        // On the name, in a call of it.
+        let (rows, echo) = describe(&mut s, 11, 12, 16);
+        assert!(rows.contains("── (doc area)"), "{rows}");
+        assert!(rows.contains("pub fn area(w: f64, h: f64) -> f64"), "its signature: {rows}");
+        assert!(rows.contains("The area of a rectangle.") && rows.contains("Both sides in metres."), "its doc comment: {rows}");
+        assert_eq!(echo, "pub fn area(w: f64, h: f64) -> f64", "and the signature on the echo line");
+        // On an argument: the call it is an argument of.
+        let (rows, _) = describe(&mut s, 11, 22, 25);
+        assert!(rows.contains("── (doc area)") && rows.contains("The area of a rectangle."), "{rows}");
+        // No doc comment: the signature, and a word on how to give it one.
+        let (rows, echo) = describe(&mut s, 12, 4, 8);
+        assert!(rows.contains("fn bare()") && rows.contains("no doc comment"), "{rows}");
+        assert_eq!(echo, "fn bare()");
+        // Defined in the file beside this one.
+        let (rows, _) = describe(&mut s, 13, 20, 25);
+        assert!(rows.contains("pub fn count(x: f64) -> usize") && rows.contains("How many whole units fit."), "{rows}");
+        // The doc as it stands in the buffer, not as it was saved.
+        s.call(r#"(%editor-edit 1 "/// The area of a rectangle." "/// Width times height.")"#);
+        let (rows, _) = describe(&mut s, 11, 12, 16);
+        assert!(rows.contains("Width times height.") && !rows.contains("The area of a rectangle."), "{rows}");
+        // Nothing of that name anywhere: said, and nothing invented.
+        s.call(r#"(%editor-rewrite 1 "let z = nowhere_at_all;\n")"#);
+        let (rows, echo) = describe(&mut s, 0, 8, 22);
+        assert!(!rows.contains("── (doc") && echo.contains("no doc for nowhere_at_all"), "{rows} / {echo}");
+        app::show_panel(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A Rust buffer's sends go to evcxr, as a Scheme file's go to an scm
     /// (Kevin, 2026-11-17) — here a stand-in that speaks evcxr's framing:
     /// the expression before the point, the item around it, the buffer and

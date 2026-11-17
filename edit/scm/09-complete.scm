@@ -218,6 +218,16 @@
       (loop (+ e 1))
       (substring text (editor-token-start text point) e))))
 
+(define (editor-word-around text point)
+  "The word spanning POINT — letters, digits and `_` — or \"\"."
+  (define n (string-length text))
+  (define (word? i)
+    (let ((c (string-ref text i)))
+      (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_))))
+  (let* ((start (let loop ((i point)) (if (and (positive? i) (word? (- i 1))) (loop (- i 1)) i)))
+         (end (let loop ((i point)) (if (and (< i n) (word? i)) (loop (+ i 1)) i))))
+    (substring text start end)))
+
 (define (describe-name name)
   "(describe-name NAME)  ->  #t when it found a doc
 
@@ -243,7 +253,13 @@ image's, for a .scm buffer). Says so, and answers #f, when there is none."
   The answer comes from the buffer's backend (this image, for a .scm
   buffer)."
   (define tp (editor-text+point))
-  (define at-point (editor-token-around (car tp) (cadr tp)))
+  ; The name at the point: a Lisp's token runs to the next bracket or
+  ; space; in a language that is not one (Rust) it is a WORD, or `area` in
+  ; `x.area(2.0);` would be asked for as `x.area(2.0);`.
+  (define at-point
+    (if (non-scheme-buffer? (%editor-active-buffer (editor-pane-id)))
+        (editor-word-around (car tp) (cadr tp))
+        (editor-token-around (car tp) (cadr tp))))
   (define (head-name) (%text (or (%editor-head (editor-pane-id)) "")))
   (define backend (backend-of (%editor-active-buffer (editor-pane-id))))
   (define sig-of (or (backend-op backend :signature) signature-of))
@@ -251,7 +267,11 @@ image's, for a .scm buffer). Says so, and answers #f, when there is none."
   ; point on `2` in (add-sphere :at [1 2|) describes add-sphere. (A Scheme
   ; buffer asked a second VM's `%scm-describe` until J5c retired that VM;
   ; from then on it answered nothing, and C-c C-d d said "no doc for 2".)
-  (let ((name (if (or (string=? at-point "") (not (sig-of at-point))) (head-name) at-point)))
+  ; …and when the head has nothing either, it is the name at the point that
+  ; is said to have no doc.
+  (let ((name (cond ((and (not (string=? at-point "")) (sig-of at-point)) at-point)
+                    ((not (string=? (head-name) "")) (head-name))
+                    (else at-point))))
     (if (string=? name "")
       (echo "nothing at point to describe")
       (describe-name name))))

@@ -1246,6 +1246,18 @@ same transcript, the same REPL panel as a Scheme file's scm:
   (`rustup update`, or an older evcxr by `--version`); Rust first, from
   rustup.rs, when cargo is not. It looks again on every send, so nothing
   needs restarting once it is installed. Completion, describe and `M-.` stay rust-analyzer's.
+- **Describe works without a language server** (Kevin: *"if the function
+  has a doc string, make describe work"*). rust-analyzer answers for a file
+  in a Cargo project once it is ready; a scratch `.rs`, or a project still
+  indexing, got "no doc". The doc is in the text, so `C-c C-d d` (and vi's
+  `K`) on a name — or on an argument, for the call it is in — now shows the
+  item's signature and the `///` comment above it, read off the tokens
+  (`rust::describe`): from the buffer as it stands, then the other Rust
+  buffers' files, then the `.rs` files beside it. A fn, struct, enum, trait,
+  type, const, static, mod or macro, methods included. rust-analyzer's
+  answer is still preferred when it is about the name asked for. The
+  argument hint (eldoc) falls back the same way. In a Rust buffer the name
+  at the point is now a WORD, not a Lisp token (`area`, not `x.area(2.0);`).
 - **The agent's `eval` tool** reaches it too, being the buffer's backend.
 - **It is not Cargo.** One file that is a module of a crate (`use crate::…`,
   `mod x;`) does not load into evcxr whole, though its functions do one at

@@ -729,6 +729,137 @@ pub fn expression_before(lines: &[&str], line: usize, byte: usize) -> Option<Spa
     Some((toks[i].start, toks[last].end))
 }
 
+/// What the text says of the item called `name` — a `fn`, `struct`,
+/// `enum`, `trait`, `type`, `const`, `static`, `mod` or `macro_rules!` —
+/// as (its signature on one line, its doc comment): what describe shows
+/// with no language server to ask (Kevin, 2026-11-17: "if the function has
+/// a doc string, make describe work"). The doc is the `///` lines (or a
+/// `/** … */`) above it, attributes between them and the item stepped
+/// over; empty when it has none. A method counts: the first item of that
+/// name, at any depth.
+pub fn describe(lines: &[&str], name: &str) -> Option<(String, String)> {
+    let toks = tokens(lines);
+    let word = |i: usize| toks.get(i).map_or("", |t| text_of(lines, t));
+    let ident = |i: usize| toks.get(i).is_some_and(|t| t.kind == Kind::Ident);
+    let named = (0..toks.len()).find(|&k| {
+        let item = toks[k].kind == Kind::Keyword && matches!(word(k), "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod");
+        let mutable = usize::from(word(k + 1) == "mut");
+        (item && ident(k + 1 + mutable) && word(k + 1 + mutable) == name)
+            || (word(k) == "macro_rules" && toks.get(k + 1).is_some_and(|t| t.kind == Kind::Punct(b'!')) && word(k + 2) == name)
+    })?;
+    // Back over what may stand before the keyword: `pub(crate) async unsafe
+    // extern "C"`.
+    let mut first = named;
+    while first > 0 {
+        let before = &toks[first - 1];
+        let qualifier = before.kind == Kind::Keyword && matches!(text_of(lines, before), "pub" | "async" | "unsafe" | "const" | "extern" | "default");
+        if qualifier || (before.kind == Kind::Str && first > 1 && word(first - 2) == "extern") {
+            first -= 1;
+        } else if before.kind == Kind::Close && lines[before.start.0].as_bytes()[before.start.1] == b')' {
+            // `pub(crate)`, `pub(in path)`.
+            let Some(open) = (0..first - 1).rev().find(|&i| toks[i].kind == Kind::Open) else { break };
+            if open > 0 && word(open - 1) == "pub" {
+                first = open - 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    // The signature: to the body, or to the `;`.
+    let mut depth = 0;
+    let mut last = named;
+    for (i, t) in toks.iter().enumerate().skip(named) {
+        match t.kind {
+            Kind::Comment => continue,
+            Kind::Open if depth == 0 && lines[t.start.0].as_bytes()[t.start.1] == b'{' => break,
+            Kind::Open => depth += 1,
+            Kind::Close => depth -= 1,
+            Kind::Punct(b';') if depth == 0 => break,
+            _ => {}
+        }
+        last = i;
+    }
+    // Token by token, so a comment in it is left out; a gap in the source,
+    // a line's end included, is one space, and the brackets of a parameter
+    // list laid out over lines close up again.
+    let mut signature = String::new();
+    let mut before: Option<&Token> = None;
+    for t in toks[first..=last].iter().filter(|t| t.kind != Kind::Comment) {
+        if before.is_some_and(|b| b.end != t.start) {
+            signature.push(' ');
+        }
+        if t.start.0 == t.end.0 {
+            signature.push_str(&lines[t.start.0][t.start.1..t.end.1]);
+        } else {
+            signature.push_str(&lines[t.start.0][t.start.1..]);
+        }
+        before = Some(t);
+    }
+    let signature = signature.replace("( ", "(").replace(", )", ")").replace(" )", ")");
+    let signature = signature.trim_end_matches(',').to_string();
+    // The doc: the comments above, nearest last, attributes stepped over.
+    let mut doc: Vec<String> = Vec::new();
+    let mut i = first;
+    while i > 0 {
+        let t = &toks[i - 1];
+        if t.kind == Kind::Close && lines[t.start.0].as_bytes()[t.start.1] == b']' {
+            // An attribute, `#[…]`: over it.
+            let mut depth = 0;
+            let mut open = None;
+            for j in (0..i).rev() {
+                match toks[j].kind {
+                    Kind::Close => depth += 1,
+                    Kind::Open => {
+                        depth -= 1;
+                        if depth == 0 {
+                            open = Some(j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match open {
+                Some(j) if j > 0 && toks[j - 1].kind == Kind::Punct(b'#') => i = j - 1,
+                _ => break,
+            }
+            continue;
+        }
+        if t.kind != Kind::Comment {
+            break;
+        }
+        let first_line = &lines[t.start.0][t.start.1..if t.end.0 == t.start.0 { t.end.1 } else { lines[t.start.0].len() }];
+        if first_line.starts_with("///") && !first_line.starts_with("////") {
+            let text = &first_line[3..];
+            doc.push(text.strip_prefix(' ').unwrap_or(text).trim_end().to_string());
+        } else if first_line.starts_with("/**") && !first_line.starts_with("/***") {
+            let mut block = Vec::new();
+            for l in t.start.0..=t.end.0 {
+                let line = lines[l];
+                let piece = &line[if l == t.start.0 { t.start.1 + 3 } else { 0 }..if l == t.end.0 { t.end.1 } else { line.len() }];
+                let piece = piece.trim_end().trim_end_matches("*/").trim();
+                block.push(piece.strip_prefix('*').map_or(piece, str::trim_start).to_string());
+            }
+            while block.first().is_some_and(String::is_empty) {
+                block.remove(0);
+            }
+            while block.last().is_some_and(String::is_empty) {
+                block.pop();
+            }
+            // (Pushed last line first: the whole doc is reversed below.)
+            doc.extend(block.into_iter().rev());
+        } else {
+            // An ordinary comment is not the item's doc.
+            break;
+        }
+        i -= 1;
+    }
+    doc.reverse();
+    Some((signature, doc.join("\n")))
+}
+
 /// Is `text` whole — every bracket, string and comment closed — or is
 /// there more of it to come? What a REPL asks before it sends a line.
 pub fn complete(lines: &[&str]) -> bool {
@@ -883,6 +1014,26 @@ mod tests {
         assert_eq!(pick("let x = 5;\nprintln!(\"{x}\");|").as_deref(), Some("println!(\"{x}\");"));
         assert_eq!(pick("x +|"), None, "an operator ends nothing");
         assert_eq!(pick("|x"), None);
+    }
+
+    #[test]
+    fn an_item_is_described_by_its_signature_and_its_doc_comment() {
+        let src = "// not a doc\n\n/// The area of a rectangle.\n///\n/// `w` and `h` are in metres.\n#[inline]\n#[must_use]\npub(crate) fn area(\n    w: f64,\n    h: f64, // each side\n) -> f64\nwhere\n    f64: Copy,\n{\n    w * h\n}\n\n/** A point.\n * In the plane.\n */\n#[derive(Debug)]\npub struct Point { x: f64 }\n\nimpl Point {\n    /// Its distance from the origin.\n    pub fn norm(&self) -> f64 { self.x.abs() }\n}\n\n// just a note\nfn bare() {}\n\n/// How many.\npub const N: usize = 3;\n\n/// Doubles.\nmacro_rules! twice { ($e:expr) => { $e * 2 }; }\nextern \"C\" fn c_abi(x: i32);\n";
+        let lines: Vec<&str> = src.split('\n').collect();
+        let say = |name: &str| describe(&lines, name);
+        assert_eq!(
+            say("area"),
+            Some(("pub(crate) fn area(w: f64, h: f64) -> f64 where f64: Copy".into(), "The area of a rectangle.\n\n`w` and `h` are in metres.".into())),
+            "over its attributes to its doc, and the signature on one line without its comment"
+        );
+        assert_eq!(say("Point"), Some(("pub struct Point".into(), "A point.\nIn the plane.".into())), "a block doc comment");
+        assert_eq!(say("norm"), Some(("pub fn norm(&self) -> f64".into(), "Its distance from the origin.".into())), "a method");
+        assert_eq!(say("bare"), Some(("fn bare()".into(), String::new())), "an ordinary comment is not a doc");
+        assert_eq!(say("N"), Some(("pub const N: usize = 3".into(), "How many.".into())));
+        assert_eq!(say("twice").map(|(sig, doc)| (sig.starts_with("macro_rules! twice"), doc)), Some((true, "Doubles.".into())));
+        assert_eq!(say("c_abi").map(|d| d.0).as_deref(), Some("extern \"C\" fn c_abi(x: i32)"));
+        assert_eq!(say("w"), None, "a parameter is not an item");
+        assert_eq!(say("nowhere"), None);
     }
 
     #[test]
