@@ -9,7 +9,8 @@ same level as guile or scm?"* — and, after the Guile reader check landed:
 
 So: a `.lisp` buffer in `edit` whose sends go to an SBCL the editor starts,
 with the same keys, transcript, REPL panel, completion, describe and read
-marks a Guile buffer has. **About a day of work**, in the stages below.
+marks a Guile buffer has — **about a day of work** — and then SBCL's own
+debugger in the REPL panel, half a day more. The stages are below.
 
 **This is not [cl-plan.md](cl-plan.md).** That document proposes a Common
 Lisp *implementation* in Rust. This one uses SBCL as it is, as an external
@@ -33,8 +34,10 @@ What a Guile buffer has today, each with where it comes from:
 
 **Not at Guile's level, and so not in this plan's baseline:** scm's
 warnings (a name nothing binds, a wrong count of arguments) — though SBCL
-turns out to give them for free, which is L6 — and anything SLIME has
-beyond a REPL: the debugger with restarts, the inspector, who-calls.
+turns out to give them for free, which is L6 — and SLIME's inspector and
+who-calls. **The debugger IS in the plan** (L7): the first draft left it
+out, and Kevin asked why — *"it's built into the sbcl repl"* — which is
+right, and the answer is below.
 
 ## L0 as measured (2026-11-17)
 
@@ -55,6 +58,33 @@ stages below lean on.
 | **reading interns** | Reading `(zzprobe-new-symbol 1)` in `CL-USER` left that symbol in `CL-USER`. Read in a temporary package with the same use-list, it did not — and `car` still read. So the read check reads in a throwaway package. |
 | **`#.` and the read check** | With `*read-eval*` nil — which a check that must not RUN anything needs — `#.(+ 1 2)` is a reader error ("can't read #. while \*READ-EVAL\* is NIL"). That one message is not the user's mistake and is not marked. |
 | **warnings as data** | Compiling `(lambda (x) (undefined-fn-zz x) (car 1 2))` signalled two `warning`s that a handler collected: `The function CAR is called with two arguments, but wants exactly one.` and `undefined function: UNDEFINED-FN-ZZ`. SBCL's `eval` compiles, so a send of a `defun` can report these with no extra pass. |
+
+### The debugger, measured
+
+SBCL's own debugger is a loop on the terminal: it prints the restarts and
+reads a choice from standard input. A server has no terminal — started as
+this one is, the debugger would wait for a line that never comes and the
+send would hang. That is the only reason it does not work "for free", and
+it is not a reason to go without: everything the debugger offers is
+available to the program that hit the error, **before** the stack unwinds.
+Probed (2026-11-17), with the next requests standing in for typed lines:
+
+| case | what happened |
+|---|---|
+| `(* 2 unbound-thing-zz)`; then evaluate `(+ 1 2)` in the break; then restart `USE-VALUE` with 42 | the restarts listed (`CONTINUE`, `USE-VALUE`, `STORE-VALUE`, ours, SBCL's); `=> 3` while the error stood open; then the ORIGINAL send finished, answering 84 |
+| `(car 5)`; then abort | the send answers as given up; the server is at top level |
+| `(cerror "Go on anyway." …)`; then `CONTINUE` | the send went on and answered its value |
+| `(break "look here")` — which calls the debugger without signalling | caught by `sb-ext:*invoke-debugger-hook*`; `CONTINUE` returned from it |
+| an error INSIDE the break | a second level, with its own restarts; aborting it and then the first unwound both |
+| the frames, and a local | `sb-di` walked the stack to a function compiled with `(debug 3)` and read its variables: `((DOUBLED 42) (SECRET 21))` |
+
+So the debugger is a **break loop inside the request**: a `handler-bind`
+(and the debugger hook, for `break`) that, instead of unwinding, answers
+the send with the error, its restarts and its frames, and then serves the
+connection's next requests from inside the error — an expression
+evaluates there, a number invokes that restart, and the send that broke
+either finishes with a value or is given up. It is the built-in debugger's
+behaviour, with the REPL panel as its terminal.
 
 ## The shape
 
@@ -101,9 +131,12 @@ Guile's do without Guile.
 | **L5** | **`M-.`.** Ask SBCL where a name is defined (`sb-introspect`), falling back on the editor's own index of `defun`/`defmacro`/`defvar` forms for a file never loaded. | `M-.` on a call jumps to its `defun` in another file, loaded or not; `M-,` comes back |
 | **L6** | **Warnings — past Guile's level.** What SBCL's compiler says of a form when it is sent (an undefined function, a wrong count of arguments, an unused variable) shown under the send, and marked in the buffer at the form. | sending a `defun` that calls a function that does not exist says so, and the form is marked until it is sent again clean |
 
+| **L7** | **The debugger.** An error does not unwind: the send is answered with the message, the restarts numbered and the frames, and the connection is in a BREAK — the REPL panel's prompt says so (`CL-USER[1]> `, SBCL's own `0]` counting levels). At it: a number takes that restart (one that wants a value asks for it), an expression evaluates inside the error, `:abort` gives the send up, `:top` gives up every level. The error pane (`C-h e`) shows the frames, with the locals of code compiled with `(debug 2)` or more. A send from a buffer while in a break evaluates in the break too. | the probe's six cases through the editor: `USE-VALUE` finishes the original send with its value; `CONTINUE` after a `cerror`; `(break)`; an error inside a break and out of both; a frame's locals in the error pane; and Escape/interrupt of a runaway lands in a break rather than losing the work |
+
 L1–L4 are "the same level as Guile". L5 is what Guile gets from the
-editor's Scheme index and Common Lisp does not. L6 is where SBCL gives more
-than Guile does.
+editor's Scheme index and Common Lisp does not. L6 and L7 are where SBCL
+gives more than Guile does — and L7 is the part of Common Lisp that people
+who use it would miss first.
 
 Sizes, from Guile's: the server about 350 lines (packages, lambda lists and
 the debugger hook are what Guile's did not need); the language about 200;
@@ -112,6 +145,14 @@ them.
 
 ## Risks
 
+- **A break holds the connection.** While an error stands open the
+  connection is inside it, and so is whatever the buffer sends next — which
+  is what a debugger is, and is a surprise if the prompt does not say so
+  plainly. The prompt, the modeline and the echo all have to.
+- **A break left open forever.** Nothing times it out; `:abort`, `:top`, a
+  restart or `sbcl-stop` end it. The agent's `eval` tool must never be left
+  in one: its call gives the send up if it breaks, and says what the
+  restarts were.
 - **An interrupt is not safe at every point.** `interrupt-thread` runs a
   function wherever the thread happens to be, and unwinding from there can
   leave a lock held or a structure half-updated. SLIME lives with the same.
@@ -156,9 +197,12 @@ them.
 - **D5 — how far past Guile?** L5 (`M-.`) and L6 (compiler warnings) are
   each a few hours and each is something a Lisp programmer will reach for
   on the first day. *Recommend both*, after L1–L4 are in use.
-- **D6 — the debugger.** SLIME's defining feature is the debugger with
-  restarts; this plan answers an error with its message and its calls and
-  goes no further, as for scm and Guile. *Recommend leaving it out* until
-  the rest has been used: it is a design of its own (a break is a second
-  REPL inside the first), and scm's own break REPL (repl.md, S8b) is the
-  place to start that design from.
+- **D6 — the debugger: IN (Kevin, 2026-11-17).** The first draft
+  recommended leaving it out, as a design of its own. The probe says it is
+  half a day, not a design problem: SBCL hands the program everything its
+  debugger shows, and a break is the connection's next requests served
+  from inside the error. What is still a choice is the ORDER: L7 can come
+  straight after L3, before the read marks and `M-.`, if the debugger is
+  what you want to use first. *Recommend L1–L3, then L7, then L4–L6.*
+  Two things stay out: stepping (SBCL's stepper is its own protocol), and
+  SLIME's inspector.
