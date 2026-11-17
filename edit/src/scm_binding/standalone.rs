@@ -1906,6 +1906,22 @@ mod tests {
         // append: at the end, after a blank line.
         click(&mut s, "rust", "append");
         assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define b 2)\n\nfn sq(x: i64) -> i64 { x * x }\n");
+        // A buffer that has never held text has no lines at all, and an
+        // insertion into it panicked the program (Kevin, 2026-11-17): each
+        // way in, on a fresh one.
+        for (way, expect) in [("insert", "fn sq(x: i64) -> i64 { x * x }\n"), ("append", "fn sq(x: i64) -> i64 { x * x }\n")] {
+            s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b))");
+            assert_eq!(crate::editorpane::text(app::EDITOR), "");
+            click(&mut s, "rust", way);
+            assert_eq!(crate::editorpane::text(app::EDITOR), expect, "{way} into a fresh buffer");
+        }
+        s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b))");
+        s.call(r#"(%editor-rewrite 1 "(a)\n(b)")"#);
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(a)\n(b)", "a rewrite of one, too");
+        // A range past the end of the text is held to the text there is.
+        s.call(r#"(%editor-replace 1 7 99 9 99 "!")"#);
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(a)\n(b)!");
+
         // A click on the header's language, or on the code, is only a click
         // in the pane.
         s.call("(set! copied #f)");

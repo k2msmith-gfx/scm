@@ -642,7 +642,22 @@ pub fn cursor_window_pos(id: u32) -> Option<(f32, f32, f32)> {
 pub fn replace_range(id: u32, l0: usize, i0: usize, l1: usize, i1: usize, text: &str) {
     with_pane(id, |_, pane, _| {
         pane.discrete(|e| {
-            e.delete_range(Cursor::new(l0, i0), Cursor::new(l1, i1));
+            // cosmic-text's `delete_range` indexes the lines it is given: a
+            // buffer that was never given text has NONE, and an insertion
+            // into a fresh buffer panicked the whole program (Kevin,
+            // 2026-11-17: a code block's "insert" on an empty buffer). So
+            // the range is held to the text there is, and nothing is
+            // deleted where there is nothing to delete; `insert_at` makes
+            // the lines it needs.
+            let len = |e: &Editor<'static>, line: usize| e.with_buffer(|b| b.lines.get(line).map(|l| l.text().len()));
+            let lines = e.with_buffer(|b| b.lines.len());
+            let l1 = l1.min(lines.saturating_sub(1));
+            let l0 = l0.min(l1);
+            let i0 = i0.min(len(e, l0).unwrap_or(0));
+            let i1 = i1.min(len(e, l1).unwrap_or(0));
+            if lines > 0 && (l0, i0) < (l1, i1) {
+                e.delete_range(Cursor::new(l0, i0), Cursor::new(l1, i1));
+            }
             let after = e.insert_at(Cursor::new(l0, i0), text, None);
             e.set_cursor(after);
             e.set_selection(Selection::None);
