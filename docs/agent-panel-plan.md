@@ -483,6 +483,27 @@ CLI's `total_cost_usd` is the PROCESS's running total, so with one process
 per conversation every turn's footer had been showing the whole
 conversation's dollars; a turn's footer now shows its own.
 
+**5. Code in a reply is a block** (Kevin: *"formatted differently than
+other text … and a little glyph … that when you click on it, it gets
+copied … AND/OR … copies it directly into the edit buffer at the point or
+after the last function"*). A fenced block is drawn as one: a header row
+naming its language, then its lines on the editor's own ground, set in
+from the pane's — Lisp token-coloured, anything else in plain ink. The
+header's words are clicked: **copy** (the clipboard), **insert** (the
+buffer on screen, at the cursor) and **append** (its end, after a blank
+line); an insertion is one undo step. It is a block while it streams — a
+fence half written is already a header.
+
+In the widget (`textpane.rs`): three row styles, `block`, `block-code` and
+`block-head`, a band of ground under a row that has one, and
+`%pane-line-at`, which a transcript had no answer to before (the row under
+a point was the file tree's question only). The block is remembered
+nowhere but the rows: a click reads the styled rows under its header back.
+(`code_in_a_reply_is_a_block_that_copies_and_inserts_at_a_click`, with
+real clicks at where the words were drawn.) **Not done:** colouring by the
+block's language beyond Lisp — the editor has a `Language` for Rust and
+could lend it.
+
 **What that run found first, and fixed:** the CLI DEFERS MCP tools behind
 its own `ToolSearch`, and the model called `editor_command` without having
 seen its schema — with `command:` for a parameter named `name` — and was

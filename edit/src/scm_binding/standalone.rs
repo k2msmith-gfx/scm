@@ -1841,6 +1841,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Code in a reply is a block (Kevin, 2026-11-17): its lines on a ground
+    /// of their own under a header that names the language, and the
+    /// header's words are clicked — copy, to the clipboard; insert, into
+    /// the buffer at the cursor; append, onto its end. As it streams, too.
+    #[test]
+    fn code_in_a_reply_is_a_block_that_copies_and_inserts_at_a_click() {
+        let dir = std::env::temp_dir().join(format!("edit-agent-blocks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("main.scm").to_string_lossy().into_owned();
+        std::fs::write(&src, "(define a 1)\n(define b 2)\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, std::slice::from_ref(&src)).expect("boot");
+        // The clipboard is the user's: keep what is copied here instead.
+        s.call(r#"(define copied #f)
+                  (set! %set-clipboard (lambda (text) (set! copied text)))
+                  (focus-agent) (%pane-clear 5)"#);
+        let styles = |s: &mut Session| s.eval_to_string("(map (lambda (i) (%pane-row-style 5 i)) (iota (%pane-row-count 5)))").unwrap();
+        // It arrives in pieces: a fence half written is already a header,
+        // and the block grows under it.
+        s.call(r#"(agent-event '("delta" "Square it:\n```sch"))"#);
+        assert_eq!(styles(&mut s), r#"("normal" "block-head")"#);
+        s.call(r#"(agent-event '("delta" "eme\n(define (sq x)\n  (* x"))"#);
+        assert_eq!(styles(&mut s), r#"("normal" "block-head" "block-code" "block-code")"#);
+        s.call(r#"(agent-event '("text" "Square it:\n```scheme\n(define (sq x)\n  (* x x))\n```\nOr in Rust:\n```rust\nfn sq(x: i64) -> i64 { x * x }\n```\nThat is all."))"#);
+        assert_eq!(
+            styles(&mut s),
+            r#"("normal" "block-head" "block-code" "block-code" "normal" "normal" "block-head" "block" "normal" "normal")"#
+        );
+        assert_eq!(s.eval_to_string("(agent-block-text 1)").unwrap(), r#""(define (sq x)\n  (* x x))""#, "indentation and all");
+        let mut fb = crate::framebuffer::Framebuffer::new(1200, 700);
+        app::draw(&mut fb);
+        if let Ok(out) = std::env::var("EDIT_AGENT_SHOT") {
+            fb.save_png(&out).expect("saved");
+        }
+        // The block's ground is the editor's, not the pane's: a pixel at the
+        // right of a code row, where no ink is.
+        let theme = crate::theme::get();
+        let rows = crate::textpane::laid_rows(app::AGENT);
+        let row_y = |text: &str| rows.iter().find(|(_, t)| t.contains(text)).unwrap_or_else(|| panic!("{text}: {rows:?}")).0;
+        let column = app::rect(app::AGENT).unwrap();
+        let pixel = |fb: &crate::framebuffer::Framebuffer, x: u32, y: f32| fb.pixels[(y as u32 + 4) as usize * fb.width as usize + x as usize] & 0x00ff_ffff;
+        assert_eq!(pixel(&fb, column.x + column.w - 20, row_y("(* x x))")), theme.editor_bg & 0x00ff_ffff);
+        assert_eq!(pixel(&fb, column.x + column.w - 20, row_y("That is all.")), theme.panel_bg & 0x00ff_ffff);
+
+        // Click a word of a header: where it is, from the row as laid.
+        let advance = crate::text::mono_metrics(crate::textpane::font_px()).0 as f64;
+        let click = |s: &mut Session, head: &str, word: &str| {
+            let (y, text) = rows.iter().find(|(_, t)| t.starts_with(head)).unwrap_or_else(|| panic!("{head}: {rows:?}"));
+            let col = text.chars().collect::<String>().find(word).map(|b| text[..b].chars().count()).expect("the word");
+            s.click(column.x as f64 + crate::textpane::PAD as f64 + (col as f64 + 1.5) * advance, *y as f64 + 4.0, false, false);
+        };
+        click(&mut s, "rust", "copy");
+        assert_eq!(s.eval_to_string("copied").unwrap(), r#""fn sq(x: i64) -> i64 { x * x }""#);
+        click(&mut s, "scheme", "copy");
+        assert_eq!(s.eval_to_string("copied").unwrap(), r#""(define (sq x)\n  (* x x))""#);
+
+        // insert: at the cursor, one undo.
+        s.call("(%editor-goto-line 1 1)");
+        click(&mut s, "scheme", "insert");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define (sq x)\n  (* x x))\n(define b 2)\n");
+        assert_eq!(s.eval_to_string("(%editor-undo 1)").unwrap(), "1");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define b 2)\n", "one undo");
+        // append: at the end, after a blank line.
+        click(&mut s, "rust", "append");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define b 2)\n\nfn sq(x: i64) -> i64 { x * x }\n");
+        // A click on the header's language, or on the code, is only a click
+        // in the pane.
+        s.call("(set! copied #f)");
+        click(&mut s, "scheme", "scheme");
+        assert_eq!(s.eval_to_string("copied").unwrap(), "#f");
+        app::show_agent(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Leave given for a place is not asked for again (Kevin, 2026-11-17):
     /// y to a write outside the project grants its directory, to write and
     /// to read, kept by project across restarts; `once` remembers nothing;

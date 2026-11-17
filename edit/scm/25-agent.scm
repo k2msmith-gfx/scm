@@ -40,7 +40,7 @@
 ; and :arg, which may repeat. A key that is absent is the CLI's own default.
 
 (define agent-editor-note
-  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. You also have the editor's own tools (mcp__edit__*): buffers, buffer_read, buffer_edit, buffer_write, buffer_save, buffer_close, diagnostics, open_file, eval, and — to drive the editor itself — editor_commands, editor_command and editor_eval. When the user asks for something of the EDITOR (a colour theme, the REPL, the terminal, a file opened, a buffer saved or closed) do it with these rather than explaining how: open_file opens a file in a buffer, buffer_save and buffer_close save and close one, and editor_command runs a UI command such as load-theme or repl (editor_commands lists them). A file marked as having unsaved edits is NEWER in the editor than on disk: Read would show you a stale copy and Edit would be refused by the editor, so read it with buffer_read and change it with buffer_edit, which edits the buffer in place where the user watches and can undo. For a file with no unsaved edits either way works, and the editor reloads it as soon as you change it on disk. After a change, diagnostics tells you what the editor now finds wrong.")
+  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. A fenced code block in your reply is drawn as a block the user can copy, or put into their buffer, with one click: put an example they may want to use in one, name its language on the fence, and keep it to code that stands on its own. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. You also have the editor's own tools (mcp__edit__*): buffers, buffer_read, buffer_edit, buffer_write, buffer_save, buffer_close, diagnostics, open_file, eval, and — to drive the editor itself — editor_commands, editor_command and editor_eval. When the user asks for something of the EDITOR (a colour theme, the REPL, the terminal, a file opened, a buffer saved or closed) do it with these rather than explaining how: open_file opens a file in a buffer, buffer_save and buffer_close save and close one, and editor_command runs a UI command such as load-theme or repl (editor_commands lists them). A file marked as having unsaved edits is NEWER in the editor than on disk: Read would show you a stale copy and Edit would be refused by the editor, so read it with buffer_read and change it with buffer_edit, which edits the buffer in place where the user watches and can undo. For a file with no unsaved edits either way works, and the editor reloads it as soon as you change it on disk. After a change, diagnostics tells you what the editor now finds wrong.")
 
 ; ── What the editor shows, for the agent ───────────────────────────────────
 ; The agent reads files itself; what it cannot see is the USER — which file
@@ -813,6 +813,48 @@ exactly as it is; when the agent changed that file, the pane says so —
 ; rather than when it has finished. #f, or #(first-row rows text).
 (define *agent-stream* #f)
 
+; CODE IN A REPLY (Kevin, 2026-11-17: "formatted differently than other
+; text … and a little glyph … that when you click on it, it gets copied").
+; A fenced block — ```lang … ``` — is drawn as a block: a header row naming
+; its language and offering what can be done with it, then its lines on the
+; editor's own ground. The header's words are clicked:
+;   copy     the block to the clipboard
+;   insert   into the buffer on screen, at the cursor
+;   append   to the end of that buffer, after a blank line
+; A row's style is where the block is remembered: a click reads the rows
+; under the header back, so nothing has to be kept beside the transcript.
+(define *agent-mark* (string (integer->char #xE010)))   ; the widget's ACTION_MARK
+(define *agent-block-actions* '("copy" "insert" "append"))
+(define *agent-lisps* '("scheme" "scm" "lisp" "elisp" "emacs-lisp" "clojure" "racket" "janet" "guile"))
+
+(define (%agent-block-head language)
+  (string-append
+    (if (equal? language "") "code" language)
+    (apply string-append
+           (map (lambda (action) (string-append "  " *agent-mark* action *agent-mark*)) *agent-block-actions*))))
+
+(define (%agent-fence line)
+  ; The language a fence line opens with ("" for none), or #f: not a fence.
+  (let ((t (string-trim-both line)))
+    (and (string-prefix? "```" t)
+         (string-trim-both (substring t 3 (string-length t))))))
+
+(define (agent-reply-rows text)
+  "TEXT, a reply as the model wrote it, as the rows it is drawn in: a list
+  of (style . text), one for each of its lines."
+  (let loop ((ls (string-split text "\n")) (in #f) (acc '()))
+    (if (null? ls)
+        (reverse acc)
+        (let ((fence (%agent-fence (car ls))))
+          (cond ((and fence (not in))
+                  (loop (cdr ls)
+                        (if (member (string-downcase fence) *agent-lisps*) "block-code" "block")
+                        (cons (cons "block-head" (%agent-block-head fence)) acc)))
+                ; The closing fence: a blank row, which sets the block off.
+                (fence (loop (cdr ls) #f (cons (cons "normal" "") acc)))
+                (in (loop (cdr ls) in (cons (cons in (car ls)) acc)))
+                (else (loop (cdr ls) #f (cons (cons "normal" (car ls)) acc))))))))
+
 (define (agent-stream-draw text)
   ; Draw TEXT over the rows the reply has so far: only its last row can have
   ; changed, and any line after that is new.
@@ -824,14 +866,85 @@ exactly as it is; when the agent changed that file, the pane says so —
                    (vector at 1 ""))))
          (first (vector-ref st 0))
          (had (vector-ref st 1))
-         (lines (string-split text "\n")))
-    (let loop ((i 0) (ls lines))
-      (unless (null? ls)
+         (rows (agent-reply-rows text)))
+    (let loop ((i 0) (rs rows))
+      (unless (null? rs)
         (cond ((< i (- had 1)) #f)
-              ((< i had) (%pane-set-row id (+ first i) "normal" (car ls)))
-              (else (%pane-insert-row id (+ first i) "normal" (car ls))))
-        (loop (+ i 1) (cdr ls))))
-    (set! *agent-stream* (vector first (max had (length lines)) text))))
+              ((< i had) (%pane-set-row id (+ first i) (car (car rs)) (cdr (car rs))))
+              (else (%pane-insert-row id (+ first i) (car (car rs)) (cdr (car rs)))))
+        (loop (+ i 1) (cdr rs))))
+    (set! *agent-stream* (vector first (max had (length rows)) text))))
+
+(define (agent-show-reply text)
+  ; A whole reply at once — one that did not arrive in pieces.
+  (when (agent-id)
+    (set! *agent-stream* #f)
+    (agent-stream-draw text)
+    (set! *agent-stream* #f)))
+
+(define (agent-block-text row)
+  "The code of the block whose header is transcript row ROW."
+  (let ((id (agent-id)))
+    (let loop ((i (+ row 1)) (acc '()))
+      (if (member (%pane-row-style id i) '("block" "block-code"))
+          (loop (+ i 1) (cons (%pane-row-text id i) acc))
+          (%agent-join (reverse acc) "\n")))))
+
+(define (%agent-head-action head col)
+  ; The action word of header text HEAD that column COL is on, or #f.
+  (let loop ((i 0) (inside #f) (start 0))
+    (cond ((>= i (string-length head)) #f)
+          ((string=? (substring head i (+ i 1)) *agent-mark*)
+            (if (and inside (>= col start) (< col i))
+                (substring head start i)
+                (loop (+ i 1) (not inside) (+ i 1))))
+          (else (loop (+ i 1) inside start)))))
+
+(define (agent-block-act action code)
+  "Do ACTION — \"copy\", \"insert\" or \"append\" — with CODE, a block of a
+  reply: to the clipboard, into the buffer on screen at the cursor, or onto
+  its end after a blank line. An insertion is one undo step."
+  (let* ((eid (editor-pane-id))
+         (n (length (string-split code "\n")))
+         (lines (lambda () (string-append (number->string n) (if (= n 1) " line" " lines"))))
+         (name (lambda () (%text (buffer-name (%editor-active-buffer eid))))))
+    (cond
+      ((equal? action "copy")
+        (%set-clipboard code)
+        (echo "copied " (lines) " — paste with Cmd-V / C-y"))
+      ((not eid) (echo "there is no editor buffer to put it in"))
+      ((equal? action "insert")
+        (let ((at (%editor-cursor eid)))
+          (%editor-replace eid (car at) (cadr at) (car at) (cadr at) (string-append code "\n"))
+          (echo "inserted " (lines) " into " (name) " at line " (+ 1 (car at)) " — undo takes it back")))
+      ((equal? action "append")
+        (let* ((text (%editor-text eid))
+               (all (string-split text "\n"))
+               (last (- (length all) 1))
+               (end (bytevector-length (string->utf8 (list-ref all last))))
+               ; After a blank line, whatever the buffer ends with.
+               (lead (cond ((equal? text "") "")
+                           ((string-suffix? "\n\n" text) "")
+                           ((string-suffix? "\n" text) "\n")
+                           (else "\n\n"))))
+          (%editor-replace eid last end last end (string-append lead code "\n"))
+          (echo "appended " (lines) " to " (name) " — undo takes it back"))))
+    action))
+
+; A click on a block header's word does it. Above the click that gives the
+; pane the keyboard (50), which a click anywhere else in the pane still is.
+(add-handler
+  *click-handlers*
+  60
+  :agent-block
+  (lambda (x y . _)
+    (let* ((id (agent-id))
+           (hit (and id (not (menu-open?)) (%pane-at x y)))
+           (at (and hit (equal? (car hit) id) (%pane-line-at id x y))))
+      (and at
+           (equal? (%pane-row-style id (car at)) "block-head")
+           (let ((action (%agent-head-action (%pane-row-text id (car at)) (cadr at))))
+             (and action (begin (agent-block-act action (agent-block-text (car at))) #t)))))))
 
 (define (agent-drop-pending)
   (let ((pending *agent-pending*) (id (agent-id)))
@@ -943,7 +1056,7 @@ exactly as it is; when the agent changed that file, the pane says so —
         (set! *agent-steps* (+ *agent-steps* 1)))
       ((equal? kind "done")
         (agent-keep-session b)
-        (if (equal? a "") (agent-drop-pending) (agent-show a :normal))
+        (if (equal? a "") (agent-drop-pending) (agent-show-reply a))
         (echo "agent: finished")
         (agent-turn-over "done"))
       ((equal? kind "error")
@@ -971,7 +1084,10 @@ exactly as it is; when the agent changed that file, the pane says so —
           (guard (e (#t #f)) (sync-buffers-with-disk)))
         (set! *agent-steps* (+ *agent-steps* 1))
         (let ((shown (or (*agent-row* kind a b) (agent-default-row kind a b))))
-          (when (car shown) (agent-show (cadr shown) (car shown))))
+          (cond ((not (car shown)) #f)
+                ; The model's own words: prose, and code blocks as blocks.
+                ((and (equal? kind "text") (eq? (car shown) :normal)) (agent-show-reply (cadr shown)))
+                (else (agent-show (cadr shown) (car shown)))))
         (when (equal? kind "tool") (set! *agent-last-tool* a))
         (echo "agent: step " *agent-steps* " — "
               (cond ((equal? kind "tool") (string-append a " " (%agent-cut (%agent-first-line b) 60)))

@@ -63,7 +63,20 @@ pub enum Style {
     /// — the agent pane's replies (Kevin, 2026-09-22: "format lisp output
     /// so the code looks pretty").
     Code,
+    /// A line of a CODE BLOCK — an example the agent printed — on a band
+    /// of the editor's own ground, so it reads apart from the prose round
+    /// it (Kevin, 2026-11-17). Plain ink: the block may be any language.
+    Block,
+    /// The same, drawn token by token as `Code` is: a block of Lisp.
+    BlockCode,
+    /// A code block's header: its language, and the words that act on it
+    /// when clicked, each between two [`ACTION_MARK`]s and drawn in accent.
+    BlockHead,
 }
+
+/// Brackets a clickable word in a `BlockHead` row. A private-use code point
+/// no face draws, so its cell is a space.
+pub const ACTION_MARK: char = '\u{E010}';
 
 impl Style {
     pub fn parse(name: &str) -> Option<Self> {
@@ -73,14 +86,40 @@ impl Style {
             "accent" => Some(Self::Accent),
             "error" => Some(Self::Error),
             "code" => Some(Self::Code),
+            "block" => Some(Self::Block),
+            "block-code" => Some(Self::BlockCode),
+            "block-head" => Some(Self::BlockHead),
+            _ => None,
+        }
+    }
+
+    /// The name [`Style::parse`] reads back.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Dim => "dim",
+            Self::Accent => "accent",
+            Self::Error => "error",
+            Self::Code => "code",
+            Self::Block => "block",
+            Self::BlockCode => "block-code",
+            Self::BlockHead => "block-head",
+        }
+    }
+
+    /// The ground a row of this style is drawn on, when not the pane's own.
+    fn band(self, theme: &crate::theme::Theme) -> Option<u32> {
+        match self {
+            Self::Block | Self::BlockCode => Some(theme.editor_bg),
+            Self::BlockHead => Some(theme.status_bg),
             _ => None,
         }
     }
 
     fn ink(self, theme: &crate::theme::Theme) -> u32 {
         match self {
-            Self::Normal | Self::Code => theme.text_ink,
-            Self::Dim => theme.text_dim,
+            Self::Normal | Self::Code | Self::Block | Self::BlockCode => theme.text_ink,
+            Self::Dim | Self::BlockHead => theme.text_dim,
             Self::Accent => theme.text_accent,
             Self::Error => theme.text_error,
         }
@@ -132,6 +171,8 @@ struct LaidRow {
     text: String,
     /// True when this row continues the previous one's logical line.
     cont: bool,
+    /// The logical line it shows (part of), in a transcript.
+    line: usize,
 }
 
 thread_local! {
@@ -297,6 +338,24 @@ pub fn row_at(id: u32, x: f64, y: f64) -> Option<usize> {
             .then(|| row as usize + c.scroll)
             .filter(|&r| r < c.lines.len())
     })
+}
+
+/// The LOGICAL line under a window point in a transcript, and the column in
+/// it — what a click on a row's own words needs. The column is the laid
+/// row's, so it is the line's only on a line's first row; `None` for a
+/// continuation row's column. As last drawn.
+pub fn line_at(id: u32, x: f64, y: f64) -> Option<(usize, Option<usize>)> {
+    with(id, |c| {
+        let (x0, advance, row_h) = c.laid_metrics;
+        let row = c.laid.iter().find(|r| (y as f32) >= r.y && (y as f32) < r.y + row_h)?;
+        let col = ((x as f32 - x0) / advance).floor();
+        Some((row.line, (!row.cont && col >= 0.0).then_some(col as usize)))
+    })
+}
+
+/// The style of row `idx`, by name.
+pub fn row_style(id: u32, idx: usize) -> Option<&'static str> {
+    with(id, |c| c.lines.get(idx).map(|(s, _)| s.name()))
 }
 
 /// The (laid row, column) under a window point, or None outside the rows.
@@ -1293,7 +1352,7 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
                 } else {
                     text::draw_mono_line(fb, rect.x as f32 + pad, y, px, style.ink(&theme), &row);
                 }
-                laid.push(LaidRow { y, text: row, cont: false });
+                laid.push(LaidRow { y, text: row, cont: false, line: laid.len() + c.scroll });
                 y += row_h;
             }
             // The file tree's icons and indent guides, over its mark cells.
@@ -1308,13 +1367,13 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
         // upward from the bottom, skipping `scroll` rows off the tail.
         let top = rect.y as f32 + pad * 0.5;
         let visible_rows = ((bottom - top) / row_h).max(0.0) as usize + 1;
-        // (style, text, continues-previous-row)
-        let mut rows: Vec<(Style, String, bool)> = Vec::new();
-        'collect: for (style, line) in c.lines.iter().rev() {
+        // (style, text, continues-previous-row, logical line)
+        let mut rows: Vec<(Style, String, bool, usize)> = Vec::new();
+        'collect: for (index, (style, line)) in c.lines.iter().enumerate().rev() {
             let wrapped = wrap(line, cols);
             let n = wrapped.len();
             for (i, row) in wrapped.into_iter().enumerate().rev() {
-                rows.push((*style, row, i > 0));
+                rows.push((*style, row, i > 0, index));
                 if rows.len() >= visible_rows + c.scroll {
                     // A cut mid-line: the row above is off screen, so this
                     // one cannot claim to continue it.
@@ -1333,12 +1392,18 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
         let x0 = rect.x as f32 + pad;
         // Record where the rows land (top to bottom) for the mouse.
         let mut laid: Vec<LaidRow> = Vec::new();
-        for (style, row, cont) in rows.iter().skip(c.scroll) {
+        for (style, row, cont, line) in rows.iter().skip(c.scroll) {
             if y < top {
                 break;
             }
-            laid.push(LaidRow { y, text: row.clone(), cont: *cont });
-            let _ = style;
+            laid.push(LaidRow { y, text: row.clone(), cont: *cont, line: *line });
+            // A code block's ground, under the selection and the ink: the
+            // pane's width less a margin, so it reads as a block set in.
+            if let Some(ground) = style.band(&theme) {
+                let inset = (pad * 0.5) as u32;
+                let band = Rect { x: rect.x + inset, y: y as u32, w: rect.w.saturating_sub(2 * inset), h: row_h.ceil() as u32 };
+                fb.fill_rect(band.clamped(fb.width, fb.height), ground);
+            }
             y -= row_h;
         }
         laid.reverse();
@@ -1367,12 +1432,22 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
             }
         }
         let mut y = if c.prompt.is_empty() { bottom } else { bottom - row_h };
-        for (style, row, _) in rows.iter().skip(c.scroll) {
+        for (style, row, _, _) in rows.iter().skip(c.scroll) {
             if y < top {
                 break;
             }
-            if *style == Style::Code {
+            if matches!(style, Style::Code | Style::BlockCode) {
                 draw_code_row(fb, x0, y, px, &theme, row);
+            } else if *style == Style::BlockHead {
+                // Its language dim; the words between marks in accent, as
+                // things to click.
+                let mut action = false;
+                for (i, part) in row.split(ACTION_MARK).enumerate() {
+                    let before: usize = row.split(ACTION_MARK).take(i).map(|p| p.chars().count() + 1).sum();
+                    let ink = if action { theme.text_accent } else { theme.text_dim };
+                    text::draw_mono_line(fb, x0 + before as f32 * advance, y, px, ink, part);
+                    action = !action;
+                }
             } else {
                 text::draw_mono_line(fb, x0, y, px, style.ink(&theme), row);
             }

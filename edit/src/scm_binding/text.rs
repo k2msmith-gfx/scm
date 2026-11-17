@@ -202,6 +202,30 @@ prim! {
 
 
 prim! {
+    /// `(%pane-line-at id x y)` — in a transcript, `(line column)` under a
+    /// window point as last drawn: the logical row, and the column in it
+    /// when the point is on the row's first laid line (else -1). #f off the
+    /// rows.
+    "%pane-line-at", fn pane_line_at(id: num, x: num, y: num) {
+        match crate::textpane::line_at(id as u32, x, y) {
+            Some((line, col)) => Out::nums([line as f64, col.map_or(-1.0, |c| c as f64)]),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
+    /// `(%pane-row-style id idx)` — the style of row IDX, by the name
+    /// %pane-append takes, or #f past the end.
+    "%pane-row-style", fn pane_row_style(id: num, idx: num) {
+        match crate::textpane::row_style(id as u32, idx as usize) {
+            Some(name) => Out::Text(name.to_string()),
+            None => Out::Nil,
+        }
+    }
+}
+
+prim! {
     /// `(%pane-row-at id x y)` — the row of text pane ID under a window
     /// point, or #f: what a click on a list (the file tree) hits.
     "%pane-row-at", fn pane_row_at(id: num, x: num, y: num) {
@@ -278,6 +302,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         pane_reveal_row::install(interp)?,
         pane_set_input::install(interp)?,
         pane_row_at::install(interp)?,
+        pane_line_at::install(interp)?,
+        pane_row_style::install(interp)?,
         pane_top_anchor::install(interp)?,
         pane_proportional::install(interp)?,
         pane_selection::install(interp)?,
