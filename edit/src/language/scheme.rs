@@ -78,7 +78,10 @@ impl Language for Scheme {
     /// worst to the end.
     fn rescan(&self, old: &Scan, old_lines: &[String], lines: &[&str]) -> Option<Rescan> {
         let (on, nn) = (old_lines.len(), lines.len());
-        if old.clean.len() != on || old.spans.len() != on {
+        // A buffer that never had text has no lines at all (cosmic-text's
+        // fresh buffer): nothing to keep, and no line 0 to start from — the
+        // UI harness found that one (2026-11-16).
+        if on == 0 || nn == 0 || old.clean.len() != on || old.spans.len() != on {
             return None;
         }
         let prefix = old_lines.iter().zip(lines).take_while(|(a, b)| a.as_str() == **b).count();
@@ -479,6 +482,16 @@ mod tests {
     /// A re-scan after an edit is the scan of the edited text, exactly — over
     /// thousands of random edits that open and close strings, `#|` comments,
     /// brackets and `#;`, across lines and not.
+    /// From no lines at all (a buffer that never had text) to text and
+    /// back: no re-scan to make, and no panic.
+    #[test]
+    fn rescan_from_or_to_no_lines() {
+        let empty = SCHEME.scan(&[]);
+        assert!(SCHEME.rescan(&empty, &[], &["(f x)"]).is_none());
+        let one = SCHEME.scan(&["(f x)"]);
+        assert!(SCHEME.rescan(&one, &["(f x)".to_string()], &[]).is_none());
+    }
+
     #[test]
     fn rescan_equals_a_full_scan_after_random_edits() {
         let base = "(define (f x)\n  \"a string\n   over lines\" ; c\n  (g x #\\( 'y))\n\n#| block\n (not code) |#\n(define v #(1 2 \"3\"))\n#;(skipped (form))\n(h [a {b}] `(c ,d))\n\n(define s \"(\")\n";
