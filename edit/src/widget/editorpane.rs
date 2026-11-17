@@ -686,15 +686,62 @@ fn matches_from(lines: &[String], needle: &str, fold: bool, from: (usize, usize)
 /// backward from before it — wrapping round the buffer once: the match as
 /// (line, start, end) and whether it wrapped.
 pub fn find(id: u32, needle: &str, from: (usize, usize), forward: bool, fold: bool) -> Option<((usize, usize, usize), bool)> {
-    with_pane(id, |_, pane, _| {
-        let lines = lines_of(pane);
-        let all = matches_from(&lines, needle, fold, (0, 0));
-        if forward {
-            all.iter().find(|m| (m.0, m.1) >= from).map(|m| (*m, false)).or_else(|| all.first().map(|m| (*m, true)))
-        } else {
-            all.iter().rev().find(|m| (m.0, m.1) < from).map(|m| (*m, false)).or_else(|| all.last().map(|m| (*m, true)))
+    with_pane(id, |_, pane, _| pane.editor.with_buffer(|b| find_in(&b.lines, |l| l.text(), needle, from, forward, fold)))
+}
+
+/// [`find`] over any lines: reading from `from` and stopping at the first
+/// match, where it once listed every match in the buffer and picked one —
+/// a whole-buffer pass for each letter typed into a search (2026-11-16).
+/// The matches are the same: each line's are found from its start, without
+/// overlapping, so `aa` in `aaa` is the one at 0 whichever way it is reached.
+fn find_in<L>(lines: &[L], text: impl Fn(&L) -> &str, needle: &str, from: (usize, usize), forward: bool, fold: bool) -> Option<((usize, usize, usize), bool)> {
+    if needle.is_empty() {
+        return None;
+    }
+    let needle = fold_line(needle, fold);
+    let n = needle.len();
+    // A line's matches, in order, without overlapping.
+    let in_line = |l: usize| -> Vec<usize> {
+        let hay = fold_line(text(&lines[l]), fold);
+        let mut out = Vec::new();
+        let mut at = 0;
+        while let Some(i) = hay[at..].find(needle.as_ref()) {
+            out.push(at + i);
+            at += i + n;
         }
-    })
+        out
+    };
+    let hit = |l: usize, s: usize| (l, s, s + n);
+    let count = lines.len();
+    if forward {
+        let (fl, fb) = from;
+        if fl < count
+            && let Some(&s) = in_line(fl).iter().find(|&&s| s >= fb)
+        {
+            return Some((hit(fl, s), false));
+        }
+        for l in fl + 1..count {
+            if let Some(&s) = in_line(l).first() {
+                return Some((hit(l, s), false));
+            }
+        }
+        // Round from the top: the buffer's first match.
+        (0..count).find_map(|l| in_line(l).first().map(|&s| (hit(l, s), true)))
+    } else {
+        let (fl, fb) = from;
+        if fl < count
+            && let Some(&s) = in_line(fl).iter().rev().find(|&&s| s < fb)
+        {
+            return Some((hit(fl, s), false));
+        }
+        for l in (0..fl.min(count)).rev() {
+            if let Some(&s) = in_line(l).last() {
+                return Some((hit(l, s), false));
+            }
+        }
+        // Round from the bottom: the buffer's last match.
+        (0..count).rev().find_map(|l| in_line(l).last().map(|&s| (hit(l, s), true)))
+    }
 }
 
 /// Select (line, i0..i1) with the cursor at its end, scrolled into view —
@@ -4350,6 +4397,48 @@ mod tests {
         }
         assert!(incremental > 250, "edits took the incremental path: {incremental}");
         set_pairing(true);
+    }
+
+    /// Searching from the cursor and stopping at the first match finds what
+    /// listing every match and picking one found — forward and back, round
+    /// the ends, folded or not, self-overlapping needles included.
+    #[test]
+    fn find_stops_early_and_finds_the_same_match() {
+        let old = |lines: &[String], needle: &str, from: (usize, usize), forward: bool, fold: bool| {
+            let all = matches_from(lines, needle, fold, (0, 0));
+            if forward {
+                all.iter().find(|m| (m.0, m.1) >= from).map(|m| (*m, false)).or_else(|| all.first().map(|m| (*m, true)))
+            } else {
+                all.iter().rev().find(|m| (m.0, m.1) < from).map(|m| (*m, false)).or_else(|| all.last().map(|m| (*m, true)))
+            }
+        };
+        let mut seed: u64 = 0x0fed_cba9_8765_4321;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        };
+        let alphabet = ['a', 'A', 'b', ' ', 'é', 'a'];
+        for _ in 0..4000 {
+            let lines: Vec<String> = (0..rnd(6))
+                .map(|_| (0..rnd(12)).map(|_| alphabet[rnd(alphabet.len())]).collect())
+                .collect();
+            let needle: String = (0..1 + rnd(3)).map(|_| alphabet[rnd(3)]).collect();
+            let l = rnd(lines.len() + 1);
+            let line = lines.get(l).map_or("", String::as_str);
+            let b = (0..=line.len()).filter(|&i| line.is_char_boundary(i)).nth(rnd(line.chars().count() + 1)).unwrap_or(0);
+            for forward in [true, false] {
+                for fold in [true, false] {
+                    assert_eq!(
+                        find_in(&lines, String::as_str, &needle, (l, b), forward, fold),
+                        old(&lines, &needle, (l, b), forward, fold),
+                        "{needle:?} from {:?} in {lines:?} forward {forward} fold {fold}",
+                        (l, b)
+                    );
+                }
+            }
+        }
     }
 
     /// The row cache draws exactly what drawing every glyph drew: the same
