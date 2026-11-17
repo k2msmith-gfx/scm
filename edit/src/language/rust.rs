@@ -54,7 +54,7 @@ impl Language for Rust {
 
     fn scan(&self, lines: &[&str]) -> Scan {
         let toks = tokens(lines);
-        let mut out = Scan { spans: vec![Vec::new(); lines.len()], parens: Vec::new() };
+        let mut out = Scan { spans: vec![Vec::new(); lines.len()], parens: Vec::new(), clean: Vec::new() };
         let span = |out: &mut Scan, (l0, b0): (usize, usize), (l1, b1): (usize, usize), t: Tok| {
             for (l, line) in lines.iter().enumerate().take(l1 + 1).skip(l0) {
                 let s = if l == l0 { b0 } else { 0 };

@@ -3248,6 +3248,16 @@ struct LexCache {
     reads: bool,
     /// (theme signature, show-paren pair, font family) last applied.
     applied: Option<Applied>,
+    /// The lines the last scan re-made, when it re-scanned only an edit's
+    /// stretch: `start..new_end`, which replaced `start..old_end`. The
+    /// recolouring takes it — those lines, and the rest shifted.
+    changed: Option<(usize, usize, usize)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Edits that took the re-scan, for the test that it is taken.
+    static RESCANS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Make `lex` the scan of `buffer`'s text — and the reader's diagnostics
@@ -3264,15 +3274,31 @@ fn fresh_scan(lex: &mut Option<LexCache>, lang: &'static dyn Language, reads: bo
         if let Some(path) = path {
             watchers().iter().for_each(|w| w.text_changed(path, lang.name(), &lines));
         }
-        let scan = lang.scan(&lines);
-        let diags = if reads { lang.diagnose(&lines, &scan) } else { Vec::new() };
-        *lex = Some(LexCache {
-            scan,
-            diags,
-            reads,
-            lines: lines.iter().map(|l| l.to_string()).collect(),
-            applied: None,
-        });
+        // An edit re-scans its own stretch (the language says how far that
+        // reaches); the first scan, or a language that cannot, scans all.
+        let rescan = lex.as_ref().filter(|c| c.reads == reads).and_then(|c| lang.rescan(&c.scan, &c.lines, &lines));
+        match (rescan, lex.as_mut()) {
+            (Some(r), Some(cache)) => {
+                #[cfg(test)]
+                RESCANS.with(|n| n.set(n.get() + 1));
+                cache.diags = if reads { lang.diagnose(&lines, &r.scan) } else { Vec::new() };
+                cache.scan = r.scan;
+                cache.lines.splice(r.start..r.old_end, lines[r.start..r.new_end].iter().map(|l| l.to_string()));
+                cache.changed = Some((r.start, r.old_end, r.new_end));
+            }
+            _ => {
+                let scan = lang.scan(&lines);
+                let diags = if reads { lang.diagnose(&lines, &scan) } else { Vec::new() };
+                *lex = Some(LexCache {
+                    scan,
+                    diags,
+                    reads,
+                    lines: lines.iter().map(|l| l.to_string()).collect(),
+                    applied: None,
+                    changed: None,
+                });
+            }
+        }
     }
 }
 
@@ -3340,11 +3366,45 @@ fn relex(pane: &mut Doc, family: &str, theme: &crate::theme::Theme, typing: bool
             h.finish()
         };
         let key = (theme_sig, matched.clone(), family.to_string());
-        if line_sigs.len() == buffer.lines.len() && cache.applied.as_ref() == Some(&key) {
+        let changed = cache.changed.take();
+        if changed.is_none() && line_sigs.len() == buffer.lines.len() && cache.applied.as_ref() == Some(&key) {
             return;
         }
-        line_sigs.resize(buffer.lines.len(), 0);
-        for (i, spans) in all_spans.iter().enumerate() {
+        // Which lines to look at: after an edit's re-scan, its own lines
+        // and the show-paren pair's (old and new) — the rest only moved —
+        // as long as the theme and the font are what was applied; else all.
+        let n = buffer.lines.len();
+        let only: Option<Vec<usize>> = match (&cache.applied, changed) {
+            (Some((t, old_matched, f)), changed) if *t == theme_sig && f == family => {
+                let mut v: Vec<usize> = matched.iter().map(|&(l, _)| l).collect();
+                match changed {
+                    Some((start, old_end, new_end)) if line_sigs.len() + new_end == n + old_end => {
+                        line_sigs.splice(start..old_end, std::iter::repeat_n(0, new_end - start));
+                        let moved = |l: usize| if l >= old_end { l + new_end - old_end } else { l };
+                        v.extend(old_matched.iter().map(|&(l, _)| moved(l)));
+                        v.extend(start..new_end);
+                        Some(v)
+                    }
+                    None if line_sigs.len() == n => {
+                        v.extend(old_matched.iter().map(|&(l, _)| l));
+                        Some(v)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        line_sigs.resize(n, 0);
+        let lines_to_do: Box<dyn Iterator<Item = usize>> = match only {
+            Some(mut v) => {
+                v.sort_unstable();
+                v.dedup();
+                Box::new(v.into_iter().filter(move |&l| l < n))
+            }
+            None => Box::new(0..n),
+        };
+        for i in lines_to_do {
+            let spans = &all_spans[i];
             let marks: Vec<usize> =
                 matched.iter().filter(|&&(l, _)| l == i).map(|&(_, b)| b).collect();
             let sig = {
@@ -4223,6 +4283,73 @@ mod tests {
         act(id, "insert", Some("%"), 0.0, 0.0);
         assert_eq!(got(id), "|(a [b])", "and back");
         set_vi(false);
+    }
+
+    /// After an edit only its own lines are re-scanned and recoloured; every
+    /// line still ends up coloured as a scan of the whole text colours it,
+    /// over random typing, deleting and pasting through the editor.
+    #[test]
+    fn recolouring_an_edit_matches_colouring_everything() {
+        set_vi(false);
+        set_pairing(false);
+        let id = 1001;
+        let rect = Rect { x: 0, y: 0, w: 900, h: 500 };
+        crate::host::testing::set_rect(id, rect);
+        let base = "(define (f x)\n  \"a string\n   over lines\" ; c\n  (g x #\\( 'y))\n\n#| block\n (not code) |#\n(define v #(1 2 \"3\"))\n#;(skipped (form))\n";
+        set_text(id, &base.repeat(6));
+        let mut fb = Framebuffer::new(900, 500);
+        let colours = |id: u32| {
+            with_pane(id, |_, pane, _| {
+                pane.editor.with_buffer(|b| {
+                    b.lines
+                        .iter()
+                        .map(|l| l.attrs_list().spans().into_iter().map(|(r, a)| (r.clone(), a.color_opt.map(|c| c.0))).collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                })
+            })
+        };
+        let bits = ["(", ")", "\"", "#|", "|#", "#;", "'", "x", " ", "#\\(", ";", "(define (k)\n  1)\n"];
+        let mut seed: u64 = 0x1234_5678_9abc_def1;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        };
+        let mut incremental = 0;
+        for step in 0..300 {
+            let lines = text(id).split('\n').count();
+            with_pane(id, |_, pane, _| {
+                let l = rnd(lines);
+                let len = pane.editor.with_buffer(|b| b.lines[l].text().len());
+                let at = (0..=len).rev().find(|&i| pane.editor.with_buffer(|b| b.lines[l].text().is_char_boundary(i)) && i <= rnd(len + 1)).unwrap_or(0);
+                pane.editor.set_cursor(Cursor::new(l, at));
+            });
+            match rnd(4) {
+                0 => {
+                    act(id, "backspace", None, 0.0, 0.0);
+                }
+                1 => {
+                    act(id, "enter", None, 0.0, 0.0);
+                }
+                _ => {
+                    act(id, "insert", Some(bits[rnd(bits.len())]), 0.0, 0.0);
+                }
+            }
+            let before = RESCANS.with(|n| n.get());
+            draw(id, &mut fb, rect, true);
+            incremental += RESCANS.with(|n| n.get()) - before;
+            let got = colours(id);
+            // The same text coloured from nothing.
+            with_pane(id, |_, pane, _| {
+                pane.lex = None;
+                pane.line_sigs.clear();
+            });
+            draw(id, &mut fb, rect, true);
+            assert_eq!(got, colours(id), "step {step}:\n{}", text(id));
+        }
+        assert!(incremental > 250, "edits took the incremental path: {incremental}");
+        set_pairing(true);
     }
 
     /// The row cache draws exactly what drawing every glyph drew: the same

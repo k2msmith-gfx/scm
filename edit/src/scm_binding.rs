@@ -306,6 +306,50 @@ fn read_check(text: &str) -> crate::language::scheme::ReadCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reading form by form marks exactly what reading the whole text marks,
+    /// over random edits that break and mend strings, comments and forms.
+    #[test]
+    fn reading_by_form_marks_what_reading_whole_marks() {
+        use crate::language::{Language, scheme::SCHEME};
+        crate::language::scheme::set_reader(read_check);
+        let base = "(define (f x)\n  \"a string\n   over lines\" ; c\n  (g x #\\( 'y))\n\n#| block\n (not code) |#\n(define v #(1 2 \"3\"))\n#;(skipped (form))\n(h [a {b}] `(c ,d))\n#t #f #\\x 1.5\n";
+        let bits = ["(", ")", "\"", "#|", "|#", "#;", "'", "\n", "x", " ", "#\\(", ";", "[", "]", "\n\n", ".", "#", "#z", ",@", "|"];
+        let mut text: Vec<char> = base.repeat(3).chars().collect();
+        let mut seed: u64 = 0x5851_f42d_4c95_7f2d;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        };
+        let (mut by_form, mut errors) = (0, 0);
+        for step in 0..2000 {
+            let at = rnd(text.len() + 1);
+            if rnd(3) == 0 && !text.is_empty() {
+                let at = at.min(text.len() - 1);
+                let n = 1 + rnd(5);
+                text.drain(at..(at + n).min(text.len()));
+            } else {
+                text.splice(at..at, bits[rnd(bits.len())].chars());
+            }
+            if text.len() > 3000 {
+                text.truncate(1500);
+            }
+            let s: String = text.iter().collect();
+            let lines: Vec<&str> = s.split('\n').collect();
+            let scan = SCHEME.scan(&lines);
+            let mut whole = scan.clone();
+            whole.clean.clear();
+            let got = SCHEME.diagnose(&lines, &scan);
+            let want = SCHEME.diagnose(&lines, &whole);
+            assert_eq!(got, want, "step {step}:\n{s}");
+            by_form += usize::from(crate::language::scheme::read_by_form(read_check, &lines, &scan).is_some());
+            errors += usize::from(!want.is_empty());
+        }
+        assert!(errors > 200, "the edits made errors to find: {errors}");
+        assert!(by_form > 1500, "form by form answered, rather than falling back: {by_form}");
+    }
     use scm::Val;
 
     fn eval(interp: &mut scm::Interp, src: &str) -> Val {

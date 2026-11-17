@@ -48,10 +48,26 @@ pub type Spans = Vec<(usize, usize, Tok)>;
 
 /// A whole buffer's scan: each line's spans, and every code-context bracket
 /// in buffer order (none from inside a string or comment).
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq, Debug)]
 pub struct Scan {
     pub spans: Vec<Spans>,
     pub parens: Vec<ParenPos>,
+    /// Per line: does it start CLEAN — outside every string, comment and
+    /// bracket, with no quote or `#;` waiting for its datum? Text after a
+    /// clean line start scans (and reads) the same whatever came before
+    /// it, which is what lets an edit re-scan only its own stretch. Empty
+    /// for a language that does not say.
+    pub clean: Vec<bool>,
+}
+
+/// A scan made by re-scanning an edited stretch: the new scan, and the
+/// lines it re-made — `start..new_end` in the new text, which replaced
+/// `start..old_end` of the old; the lines after were shifted.
+pub struct Rescan {
+    pub scan: Scan,
+    pub start: usize,
+    pub old_end: usize,
+    pub new_end: usize,
 }
 
 pub trait Language: Sync {
@@ -62,6 +78,12 @@ pub trait Language: Sync {
     fn title(&self) -> &'static str;
     /// Scan the buffer, one entry per line.
     fn scan(&self, lines: &[&str]) -> Scan;
+    /// The scan of `lines` from `old`, the scan of `old_lines` (the text
+    /// before an edit), re-scanning only what the edit could have changed —
+    /// or None, to scan the whole buffer (the default).
+    fn rescan(&self, _old: &Scan, _old_lines: &[String], _lines: &[&str]) -> Option<Rescan> {
+        None
+    }
     /// The column a NEW line at (`line`, `byte`) indents to.
     fn indent(&self, lines: &[&str], line: usize, byte: usize) -> usize;
     /// The name of the call the point at (`line`, `byte`) is inside — what
@@ -105,7 +127,7 @@ impl Diagnostic {
 }
 
 /// A code-context delimiter's position, buffer-wide.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ParenPos {
     pub line: usize,
     pub byte: usize,
