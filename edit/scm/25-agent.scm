@@ -710,8 +710,35 @@ exactly as it is; when the agent changed that file, the pane says so —
 (define (%agent-ask-shown tool arg)
   (string-append tool (if (equal? arg "") "" (string-append " " (%agent-cut (%agent-first-line arg) 300)))))
 
+; AUTOMATIC (Kevin, 2026-11-17: "still noisy as far as asking for 'y'
+; approvals"). /auto and every question is answered yes as it arrives — a
+; program run, a file anywhere — each still drawn as a ✓ row, so what it did
+; is on the page. It is a grant like the others: the project's, kept across
+; restarts, forgotten by /auto off and by /revoke. The prompt says so for
+; as long as it holds, because an agent that runs anything unasked should
+; never be a surprise.
+(define (agent-auto?)
+  (if (assoc "*" (*agent-grants-ref* (%agent-project))) #t #f))
+
+(define (agent-set-auto! on)
+  (let* ((project (%agent-project))
+         (others (filter (lambda (g) (not (equal? (car g) "*"))) (*agent-grants-ref* project))))
+    (*agent-grants-set!* project (if on (cons (cons "*" "auto") others) others))
+    (agent-prompt-refresh)
+    on))
+
+(define (agent-prompt-now)
+  (if (agent-auto?) "agent (auto)> " agent-prompt))
+
+(define (agent-prompt-refresh)
+  ; The prompt on screen, when the agent's input is open, as it should read.
+  (when (and (agent-id) (%editing-pane? (agent-id)))
+    (%edit! :prompt (agent-prompt-now))
+    (edit-sync)))
+
 (define (agent-asked id tool arg why)
-  (cond ((or (member tool *agent-allowed*)
+  (cond ((or (agent-auto?)
+             (member tool *agent-allowed*)
              (and (%agent-file-ask? tool arg) (agent-granted? tool arg))
              (member (cons tool arg) *agent-commands-allowed*))
           (%agent-answer id #t "")
@@ -722,9 +749,9 @@ exactly as it is; when the agent changed that file, the pane says so —
           (agent-append
             (if (%agent-file-ask? tool arg)
                 (string-append "  y allow, here and from now on in " (%agent-dirname arg)
-                               " · once · n deny · or say what to do instead")
+                               " · once · n deny · /auto stops asking · or say what to do instead")
                 (string-append "  y allow · n deny · a allow every " tool
-                               " call in this conversation · or say what to do instead"))
+                               " call in this conversation · /auto stops asking · or say what to do instead"))
             :dim)
           (echo "agent: asks leave — " (%agent-ask-shown tool arg)))))
 
@@ -1015,20 +1042,43 @@ exactly as it is; when the agent changed that file, the pane says so —
     ((equal? cmd "/logout") (auth "logout"))
     ((equal? cmd "/status") (auth "status"))
     ((equal? cmd "/new") (new-conversation))
+    ; /auto [on|off] — answer every question yes, or go back to asking.
+    ((equal? (car words) "/auto")
+      (let ((on (cond ((null? (cdr words)) (not (agent-auto?)))
+                      (else (not (member (cadr words) '("off" "no" "0")))))))
+        (agent-set-auto! on)
+        ; Questions already waiting are answered by the same rule.
+        (when on
+          (for-each (lambda (ask)
+                      (%agent-answer (car ask) #t "")
+                      (agent-append (string-append "✓ " (%agent-ask-shown (cadr ask) (caddr ask))) :dim))
+                    *agent-asks*)
+          (set! *agent-asks* '()))
+        (agent-append
+          (if on
+              "automatic: the agent runs programs and touches files anywhere WITHOUT asking, in this project, until /auto off. Each is still shown, as a ✓ row."
+              "asking again: the agent asks before it runs a program or leaves the project")
+          (if on :accent :dim))))
     ((equal? cmd "/grants")
       (let ((grants (*agent-grants-ref* (%agent-project))))
         (if (null? grants)
             (agent-append "no place outside the project has been granted — the agent asks, and y remembers" :dim)
-            (for-each (lambda (g) (agent-append (string-append "  " (cdr g) "  " (car g)) :dim)) grants))))
+            (for-each (lambda (g)
+                        (agent-append (if (equal? (car g) "*")
+                                          "  automatic: every question is answered yes (/auto off)"
+                                          (string-append "  " (cdr g) "  " (car g)))
+                                      :dim))
+                      grants))))
     ((equal? cmd "/revoke")
       (*agent-grants-set!* (%agent-project) '())
+      (agent-prompt-refresh)
       (set! *agent-commands-allowed* '())
       (set! *agent-allowed* '())
       (agent-append "forgotten: the agent asks again before it leaves the project or runs a program" :dim))
     ((equal? cmd "/help")
-      (agent-append "commands: /login /logout /status /new /model /grants /revoke — anything else is a request to the agent. Escape interrupts it." :dim))
+      (agent-append "commands: /login /logout /status /new /model /auto /grants /revoke — anything else is a request to the agent. Escape interrupts it." :dim))
     (else
-      (agent-append (string-append "unknown command " cmd " — /login /logout /status /new /model /grants /revoke /help") :error))))
+      (agent-append (string-append "unknown command " cmd " — /login /logout /status /new /model /auto /grants /revoke /help") :error))))
 
 (define (agent-submit text)
   (%edit! :hist #f)
@@ -1072,7 +1122,7 @@ done, and the conversation is still there to go on with."
             (%focus-pane id)
             (if (%editing-pane? id)
               (begin (set! *focus-held* #t) (%hold-typing id) (edit-sync))
-              (edit-start id agent-prompt agent-submit :history (lambda () *agent-history*)))))))
+              (edit-start id (agent-prompt-now) agent-submit :history (lambda () *agent-history*)))))))
 
 (define (agent-paste)
   "Paste the clipboard into the agent's input — Cmd-V / C-y there. The

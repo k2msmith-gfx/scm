@@ -1920,6 +1920,28 @@ mod tests {
         let rows = until(&mut s, "(pair? ended)");
         assert!(rows.contains("✓ Bash cargo test"), "{rows}");
 
+        // /auto: every question is answered yes as it arrives — one that is
+        // already waiting, too — each still on the page; the prompt says
+        // so, the choice is kept with the project, and /auto off asks again.
+        s.call(r#"(agent-submit "/revoke")"#);
+        submit(&mut s, "write outside please");
+        until(&mut s, "(pair? *agent-asks*)");
+        s.call(r#"(agent-submit "/auto")"#);
+        let rows = until(&mut s, "(pair? ended)");
+        assert!(rows.contains("automatic: the agent runs programs and touches files anywhere WITHOUT asking"), "{rows}");
+        assert_eq!(s.eval_to_string("(%edit :prompt)").unwrap(), "\"agent (auto)> \"", "the prompt says so");
+        let asked = rows.matches("? ").count();
+        submit(&mut s, "by your leave, a command never seen: outside");
+        let rows = until(&mut s, "(pair? ended)");
+        assert_eq!(rows.matches("? ").count(), asked, "no new question: {rows}");
+        assert!(std::fs::read_to_string(format!("{dir}/grants.scm")).unwrap().contains("\"auto\""), "kept with the project");
+        s.call(r#"(agent-submit "/grants")"#);
+        assert!(s.eval_to_string("(rows)").unwrap().contains("automatic: every question is answered yes"));
+        s.call(r#"(agent-submit "/auto off")"#);
+        assert_eq!(s.eval_to_string("(%edit :prompt)").unwrap(), "\"agent> \"");
+        assert_eq!(s.eval_to_string("(if (agent-auto?) 1 0)").unwrap(), "0");
+        s.call(r#"(agent-submit "/auto on")"#);
+
         // /revoke: asked again.
         s.call(r#"(agent-submit "/revoke")"#);
         assert!(!granted(&mut s, "Write", &format!("{elsewhere}/notes.txt")));

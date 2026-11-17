@@ -461,6 +461,16 @@ and open the REPL" — 4 s, two calls; "open notes.txt, change red to blue in
 its buffer, save it and close that buffer" — 7 s, five calls, the file
 changed and the buffer gone.
 
+**3. Automatic** (Kevin, later the same day: *"still noisy as far as asking
+for 'y' approvals — can we put in an automatic mode?"*). `/auto` answers
+every question yes as it arrives — a program run, a file anywhere, the two
+tools that evaluate — and one already waiting. Each is still drawn, as a
+`✓` row, so what the agent did is on the page. It is a grant like the
+others: the project's, kept across restarts, ended by `/auto off` or
+`/revoke`; and the prompt reads `agent (auto)>` for as long as it holds,
+because an agent that runs anything unasked should never be a surprise.
+Every question's own line now names `/auto` as the way to stop them.
+
 **What that run found first, and fixed:** the CLI DEFERS MCP tools behind
 its own `ToolSearch`, and the model called `editor_command` without having
 seen its schema — with `command:` for a parameter named `name` — and was
