@@ -825,7 +825,26 @@ exactly as it is; when the agent changed that file, the pane says so —
 ;   Append to buffer   onto its end, after a blank line
 ; A row's style is where the block is remembered: the menu reads the rows
 ; under the header back, so nothing has to be kept beside the transcript.
-(define *agent-lisps* '("scheme" "scm" "lisp" "elisp" "emacs-lisp" "clojure" "racket" "janet" "guile"))
+(define *agent-lisps* '("lisp" "elisp" "emacs-lisp" "clojure" "racket" "janet" "common-lisp" "cl"))
+; A fence's language -> the editor language that colours it: the scanner the
+; editor's own buffers are coloured by, so an example reads as the file
+; beside it does.
+(define *agent-block-languages*
+  '(("rust" . "rust") ("rs" . "rust") ("scheme" . "scheme") ("scm" . "scheme") ("guile" . "guile")))
+
+(define (%agent-block-style fence)
+  ; The style a block opened by FENCE's language is drawn in.
+  (let* ((language (string-downcase (car (string-split (string-append fence " ") " "))))
+         ; (```rust,ignore and ```rust ignore are still Rust.)
+         (language (car (string-split language ",")))
+         (known (assoc language *agent-block-languages*)))
+    (cond (known (string-append "block:" (cdr known)))
+          ((member language *agent-lisps*) "block-code")
+          (else "block"))))
+
+(define (%agent-block-row? style)
+  ; Is STYLE a line of a code block (and not its header)?
+  (and (string? style) (string-prefix? "block" style) (not (equal? style "block-head"))))
 
 (define (%agent-block-head language)
   (if (equal? language "") "code" language))
@@ -845,7 +864,7 @@ exactly as it is; when the agent changed that file, the pane says so —
         (let ((fence (%agent-fence (car ls))))
           (cond ((and fence (not in))
                   (loop (cdr ls)
-                        (if (member (string-downcase fence) *agent-lisps*) "block-code" "block")
+                        (%agent-block-style fence)
                         (cons (cons "block-head" (%agent-block-head fence)) acc)))
                 ; The closing fence: a blank row, which sets the block off.
                 (fence (loop (cdr ls) #f (cons (cons "normal" "") acc)))
@@ -883,7 +902,7 @@ exactly as it is; when the agent changed that file, the pane says so —
   "The code of the block whose header is transcript row ROW."
   (let ((id (agent-id)))
     (let loop ((i (+ row 1)) (acc '()))
-      (if (member (%pane-row-style id i) '("block" "block-code"))
+      (if (%agent-block-row? (%pane-row-style id i))
           (loop (+ i 1) (cons (%pane-row-text id i) acc))
           (%agent-join (reverse acc) "\n")))))
 
@@ -930,7 +949,7 @@ exactly as it is; when the agent changed that file, the pane says so —
          (let loop ((row (car at)))
            (let ((style (%pane-row-style id row)))
              (cond ((equal? style "block-head") row)
-                   ((and (member style '("block" "block-code")) (> row 0)) (loop (- row 1)))
+                   ((and (%agent-block-row? style) (> row 0)) (loop (- row 1)))
                    (else #f)))))))
 
 (define (agent-menu-at x y)

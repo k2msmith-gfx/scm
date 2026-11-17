@@ -69,6 +69,11 @@ pub enum Style {
     Block,
     /// The same, drawn token by token as `Code` is: a block of Lisp.
     BlockCode,
+    /// The same, in a language the EDITOR knows (`language::by_name`, by
+    /// that name): coloured by the scanner its own buffers are, so a Rust
+    /// example in a reply reads as Rust does in the buffer beside it
+    /// (Kevin, 2026-11-17). Written `block:rust`.
+    BlockIn(&'static str),
     /// A code block's header: its language, dim, on a ground a shade
     /// darker than the block's.
     BlockHead,
@@ -85,7 +90,10 @@ impl Style {
             "block" => Some(Self::Block),
             "block-code" => Some(Self::BlockCode),
             "block-head" => Some(Self::BlockHead),
-            _ => None,
+            _ => name
+                .strip_prefix("block:")
+                .and_then(crate::language::by_name)
+                .map(|language| Self::BlockIn(language.name())),
         }
     }
 
@@ -99,6 +107,9 @@ impl Style {
             Self::Code => "code",
             Self::Block => "block",
             Self::BlockCode => "block-code",
+            Self::BlockIn("rust") => "block:rust",
+            Self::BlockIn("guile") => "block:guile",
+            Self::BlockIn(_) => "block:scheme",
             Self::BlockHead => "block-head",
         }
     }
@@ -106,7 +117,7 @@ impl Style {
     /// The ground a row of this style is drawn on, when not the pane's own.
     fn band(self, theme: &crate::theme::Theme) -> Option<u32> {
         match self {
-            Self::Block | Self::BlockCode => Some(theme.editor_bg),
+            Self::Block | Self::BlockCode | Self::BlockIn(_) => Some(theme.editor_bg),
             Self::BlockHead => Some(theme.status_bg),
             _ => None,
         }
@@ -114,7 +125,7 @@ impl Style {
 
     fn ink(self, theme: &crate::theme::Theme) -> u32 {
         match self {
-            Self::Normal | Self::Code | Self::Block | Self::BlockCode => theme.text_ink,
+            Self::Normal | Self::Code | Self::Block | Self::BlockCode | Self::BlockIn(_) => theme.text_ink,
             Self::Dim | Self::BlockHead => theme.text_dim,
             Self::Accent => theme.text_accent,
             Self::Error => theme.text_error,
@@ -351,6 +362,8 @@ pub fn line_at(id: u32, x: f64, y: f64) -> Option<(usize, Option<usize>)> {
 
 /// The style of row `idx`, by name.
 pub fn row_style(id: u32, idx: usize) -> Option<&'static str> {
+    // (`block:rust` and its like begin with `block`, as every line of a
+    // code block does: what the shell asks to find a block's extent.)
     with(id, |c| c.lines.get(idx).map(|(s, _)| s.name()))
 }
 
@@ -931,12 +944,12 @@ pub fn draw_overlay(fb: &mut Framebuffer) {
     }
 }
 
-/// Wrap one logical line into `cols`-wide rows (char-grid math — the
-/// monospace dividend). An empty line still occupies one row.
 /// Wrap a line to `cols` at WORD boundaries, continuation rows indented to
 /// the line's own leading whitespace plus two — so a request reads as a
 /// sentence and a Lisp form keeps the shape the model gave it (Kevin,
-/// 2026-09-22). A word longer than a row is cut, as before.
+/// 2026-09-22). A word longer than a row is cut. An empty line still
+/// occupies one row. (The rows alone: what the tests of wrapping read.)
+#[cfg(test)]
 fn wrap(line: &str, cols: usize) -> Vec<String> {
     wrap_mapped(line, cols).into_iter().map(|(t, _)| t).collect()
 }
@@ -1038,6 +1051,49 @@ fn cursor_cell(mapped: &[(String, Vec<Option<usize>>)], cursor: usize, cols: usi
         }
         Some((_, ri, ci)) => (ri, ci),
         None => (0, 0),
+    }
+}
+
+/// A line's ink, character by character, from its scan's spans: `None` is
+/// the body ink.
+fn span_inks(line: &str, spans: &crate::language::Spans, theme: &crate::theme::Theme) -> Vec<Option<u32>> {
+    use crate::language::Tok;
+    let mut inks = vec![None; line.chars().count()];
+    for &(from, to, tok) in spans {
+        let ink = match tok {
+            Tok::Comment => theme.code_comment,
+            Tok::Str => theme.code_string,
+            Tok::Keyword => theme.code_keyword,
+            Tok::Number => theme.code_number,
+            Tok::Call => theme.code_call,
+            Tok::Paren => theme.code_paren,
+        };
+        for (i, (byte, _)) in line.char_indices().enumerate() {
+            if byte >= from && byte < to {
+                inks[i] = Some(ink);
+            }
+        }
+    }
+    inks
+}
+
+/// Draw one laid row of a code-block line in the inks its scan gave the
+/// line: `map` says which of the line's characters each cell shows (a
+/// wrapped row's hanging indent shows none).
+#[allow(clippy::too_many_arguments)]
+fn draw_scanned_row(fb: &mut Framebuffer, x: f32, y: f32, px: f32, theme: &crate::theme::Theme, row: &str, map: &[Option<usize>], inks: &[Option<u32>]) {
+    let advance = text::mono_metrics(px).0;
+    let cells: Vec<char> = row.chars().collect();
+    let ink_at = |i: usize| map.get(i).copied().flatten().and_then(|c| inks.get(c).copied().flatten()).unwrap_or(theme.text_ink);
+    let mut i = 0;
+    while i < cells.len() {
+        let ink = ink_at(i);
+        let start = i;
+        while i < cells.len() && ink_at(i) == ink {
+            i += 1;
+        }
+        let run: String = cells[start..i].iter().collect();
+        text::draw_mono_line(fb, x + start as f32 * advance, y, px, ink, &run);
     }
 }
 
@@ -1363,13 +1419,17 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
         // upward from the bottom, skipping `scroll` rows off the tail.
         let top = rect.y as f32 + pad * 0.5;
         let visible_rows = ((bottom - top) / row_h).max(0.0) as usize + 1;
-        // (style, text, continues-previous-row, logical line)
-        let mut rows: Vec<(Style, String, bool, usize)> = Vec::new();
+        // (style, text, continues-previous-row, logical line, and — for a
+        // row of a scanned code block — which of the line's characters each
+        // cell shows)
+        type Cells = Option<Vec<Option<usize>>>;
+        let mut rows: Vec<(Style, String, bool, usize, Cells)> = Vec::new();
         'collect: for (index, (style, line)) in c.lines.iter().enumerate().rev() {
-            let wrapped = wrap(line, cols);
+            let scanned = matches!(style, Style::BlockIn(_));
+            let wrapped = wrap_mapped(line, cols);
             let n = wrapped.len();
-            for (i, row) in wrapped.into_iter().enumerate().rev() {
-                rows.push((*style, row, i > 0, index));
+            for (i, (row, map)) in wrapped.into_iter().enumerate().rev() {
+                rows.push((*style, row, i > 0, index, scanned.then_some(map)));
                 if rows.len() >= visible_rows + c.scroll {
                     // A cut mid-line: the row above is off screen, so this
                     // one cannot claim to continue it.
@@ -1388,7 +1448,7 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
         let x0 = rect.x as f32 + pad;
         // Record where the rows land (top to bottom) for the mouse.
         let mut laid: Vec<LaidRow> = Vec::new();
-        for (style, row, cont, line) in rows.iter().skip(c.scroll) {
+        for (style, row, cont, line, _) in rows.iter().skip(c.scroll) {
             if y < top {
                 break;
             }
@@ -1428,11 +1488,26 @@ pub fn draw(id: u32, fb: &mut Framebuffer, rect: Rect, focused: bool) {
             }
         }
         let mut y = if c.prompt.is_empty() { bottom } else { bottom - row_h };
-        for (style, row, _, _) in rows.iter().skip(c.scroll) {
+        // A block in a language the editor knows is scanned WHOLE — a
+        // comment or a string may run over its lines — once for each block
+        // on screen: its first line -> every line's inks.
+        let mut scans: HashMap<usize, Vec<Vec<Option<u32>>>> = HashMap::new();
+        for (style, row, _, line, cells) in rows.iter().skip(c.scroll) {
             if y < top {
                 break;
             }
-            if matches!(style, Style::Code | Style::BlockCode) {
+            if let (Style::BlockIn(name), Some(map)) = (style, cells) {
+                let mut first = *line;
+                while first > 0 && c.lines[first - 1].0 == *style {
+                    first -= 1;
+                }
+                let inks = scans.entry(first).or_insert_with(|| {
+                    let block: Vec<&str> = c.lines.iter().skip(first).take_while(|(s, _)| s == style).map(|(_, l)| l.as_str()).collect();
+                    let scan = crate::language::by_name(name).map(|language| language.scan(&block)).unwrap_or_default();
+                    block.iter().enumerate().map(|(i, l)| span_inks(l, scan.spans.get(i).unwrap_or(&Vec::new()), &theme)).collect()
+                });
+                draw_scanned_row(fb, x0, y, px, &theme, row, map, inks.get(*line - first).map_or(&[][..], |v| v));
+            } else if matches!(style, Style::Code | Style::BlockCode) {
                 draw_code_row(fb, x0, y, px, &theme, row);
             } else {
                 text::draw_mono_line(fb, x0, y, px, style.ink(&theme), row);

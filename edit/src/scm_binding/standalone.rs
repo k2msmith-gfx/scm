@@ -1863,11 +1863,11 @@ mod tests {
         s.call(r#"(agent-event '("delta" "Square it:\n```sch"))"#);
         assert_eq!(styles(&mut s), r#"("normal" "block-head")"#);
         s.call(r#"(agent-event '("delta" "eme\n(define (sq x)\n  (* x"))"#);
-        assert_eq!(styles(&mut s), r#"("normal" "block-head" "block-code" "block-code")"#);
+        assert_eq!(styles(&mut s), r#"("normal" "block-head" "block:scheme" "block:scheme")"#);
         s.call(r#"(agent-event '("text" "Square it:\n```scheme\n(define (sq x)\n  (* x x))\n```\nOr in Rust:\n```rust\nfn sq(x: i64) -> i64 { x * x }\n```\nThat is all."))"#);
         assert_eq!(
             styles(&mut s),
-            r#"("normal" "block-head" "block-code" "block-code" "normal" "normal" "block-head" "block" "normal" "normal")"#
+            r#"("normal" "block-head" "block:scheme" "block:scheme" "normal" "normal" "block-head" "block:rust" "normal" "normal")"#
         );
         assert_eq!(s.eval_to_string("(agent-block-text 1)").unwrap(), r#""(define (sq x)\n  (* x x))""#, "indentation and all");
         let mut fb = crate::framebuffer::Framebuffer::new(1200, 700);
@@ -1884,6 +1884,23 @@ mod tests {
         let pixel = |fb: &crate::framebuffer::Framebuffer, x: u32, y: f32| fb.pixels[(y as u32 + 4) as usize * fb.width as usize + x as usize] & 0x00ff_ffff;
         assert_eq!(pixel(&fb, column.x + column.w - 20, row_y("(* x x))")), theme.editor_bg & 0x00ff_ffff);
         assert_eq!(pixel(&fb, column.x + column.w - 20, row_y("That is all.")), theme.panel_bg & 0x00ff_ffff);
+        // A block in a language the editor knows is coloured as its buffers
+        // are: somewhere in the Rust row is the keyword ink (`fn`), and
+        // somewhere in the Scheme one the ink of a call's head; the prose
+        // has neither.
+        let inks = |fb: &crate::framebuffer::Framebuffer, text: &str| -> std::collections::HashSet<u32> {
+            let y = row_y(text) as u32;
+            let row_h = crate::text::mono_metrics(crate::textpane::font_px()).1 as u32;
+            (y..y + row_h).flat_map(|py| (column.x..column.x + column.w).map(move |px| (px, py))).map(|(px, py)| fb.pixels[py as usize * fb.width as usize + px as usize] & 0x00ff_ffff).collect()
+        };
+        assert!(inks(&fb, "fn sq").contains(&(theme.code_keyword & 0x00ff_ffff)), "`fn` in the keyword ink");
+        assert!(inks(&fb, "(define (sq x)").contains(&(theme.code_call & 0x00ff_ffff)), "the head of a form in its ink");
+        assert!(!inks(&fb, "That is all.").contains(&(theme.code_keyword & 0x00ff_ffff)));
+        // The fence may say more than a language, or a language the editor
+        // has no scanner for: Rust still, a Lisp's quick colours, plain.
+        for (fence, style) in [("rust,ignore", "block:rust"), ("RS", "block:rust"), ("guile", "block:guile"), ("clojure", "block-code"), ("python", "block"), ("", "block")] {
+            assert_eq!(s.eval_to_string(&format!(r#"(%agent-block-style "{fence}")"#)).unwrap(), format!("{style:?}"), "{fence}");
+        }
 
         // The menu on a block is the block's: a right-press anywhere on it
         // — its header or a line of its code — and a quick release posts
@@ -1919,7 +1936,7 @@ mod tests {
         if let Ok(out) = std::env::var("EDIT_AGENT_SHOT") {
             let mut fb = crate::framebuffer::Framebuffer::new(1200, 700);
             app::draw(&mut fb);
-            fb.save_png(&out.replace(".png", "-pie.png")).expect("saved");
+            fb.save_png(out.replace(".png", "-pie.png")).expect("saved");
         }
         s.menu_drag(x, y - 60.0);
         s.menu_release(x, y - 60.0);
@@ -2127,6 +2144,48 @@ mod tests {
         crate::agent::stop();
         app::show_agent(false);
         s.call("(load-theme :one-dark)");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// What the REAL `claude` writes for a Rust example, as the pane styles
+    /// it (one turn, by hand: `cargo test -p edit --lib
+    /// the_real_claude_shows_rust -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "spends a real turn on the logged-in Claude subscription"]
+    fn the_real_claude_shows_rust_as_a_block() {
+        let dir = std::env::temp_dir().join(format!("edit-agent-real-rust-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        std::fs::write(format!("{dir}/main.rs"), "fn main() {}\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, &[format!("{dir}/main.rs")]).expect("boot");
+        s.call(&format!(r#"(set! *agent-session-file* "{dir}/sessions.scm")
+                           (set! *agent-grants-file* "{dir}/grants.scm")
+                           (define ended '())
+                           (set! *agent-turn-ended* (lambda (status) (set! ended (cons status ended))))
+                           (set! *agent-model* "haiku")
+                           (focus-agent) (%pane-clear 5)
+                           (agent-submit "Show me, as an example and without changing any file, a Rust function that reverses the words of a sentence, with a short doc comment and a test.")"#));
+        let t0 = std::time::Instant::now();
+        while s.eval_to_string("(pair? ended)").as_deref() != Ok("#t") {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(120), "the turn never ended");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            s.poll();
+        }
+        let n: usize = s.eval_to_string("(%pane-row-count 5)").unwrap().parse().unwrap();
+        for i in 0..n {
+            let style = s.eval_to_string(&format!("(%pane-row-style 5 {i})")).unwrap();
+            eprintln!("{style:<14}| {}", s.eval_to_string(&format!("(%pane-row-text 5 {i})")).unwrap());
+        }
+        let styles = s.eval_to_string("(map (lambda (i) (%pane-row-style 5 i)) (iota (%pane-row-count 5)))").unwrap();
+        assert!(styles.contains("block-head") && styles.contains("\"block"), "{styles}");
+        if let Ok(out) = std::env::var("EDIT_AGENT_SHOT") {
+            let mut fb = crate::framebuffer::Framebuffer::new(1200, 700);
+            app::draw(&mut fb);
+            fb.save_png(&out).expect("saved");
+        }
+        crate::agent::stop();
+        app::show_agent(false);
         let _ = std::fs::remove_dir_all(dir);
     }
 

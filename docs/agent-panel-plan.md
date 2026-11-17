@@ -508,7 +508,18 @@ In the widget (`textpane.rs`): three row styles, `block`, `block-code` and
 a point was the file tree's question only). The block is remembered
 nowhere but the rows: the menu reads the styled rows under its header back.
 (`code_in_a_reply_is_a_block_with_a_menu_of_its_own`, with real
-right-presses on the rows as drawn.) **A crash found in use and fixed:**
+right-presses on the rows as drawn; the pie held and a flick, too.)
+
+**A block in a language the editor knows is coloured as the editor colours
+it** (Kevin: *"now make the same code example block … work for rust"*): a
+fence that says `rust`, `scheme` or `guile` gets the style `block:rust`
+(and so on), and the widget draws it from `language::by_name`'s scan — the
+scanner the editor's own buffers use, run over the WHOLE block, so a
+comment or a string that runs over lines is right, and mapped through the
+word-wrap so a wrapped line keeps its colours. `rust,ignore` is still
+Rust; another Lisp keeps the quick token colours; anything else is plain.
+Adding a language to the editor adds it here. **A crash found in use and
+fixed:**
 Insert into a buffer that had never held text took the program down —
 cosmic-text's `delete_range` indexes a line, and such a buffer has none;
 `replace_range` now holds its range to the text there is. **Not done:** colouring by the
