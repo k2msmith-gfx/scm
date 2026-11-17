@@ -40,7 +40,7 @@
 ; and :arg, which may repeat. A key that is absent is the CLI's own default.
 
 (define agent-editor-note
-  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. A file marked as having unsaved edits is NEWER in the editor than on disk: what you read from disk may be stale, and the editor will not take your change to it, so say so and ask them to save (C-x C-s) before you edit it. A file with no unsaved edits is reloaded in the editor as soon as you change it.")
+  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. You also have the editor's own tools (mcp__edit__*): buffers, buffer_read, buffer_edit, buffer_write, diagnostics, open_file and eval. A file marked as having unsaved edits is NEWER in the editor than on disk: Read would show you a stale copy and Edit would be refused by the editor, so read it with buffer_read and change it with buffer_edit, which edits the buffer in place where the user watches and can undo. For a file with no unsaved edits either way works, and the editor reloads it as soon as you change it on disk. After a change, diagnostics tells you what the editor now finds wrong.")
 
 ; ── What the editor shows, for the agent ───────────────────────────────────
 ; The agent reads files itself; what it cannot see is the USER — which file
@@ -132,11 +132,233 @@ edits that are not saved."
 (define *agent-model* #f)
 
 (define (agent-profile-now)
-  "The profile the next request goes out under: the host's, and the model
-  /model chose."
-  (if *agent-model*
-      (agent-profile-extend (*agent-profile*) :model *agent-model*)
-      (*agent-profile*)))
+  "The profile the next request goes out under: the host's, the model
+  /model chose, and the editor's own tools (define-agent-tool) — offered
+  with whatever servers the host's profile names, and allowed unasked
+  unless a tool was defined to ask."
+  (let* ((p (*agent-profile*))
+         (p (if *agent-model* (agent-profile-extend p :model *agent-model*) p)))
+    (if (or (null? *agent-tools*) (%alist-ref p :tools #f))
+        p
+        (let ((mine (%agent-join (map (lambda (t) (string-append "mcp__edit__" (car t)))
+                                      (filter (lambda (t) (not (list-ref t 4))) *agent-tools*))
+                                 ","))
+              (theirs (%alist-ref p :allowed-tools #f)))
+          (agent-profile-extend p
+            :tools (agent-tools-json)
+            :allowed-tools (if theirs (string-append theirs "," mine) mine))))))
+
+; ── The editor's tools, for the agent (A6) ─────────────────────────────────
+; What the agent's own file tools cannot reach: a buffer as the user sees
+; it, unsaved edits and all; an edit made IN the buffer, which one `u`
+; takes back; what the reader and the language server say is wrong; the
+; image the buffer's forms are sent to. They are served to the CLI on the
+; conversation's own channel (src/agent.rs), so a call is an event here and
+; its handler is Scheme, on the thread that owns the panes.
+(define *agent-tools* '())   ; each (name description params handler ask?)
+
+(define (define-agent-tool name description params handler (ask #f))
+  "(define-agent-tool NAME DESCRIPTION PARAMS HANDLER &opt ASK)  ->  NAME
+
+Offer the agent a tool. PARAMS is a list of (name type description
+required?) — type \"string\", \"integer\" or \"boolean\". HANDLER is called
+with the call's arguments as an alist of (name . text) and a procedure
+REPLY: call (reply TEXT) with what the tool says — now, or later when the
+answer is asynchronous — or (reply TEXT #t) when it failed. An error HANDLER
+raises is the tool's failure. With ASK, the agent must have your leave for
+each call, as it must to run a program. A tool defined again replaces the
+one of that name; a process already running keeps the tools it started
+with until /new."
+  (set! *agent-tools*
+    (append (filter (lambda (t) (not (equal? (car t) name))) *agent-tools*)
+            (list (list name description params handler ask))))
+  name)
+
+(define (%agent-join strings between)
+  (if (null? strings)
+      ""
+      (apply string-append (cdr (apply append (map (lambda (s) (list between s)) strings))))))
+
+(define (agent-tools-json)
+  ; The tools as the kernel hands them to the CLI: MCP's tool list.
+  (define (param p)
+    (string-append (%json-string (car p)) ":{\"type\":" (%json-string (cadr p))
+                   ",\"description\":" (%json-string (caddr p)) "}"))
+  (define (tool t)
+    (let ((params (caddr t)))
+      (string-append
+        "{\"name\":" (%json-string (car t))
+        ",\"description\":" (%json-string (cadr t))
+        ",\"inputSchema\":{\"type\":\"object\",\"properties\":{" (%agent-join (map param params) ",") "}"
+        ",\"required\":["
+        (%agent-join (map (lambda (p) (%json-string (car p))) (filter (lambda (p) (%list-ref/default p 3 #f)) params)) ",")
+        "]}}")))
+  (string-append "[" (%agent-join (map tool *agent-tools*) ",") "]"))
+
+(define (run-agent-tool name args answer)
+  "(run-agent-tool NAME ARGS ANSWER)
+
+Run the editor tool NAME as the agent would, with ARGS an alist of (name .
+text), and hand what it says to ANSWER as (ANSWER text failed?) — once,
+however the handler ends. How a call from the agent is run, and a way to
+try a tool by hand."
+  (let* ((tool (find (lambda (t) (equal? (car t) name)) *agent-tools*))
+         (answered #f)
+         (reply (lambda (text (failed #f))
+                  (unless answered
+                    (set! answered #t)
+                    (answer (%text text) (if failed #t #f))))))
+    (if (not tool)
+        (reply (string-append "the editor has no tool named " name) #t)
+        (guard (e (#t (reply (%agent-error-text e) #t)))
+          ((list-ref tool 3) args reply)))))
+
+(define (agent-call id name args)
+  ; A call from the agent: its answer goes back under the call's id.
+  (run-agent-tool name args (lambda (text failed) (%agent-tool-result id text failed))))
+
+(define (%agent-arg args name (default #f))
+  (let ((kv (assoc name args)))
+    (if (and kv (not (equal? (cdr kv) ""))) (cdr kv) default)))
+
+(define (%agent-buffer args)
+  ; The buffer a call names — by its name or its file — or the one on
+  ; screen; an error that says which are open when it names none of them.
+  (let ((eid (editor-pane-id)) (which (%agent-arg args "buffer")))
+    (cond ((not which) (%editor-active-buffer eid))
+          ((buffer-by-name which))
+          ((buffer-for-file which))
+          ((and *agent-turn-dir* (buffer-for-file (string-append *agent-turn-dir* "/" which))))
+          (else (raise (string-append "no open buffer " which " — open: " (%agent-join (buffer-names) ", ")))))))
+
+(define (%agent-in-buffer buf thunk)
+  ; THUNK with BUF as the editor's buffer, and the user's own back after —
+  ; whatever THUNK does.
+  (let* ((eid (editor-pane-id)) (cur (%editor-active-buffer eid)))
+    (if (equal? cur buf)
+        (thunk)
+        (begin
+          (%editor-buffer-switch eid buf)
+          (let ((r (guard (e (#t (%editor-buffer-switch eid cur) (raise e))) (thunk))))
+            (%editor-buffer-switch eid cur)
+            r)))))
+
+(define (%agent-buffer-label buf)
+  (or (buffer-path buf) (%text (buffer-name buf))))
+
+(define-agent-tool "buffers"
+  "List the buffers open in the user's editor: each one's name, file, language, whether it has unsaved edits, and which is on screen with the cursor's line. Call this to see what the user has open."
+  '()
+  (lambda (args reply)
+    (let* ((eid (editor-pane-id)) (cur (%editor-active-buffer eid)))
+      (reply
+        (%agent-join
+          (map (lambda (row)
+                 (let ((b (car row)))
+                   (string-append
+                     (%text (buffer-name b))
+                     (if (buffer-path b) (string-append " — " (buffer-path b)) " — no file")
+                     " — " (%text (%buffer-language eid b))
+                     (if (positive? (cadr row)) " — UNSAVED EDITS" "")
+                     (if (equal? b cur)
+                         (string-append " — ON SCREEN, cursor on line " (number->string (+ 1 (car (%editor-cursor eid)))))
+                         ""))))
+               (%editor-buffer-list eid))
+          "\n")))))
+
+(define-agent-tool "buffer_read"
+  "Read an open editor buffer AS THE USER SEES IT, unsaved edits included — unlike Read, which reads the file on disk. Lines come back numbered as `N<tab>text`. Use it for any file the <editor> block marks as having unsaved edits, and for a buffer that has no file."
+  '(("buffer" "string" "The buffer's name or its file's path. Omit for the buffer on screen.")
+    ("from" "integer" "First line to return, from 1. Omit for the start.")
+    ("to" "integer" "Last line to return. Omit for the end."))
+  (lambda (args reply)
+    (let* ((buf (%agent-buffer args))
+           (lines (string-split (%agent-in-buffer buf (lambda () (%editor-text (editor-pane-id)))) "\n"))
+           (n (length lines))
+           (from (max 1 (or (string->number (%agent-arg args "from" "1")) 1)))
+           (to (min n (or (string->number (%agent-arg args "to" (number->string n))) n))))
+      (reply
+        (let loop ((i 1) (ls lines) (acc '()))
+          (cond ((or (null? ls) (> i to)) (%agent-join (reverse acc) "\n"))
+                ((< i from) (loop (+ i 1) (cdr ls) acc))
+                (else (loop (+ i 1) (cdr ls) (cons (string-append (number->string i) "\t" (car ls)) acc)))))))))
+
+(define-agent-tool "buffer_edit"
+  "Edit an open editor buffer IN PLACE: replace the one occurrence of `old` with `new`. The change appears in the editor at once, unsaved, and the user can undo it with one undo — prefer this to Edit for a file open in the editor, and it is the ONLY way to change a buffer with unsaved edits or no file. `old` must occur exactly once (it does not include the line numbers buffer_read shows); include enough surrounding text to make it so."
+  '(("buffer" "string" "The buffer's name or its file's path. Omit for the buffer on screen.")
+    ("old" "string" "The exact text to replace, occurring once in the buffer." #t)
+    ("new" "string" "The text to put in its place." #t))
+  (lambda (args reply)
+    (let* ((buf (%agent-buffer args))
+           (found (%agent-in-buffer buf
+                    (lambda () (%editor-edit (editor-pane-id) (%agent-arg args "old" "") (or (%agent-arg args "new") ""))))))
+      (cond ((eqv? found 1)
+              (agent-append (string-append "✎ edited " (%text (buffer-name buf)) " — unsaved; undo takes it back") :dim)
+              (reply (string-append "Edited " (%agent-buffer-label buf) " in the editor. It is unsaved; the user saves it.")))
+            ((eqv? found 0) (reply "`old` does not occur in that buffer. Read it again with buffer_read: it may have changed." #t))
+            (else (reply (string-append "`old` occurs " (number->string found) " times; include more of the surrounding text so that it occurs once.") #t))))))
+
+(define-agent-tool "buffer_write"
+  "Replace the WHOLE text of an open editor buffer. The change appears in the editor at once, unsaved, and one undo takes it back. For a small change use buffer_edit."
+  '(("buffer" "string" "The buffer's name or its file's path. Omit for the buffer on screen.")
+    ("text" "string" "The buffer's new text, all of it." #t))
+  (lambda (args reply)
+    (let ((buf (%agent-buffer args)))
+      (%agent-in-buffer buf (lambda () (%editor-rewrite (editor-pane-id) (or (%agent-arg args "text") ""))))
+      (agent-append (string-append "✎ rewrote " (%text (buffer-name buf)) " — unsaved; undo takes it back") :dim)
+      (reply (string-append "Rewrote " (%agent-buffer-label buf) " in the editor. It is unsaved; the user saves it.")))))
+
+(define-agent-tool "diagnostics"
+  "What the editor says is wrong with an open buffer right now: what its reader cannot read, a form left open, and the language server's errors and warnings — for the text as it stands, unsaved edits included."
+  '(("buffer" "string" "The buffer's name or its file's path. Omit for the buffer on screen."))
+  (lambda (args reply)
+    (let* ((buf (%agent-buffer args))
+           (found (%agent-in-buffer buf (lambda () (%editor-diagnostics (editor-pane-id))))))
+      (reply
+        (if (null? found)
+            "No diagnostics: the editor finds nothing wrong with it."
+            (%agent-join
+              (map (lambda (d)
+                     (string-append
+                       "line " (number->string (+ 1 (car d))) ", column " (number->string (+ 1 (cadr d))) ": "
+                       (let ((sev (%list-ref/default d 3 1)))
+                         (cond ((eqv? sev 1) "error: ") ((eqv? sev 2) "warning: ") (else "left open: ")))
+                       (%text (caddr d))))
+                   found)
+              "\n"))))))
+
+(define-agent-tool "open_file"
+  "Show a file to the user: open it in the editor (or switch to its buffer) and put the cursor on a line. Use it to point at the place you are talking about."
+  '(("path" "string" "The file, absolute or relative to the project." #t)
+    ("line" "integer" "The line to put the cursor on, from 1."))
+  (lambda (args reply)
+    (let* ((given (%agent-arg args "path" ""))
+           (path (if (or (string-prefix? "/" given) (not *agent-turn-dir*)) given (string-append *agent-turn-dir* "/" given)))
+           (line (string->number (%agent-arg args "line" ""))))
+      (if (not (file-exists? path))
+          (reply (string-append "no such file: " path) #t)
+          (begin
+            (visit-file-text path)
+            (when line (%editor-goto-line (editor-pane-id) (max 0 (- line 1))))
+            (reply (string-append "Showing " path (if line (string-append " at line " (number->string line)) ""))))))))
+
+(define-agent-tool "eval"
+  "Evaluate code in the running image the buffer's forms are sent to — the program the user is working on (a Scheme REPL process, ray, Guile), where their definitions are live — and return what it printed and its value. Use it to try an expression or check a definition. The user is asked before each call."
+  '(("code" "string" "The code to evaluate, in the buffer's language." #t)
+    ("buffer" "string" "Whose image: the buffer's name or its file's path. Omit for the buffer on screen."))
+  (lambda (args reply)
+    (let* ((buf (%agent-buffer args))
+           (backend (backend-of buf))
+           (code (%agent-arg args "code" ""))
+           (answer (lambda (r)
+                     (let ((out (string-trim-right (%alist-ref r :output ""))))
+                       (if (eq? (%alist-ref r :status #f) 'ok)
+                           (reply (string-append out (if (equal? out "") "" "\n") "=> " (%text (%alist-ref r :printed ""))))
+                           (reply (string-append out (if (equal? out "") "" "\n") "error: " (%text (%alist-ref r :message ""))) #t))))))
+      (cond ((not backend) (reply "that buffer's language has nowhere to send code from this editor" #t))
+            ((backend-op backend :eval-async) => (lambda (ask) (ask code answer)))
+            (else (answer ((backend-op backend :eval) code))))))
+  #t)
 
 (define (agent-profile-extend base . settings)
   "(agent-profile-extend BASE KEY VALUE …)  ->  a profile
@@ -386,7 +608,9 @@ exactly as it is; when the agent changed that file, the pane says so —
 ; worth a row: a file read back is the file, and an edit's "updated" is said
 ; better by the buffer reloading.
 (define *agent-last-tool* #f)
-(define *agent-quiet-results* '("Read" "Edit" "Write" "MultiEdit" "NotebookEdit"))
+(define *agent-quiet-results*
+  '("Read" "Edit" "Write" "MultiEdit" "NotebookEdit" "ToolSearch"
+    "buffers" "buffer_read" "buffer_edit" "buffer_write" "open_file"))
 
 (define (%agent-in-project path)
   ; PATH as the project sees it: without the turn's directory in front.
@@ -444,6 +668,12 @@ exactly as it is; when the agent changed that file, the pane says so —
 (define (agent-keep-session id)
   (when (and id *agent-turn-dir*) (*agent-session-set!* *agent-turn-dir* id)))
 
+(define (%agent-pairs flat)
+  ; (k v k v …) as an alist.
+  (if (or (null? flat) (null? (cdr flat)))
+      '()
+      (cons (cons (car flat) (cadr flat)) (%agent-pairs (cddr flat)))))
+
 (define (agent-event row)
   "One event of a turn, from the kernel's queue (%agent-poll), drawn into
   the transcript as it arrives — so a long job reads as work in progress
@@ -454,6 +684,8 @@ exactly as it is; when the agent changed that file, the pane says so —
     (unless (member kind '("delta" "text")) (set! *agent-stream* #f))
     (cond
       ; ("ask" id tool arg why)
+      ; ("call" id name key value …)
+      ((equal? kind "call") (agent-call a b (%agent-pairs (cdddr row))))
       ((equal? kind "ask")
         (set! *agent-last-tool* b)
         (agent-asked a b (%list-ref/default row 3 "") (%list-ref/default row 4 "")))

@@ -58,6 +58,14 @@ pub enum Event {
     /// the command or the path; WHY, the CLI's reason when it gives one;
     /// INPUT, the call as JSON, which the answer hands back.
     Ask { id: String, tool: String, arg: String, why: String, input: String },
+    /// The agent called one of the HOST's tools ([`Profile::tools`]) and
+    /// waits for [`tool_result`]. ARGS are the call's arguments by name, a
+    /// value that is not text written as JSON would write it.
+    Call { id: String, name: String, args: Vec<(String, String)> },
+    /// A message for the host's tool server, as the CLI sent it. The bridge
+    /// answers these itself and passes on only a `Call`; a host never sees
+    /// one.
+    Mcp { id: String, message: String },
     /// The turn's meter, one line ([`Metrics::footer`]).
     Metrics(String),
     /// The bridge's own words (a saved conversation that had gone).
@@ -114,6 +122,15 @@ pub struct Profile {
     pub permission_prompt_tool: Option<String>,
     /// Stripped from a tool's name for display (`mcp__modeler__`).
     pub tool_prefix: Option<String>,
+    /// **The host's own tools**, served by this bridge on the process's
+    /// control channel — no second process, no socket (measured
+    /// 2026-11-17): a JSON array of `{name, description, inputSchema}`. The
+    /// agent sees each as `mcp__<tool_server>__<name>`; a call arrives as
+    /// [`Event::Call`]. One the profile does not list in `allowed_tools`
+    /// asks leave first, like any other.
+    pub tools: Option<String>,
+    /// The name those tools are served under; `edit` when not given.
+    pub tool_server: Option<String>,
     /// A directory each turn's raw stream is copied into, a file per turn.
     pub stream_log: Option<PathBuf>,
     /// The conversation to continue.
@@ -150,6 +167,8 @@ impl Profile {
                 "permission-mode" => p.permission_mode = Some(value),
                 "permission-prompt-tool" => p.permission_prompt_tool = Some(value),
                 "tool-prefix" => p.tool_prefix = Some(value),
+                "tools" => p.tools = Some(value),
+                "tool-server" => p.tool_server = Some(value),
                 "stream-log" => p.stream_log = Some(value.into()),
                 "session" => p.session = Some(value),
                 "arg" => p.extra_args.push(value),
@@ -207,6 +226,28 @@ fn prompt_file(kind: &str, text: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+impl Profile {
+    fn tool_server(&self) -> &str {
+        self.tool_server.as_deref().unwrap_or("edit")
+    }
+}
+
+/// The MCP servers the process is told of: the profile's own, and — when
+/// the host has tools — one of type `sdk`, which the CLI reaches by asking
+/// US, on its stdout, and reading the answer on its stdin.
+fn mcp_config(profile: &Profile) -> Result<Option<String>, String> {
+    if profile.tools.is_none() {
+        return Ok(profile.mcp_config.clone());
+    }
+    let mut config: serde_json::Value = match &profile.mcp_config {
+        Some(text) => serde_json::from_str(text).map_err(|e| format!("the profile's mcp-config is not JSON: {e}"))?,
+        None => serde_json::json!({}),
+    };
+    let name = profile.tool_server();
+    config["mcpServers"][name] = serde_json::json!({"type": "sdk", "name": name});
+    Ok(Some(config.to_string()))
+}
+
 /// How many arguments every process is started with, before the profile's.
 #[cfg(test)]
 const FIXED_ARGS: usize = 9;
@@ -230,7 +271,7 @@ fn argv(profile: &Profile) -> Result<Vec<String>, String> {
         }
     };
     flag("--setting-sources", &profile.setting_sources);
-    flag("--mcp-config", &profile.mcp_config);
+    flag("--mcp-config", &mcp_config(profile)?);
     flag("--allowedTools", &profile.allowed_tools);
     flag("--disallowedTools", &profile.denied_tools);
     flag("--permission-mode", &profile.permission_mode);
@@ -345,7 +386,7 @@ struct Turn {
 /// tools name it `form`, `path` or `text`; Claude Code's own name a command,
 /// a file, a pattern.
 fn tool_arg(input: &serde_json::Value) -> String {
-    ["form", "command", "file_path", "path", "pattern", "query", "url", "text", "prompt"]
+    ["form", "code", "command", "file_path", "path", "buffer", "pattern", "query", "url", "text", "prompt"]
         .iter()
         .find_map(|k| input[*k].as_str())
         .unwrap_or("")
@@ -372,7 +413,9 @@ impl Turn {
                         Some("tool_use") => {
                             self.metrics.tools += 1;
                             let name = c["name"].as_str().unwrap_or("");
+                            let own = format!("mcp__{}__", profile.tool_server());
                             let name = profile.tool_prefix.as_deref().and_then(|p| name.strip_prefix(p)).unwrap_or(name);
+                            let name = name.strip_prefix(&own).unwrap_or(name);
                             emit(Event::Tool { name: name.to_string(), arg: tool_arg(&c["input"]) });
                         }
                         _ => {}
@@ -425,6 +468,11 @@ impl Turn {
                     input: r["input"].to_string(),
                 });
             }
+            // A message for the host's tool server (`type: sdk`).
+            Some("control_request") if ev["request"]["subtype"].as_str() == Some("mcp_message") => emit(Event::Mcp {
+                id: ev["request_id"].as_str().unwrap_or("").to_string(),
+                message: ev["request"]["message"].to_string(),
+            }),
             Some("system") => match ev["subtype"].as_str() {
                 // The first line of every turn names the conversation, so
                 // a turn cut short still knows which one it was.
@@ -526,6 +574,9 @@ struct Shared {
     grace_ms: AtomicU64,
     /// Questions not yet answered: request id -> the call's input, as JSON.
     asks: Mutex<std::collections::HashMap<String, String>>,
+    /// Calls of the host's tools not yet answered: request id -> the id the
+    /// answer must carry, as JSON.
+    calls: Mutex<std::collections::HashMap<String, String>>,
     auth_stdin: Mutex<Option<std::process::ChildStdin>>,
 }
 
@@ -546,6 +597,7 @@ thread_local! {
         turns: AtomicU64::new(0),
         grace_ms: AtomicU64::new(3000),
         asks: Mutex::new(std::collections::HashMap::new()),
+        calls: Mutex::new(std::collections::HashMap::new()),
         auth_stdin: Mutex::new(None),
     });
 }
@@ -644,14 +696,23 @@ fn read_process(shared: &Arc<Shared>, generation: u64, stdout: std::process::Chi
     let mut from = std::io::BufReader::new(stdout);
     let mut log = stream_log(profile);
     loop {
-        let turn = read_stream(&mut from, profile, &mut log, &mut |e| {
-            if let Event::Ask { id, input, .. } = &e {
-                lock(&shared.asks).insert(id.clone(), input.clone());
+        let turn = read_stream(&mut from, profile, &mut log, &mut |e| match e {
+            Event::Mcp { id, message } => {
+                if let Some(call) = serve_tools(shared, profile, &id, &message) {
+                    shared.queue(call);
+                }
             }
-            shared.queue(e)
+            e => {
+                if let Event::Ask { id, input, .. } = &e {
+                    lock(&shared.asks).insert(id.clone(), input.clone());
+                }
+                shared.queue(e)
+            }
         });
-        // A question the turn ended without hearing answered is moot.
+        // A question or a call the turn ended without hearing answered is
+        // moot.
         lock(&shared.asks).clear();
+        lock(&shared.calls).clear();
         if !turn.finished {
             return process_ended(shared, generation, turn);
         }
@@ -669,6 +730,57 @@ fn read_process(shared: &Arc<Shared>, generation: u64, stdout: std::process::Chi
             Event::Done { summary: if summary.trim() == turn.last_text.trim() { String::new() } else { summary }, session: turn.session }
         });
     }
+}
+
+/// Answer control request ID with an MCP message, on the process's stdin.
+fn mcp_reply(shared: &Shared, id: &str, message: serde_json::Value) -> bool {
+    let line = serde_json::json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": {"mcp_response": message}}});
+    lock(&shared.proc).as_mut().is_some_and(|proc| write_line(&mut proc.stdin, &line.to_string()).is_ok())
+}
+
+/// The host's tool server, as much of it as needs no host: the handshake
+/// and the list of tools are answered here, on the reader's thread; a CALL
+/// is handed to the host as the [`Event::Call`] this returns, and answered
+/// by [`tool_result`].
+fn serve_tools(shared: &Shared, profile: &Profile, id: &str, message: &str) -> Option<Event> {
+    let m: serde_json::Value = serde_json::from_str(message).unwrap_or(serde_json::Value::Null);
+    let rpc = m["id"].clone();
+    let result = |r: serde_json::Value| serde_json::json!({"jsonrpc": "2.0", "id": rpc, "result": r});
+    let reply = match m["method"].as_str() {
+        Some("initialize") => result(serde_json::json!({
+            "protocolVersion": m["params"]["protocolVersion"].as_str().unwrap_or("2024-11-05"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": profile.tool_server(), "version": env!("CARGO_PKG_VERSION")},
+        })),
+        Some("tools/list") => {
+            let tools: serde_json::Value = profile.tools.as_deref().and_then(|t| serde_json::from_str(t).ok()).unwrap_or(serde_json::json!([]));
+            result(serde_json::json!({"tools": tools}))
+        }
+        Some("tools/call") => {
+            let args = m["params"]["arguments"].as_object().into_iter().flatten();
+            let args = args.map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect();
+            lock(&shared.calls).insert(id.to_string(), rpc.to_string());
+            return Some(Event::Call { id: id.to_string(), name: m["params"]["name"].as_str().unwrap_or("").to_string(), args });
+        }
+        // A notification wants no answer of its own; the control request
+        // that carried it still does.
+        _ if rpc.is_null() => serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": {}}),
+        Some(other) => serde_json::json!({"jsonrpc": "2.0", "id": rpc, "error": {"code": -32601, "message": format!("no such method: {other}")}}),
+        None => return None,
+    };
+    mcp_reply(shared, id, reply);
+    None
+}
+
+/// Answer the call [`Event::Call`] ID made: TEXT is what the tool says, and
+/// FAILED marks it as an error the agent should read as one. False when the
+/// call is no longer open.
+pub fn tool_result(id: &str, text: &str, failed: bool) -> bool {
+    let shared = agent();
+    let Some(rpc) = lock(&shared.calls).remove(id) else { return false };
+    let rpc: serde_json::Value = serde_json::from_str(&rpc).unwrap_or(serde_json::Value::Null);
+    let result = serde_json::json!({"content": [{"type": "text", "text": text}], "isError": failed});
+    mcp_reply(&shared, id, serde_json::json!({"jsonrpc": "2.0", "id": rpc, "result": result}))
 }
 
 /// The stream ended without a `result`: the process is gone. Said only by
@@ -971,7 +1083,9 @@ pub(crate) fn fake_claude(name: &str, body: &str) -> PathBuf {
 /// and answered by ANSWER (shell, run once per request, the line in
 /// `$line`); a request with "long" in it is begun and left unanswered; an
 /// interrupt closes the turn the way the CLI does; a request with "leave"
-/// in it asks leave to run `cargo test` and closes on the answer.
+/// in it asks leave to run `cargo test` and closes on the answer; one with
+/// "call the tool" in it shakes hands with the host's tool server, calls
+/// `buffer_read` and closes on that answer, kept in `$D/tool-answer`.
 #[cfg(test)]
 pub(crate) fn fake_conversation(answer: &str) -> String {
     format!(
@@ -981,12 +1095,23 @@ pub(crate) fn fake_conversation(answer: &str) -> String {
     *control_request*)
       echo '{{"type":"control_response","response":{{"subtype":"success"}}}}'
       echo '{{"type":"result","subtype":"error_during_execution","is_error":true,"result":null,"session_id":"s-1"}}';;
+    *mcp_response*)
+      case "$line" in
+        *tools*|*protocolVersion*) ;;
+        *) printf '%s\n' "$line" > "$D/tool-answer"
+           echo '{{"type":"result","is_error":false,"result":"read it","session_id":"s-1","num_turns":2}}';;
+      esac;;
     *control_response*)
       case "$line" in
         *allow*) echo '{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"42"}}]}}}}';;
         *) echo '{{"type":"user","message":{{"content":[{{"type":"tool_result","is_error":true,"content":"refused"}}]}}}}';;
       esac
       echo '{{"type":"result","is_error":false,"result":"so it went","session_id":"s-1","num_turns":2}}';;
+    *"call the tool"*)
+      echo '{{"type":"control_request","request_id":"c-0","request":{{"subtype":"mcp_message","server_name":"edit","message":{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-11-25"}}}}}}}}'
+      echo '{{"type":"control_request","request_id":"c-1","request":{{"subtype":"mcp_message","server_name":"edit","message":{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}}}}}'
+      echo '{{"type":"assistant","message":{{"id":"m","content":[{{"type":"tool_use","name":"mcp__edit__buffer_read","input":{{"buffer":"main.scm","from":2}}}}]}}}}'
+      echo '{{"type":"control_request","request_id":"c-2","request":{{"subtype":"mcp_message","server_name":"edit","message":{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"buffer_read","arguments":{{"buffer":"main.scm","from":2}}}}}}}}}}';;
     *leave*)
       echo '{{"type":"control_request","request_id":"q-1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"cargo test","description":"Run the tests"}},"decision_reason":"This command requires approval"}}}}';;
     *long*)
@@ -1321,6 +1446,58 @@ not json at all
         assert_eq!(wait_for(&ended)[0], Event::Result("refused".into()));
         let reply: serde_json::Value = serde_json::from_str(lines(&dir, "stdin").last().unwrap()).unwrap();
         assert_eq!(reply["response"]["response"], serde_json::json!({"behavior": "deny", "message": "use cargo check instead"}));
+        stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The host's tools are served on the process's own channel: the
+    /// handshake and the list answered here, a call handed to the host and
+    /// its answer sent back under the id the call came with.
+    #[test]
+    fn the_hosts_tools_are_served_on_the_control_channel() {
+        let bin = fake_claude("tools", &fake_conversation(ANSWER));
+        let dir = bin.parent().unwrap().to_path_buf();
+        let tools = r#"[{"name":"buffer_read","description":"Read a buffer.","inputSchema":{"type":"object","properties":{"buffer":{"type":"string"}}}}]"#;
+        let profile = Profile {
+            bin: Some(bin),
+            tools: Some(tools.into()),
+            mcp_config: Some(r#"{"mcpServers":{"modeler":{"command":"python3"}}}"#.into()),
+            ..Profile::default()
+        };
+        send("call the tool".into(), profile).expect("sent");
+        let events = wait_for(&|e| matches!(e.last(), Some(Event::Call { .. })));
+        assert_eq!(events[0], Event::Tool { name: "buffer_read".into(), arg: "main.scm".into() }, "shown without the server's prefix");
+        let Some(Event::Call { id, name, args }) = events.last() else { unreachable!() };
+        assert_eq!((id.as_str(), name.as_str()), ("c-2", "buffer_read"));
+        assert_eq!(args, &[("buffer".to_string(), "main.scm".to_string()), ("from".to_string(), "2".to_string())], "a number arrives as its digits");
+        assert!(!events.iter().any(|e| matches!(e, Event::Mcp { .. })), "the protocol is the bridge's business");
+        // What the process was told of: the host's server beside the
+        // profile's own.
+        let argv = lines(&dir, "argv");
+        let config: serde_json::Value = serde_json::from_str(&argv[argv.iter().position(|a| a == "--mcp-config").unwrap() + 1]).unwrap();
+        assert_eq!(config["mcpServers"]["edit"], serde_json::json!({"type": "sdk", "name": "edit"}));
+        assert_eq!(config["mcpServers"]["modeler"]["command"], "python3");
+        // The handshake and the list went back before any call did.
+        // (The stand-in keeps each line as it reads it, a moment after.)
+        let t0 = std::time::Instant::now();
+        while lines(&dir, "stdin").len() < 3 {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", lines(&dir, "stdin"));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let sent: Vec<serde_json::Value> = lines(&dir, "stdin").iter().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(sent[0]["response"]["request_id"], "c-0");
+        assert_eq!(sent[0]["response"]["response"]["mcp_response"]["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(sent[1]["response"]["response"]["mcp_response"]["result"]["tools"][0]["name"], "buffer_read");
+        assert_eq!(sent[1]["response"]["response"]["mcp_response"]["id"], 2);
+
+        assert!(!tool_result("c-9", "x", false), "not a call that was made");
+        assert!(tool_result("c-2", "(define b 2)", false));
+        assert!(!tool_result("c-2", "again", false), "answered once");
+        assert!(matches!(wait_for(&ended).last(), Some(Event::Done { .. })));
+        let answer: serde_json::Value = serde_json::from_str(&lines(&dir, "tool-answer")[0]).unwrap();
+        let answer = &answer["response"]["response"]["mcp_response"];
+        assert_eq!(answer["id"], 3, "under the id the call came with");
+        assert_eq!(answer["result"], serde_json::json!({"content": [{"type": "text", "text": "(define b 2)"}], "isError": false}));
         stop();
         let _ = std::fs::remove_dir_all(dir);
     }

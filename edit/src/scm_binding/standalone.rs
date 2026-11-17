@@ -1670,6 +1670,184 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The editor's tools, as the agent calls them (A6): the buffers that
+    /// are open, a buffer read as the user sees it, an edit made IN the
+    /// buffer that one undo takes back, what the editor finds wrong, a file
+    /// shown at a line, and code evaluated where the buffer's forms go —
+    /// which alone asks leave.
+    #[test]
+    fn the_agent_reads_and_edits_buffers_through_the_editors_tools() {
+        let turn = r#"      echo '{"type":"result","is_error":false,"result":"ok","session_id":"s-1","num_turns":1}'"#;
+        let bin = crate::agent::fake_claude("buffers", &crate::agent::fake_conversation(turn));
+        let dir = bin.parent().unwrap().to_string_lossy().into_owned();
+        let (main, other) = (format!("{dir}/main.scm"), format!("{dir}/other.scm"));
+        std::fs::write(&main, "(define a 1)\n(define b 2)\n").unwrap();
+        std::fs::write(&other, "(define c 3)\n(define c2 3)\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, &[other.clone(), main.clone()]).expect("boot");
+        s.call(&format!(r#"(set! *agent-session-file* "{dir}/sessions.scm")
+                           (define ended '())
+                           (set! *agent-turn-ended* (lambda (status) (set! ended (cons status ended))))
+                           (set! *agent-profile* (lambda () (agent-profile-extend (agent-code-profile) :bin "{dir}/claude")))
+                           (define said #f)
+                           (define (tool name . args)
+                             (set! said #f)
+                             (run-agent-tool name (%agent-pairs args) (lambda (text failed) (set! said (cons failed text))))
+                             said)"#));
+        let tool = |s: &mut Session, call: &str| -> (bool, String) {
+            let failed = s.eval_to_string(&format!("(car (tool {call}))")).unwrap() == "#t";
+            // (As written, with its escapes read back: enough to look in.)
+            (failed, s.eval_to_string("(cdr said)").unwrap().replace("\\n", "\n").replace("\\t", "\t").replace("\\\"", "\""))
+        };
+        let on_screen = || crate::editorpane::text(app::EDITOR);
+        // main.scm is on screen, with an edit that is not saved.
+        s.call(r#"(%editor-replace 1 1 0 1 0 ";; mine\n")"#);
+        assert_eq!(on_screen(), "(define a 1)\n;; mine\n(define b 2)\n");
+
+        let (_, listed) = tool(&mut s, r#""buffers""#);
+        assert!(listed.contains("main.scm") && listed.contains("UNSAVED EDITS — ON SCREEN, cursor on line"), "{listed}");
+        assert!(listed.lines().any(|l| l.contains("other.scm") && !l.contains("UNSAVED") && !l.contains("ON SCREEN")), "{listed}");
+
+        // Read as the user sees it — the unsaved line is there — numbered,
+        // a range, and a buffer that is not on screen, by its file.
+        let (failed, text) = tool(&mut s, r#""buffer_read""#);
+        assert!(!failed && text.contains("1\t(define a 1)") && text.contains("2\t;; mine") && text.contains("3\t(define b 2)"), "{text}");
+        let (_, text) = tool(&mut s, r#""buffer_read" "from" "2" "to" "2""#);
+        assert_eq!(text, "\"2\t;; mine\"");
+        let (_, text) = tool(&mut s, &format!(r#""buffer_read" "buffer" "{other}""#));
+        assert!(text.contains("1\t(define c 3)"), "{text}");
+        assert_eq!(on_screen().lines().count(), 3, "and the user's buffer is still the one on screen");
+        let (failed, text) = tool(&mut s, r#""buffer_read" "buffer" "nope.scm""#);
+        assert!(failed && text.contains("no open buffer nope.scm") && text.contains("main.scm"), "{text}");
+
+        // An edit in the buffer: there at once, unsaved, the file untouched,
+        // and ONE undo takes it back.
+        let (failed, text) = tool(&mut s, r#""buffer_edit" "old" "(define b 2)" "new" "(define b 20)\n(define d 4)""#);
+        assert!(!failed, "{text}");
+        assert_eq!(on_screen(), "(define a 1)\n;; mine\n(define b 20)\n(define d 4)\n");
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "(define a 1)\n(define b 2)\n", "the file is the user's to save");
+        assert_eq!(s.eval_to_string("(%editor-undo 1)").unwrap(), "1");
+        assert_eq!(on_screen(), "(define a 1)\n;; mine\n(define b 2)\n", "one undo");
+        // Not found, and found twice, are failures that say what to do.
+        let (failed, text) = tool(&mut s, r#""buffer_edit" "old" "(define z" "new" "x""#);
+        assert!(failed && text.contains("does not occur"), "{text}");
+        let (failed, text) = tool(&mut s, r#""buffer_edit" "old" "(define " "new" "x""#);
+        assert!(failed && text.contains("occurs 2 times"), "{text}");
+        assert_eq!(on_screen(), "(define a 1)\n;; mine\n(define b 2)\n", "and change nothing");
+        // In a buffer that is not on screen.
+        let (failed, _) = tool(&mut s, r#""buffer_edit" "buffer" "other.scm" "old" "(define c 3)" "new" "(define c 30)""#);
+        assert!(!failed);
+        assert_eq!(on_screen().lines().count(), 3);
+        let (_, text) = tool(&mut s, r#""buffer_read" "buffer" "other.scm" "to" "1""#);
+        assert!(text.contains("(define c 30)"), "{text}");
+        // The whole text, and its one undo.
+        tool(&mut s, r#""buffer_write" "text" "(define (f x)\n  (g x""#);
+        assert_eq!(on_screen(), "(define (f x)\n  (g x");
+        let (failed, text) = tool(&mut s, r#""diagnostics""#);
+        assert!(!failed && text.contains("line 1, column 1: left open"), "{text}");
+        assert_eq!(s.eval_to_string("(%editor-undo 1)").unwrap(), "1");
+        assert_eq!(on_screen(), "(define a 1)\n;; mine\n(define b 2)\n");
+        let (_, text) = tool(&mut s, r#""diagnostics""#);
+        assert!(text.contains("nothing wrong"), "{text}");
+
+        // A file shown at a line; code evaluated where the buffer's go.
+        let (failed, _) = tool(&mut s, &format!(r#""open_file" "path" "{other}" "line" "2""#));
+        assert!(!failed);
+        assert_eq!(s.eval_to_string("(buffer-path (%editor-active-buffer 1))").unwrap(), format!("{other:?}"));
+        assert_eq!(crate::editorpane::cursor(app::EDITOR).0, 1);
+        s.call(r#"(run-in-editor-image)"#);
+        let (failed, text) = tool(&mut s, r#""eval" "code" "(display \"hi\") (+ 1 2)""#);
+        assert!(!failed && text.contains("hi") && text.contains("=> 3"), "{text}");
+        let (failed, text) = tool(&mut s, r#""eval" "code" "(car 5)""#);
+        assert!(failed && text.contains("error: car"), "{text}");
+        let (failed, text) = tool(&mut s, r#""no_such_tool""#);
+        assert!(failed && text.contains("no tool named"), "{text}");
+
+        // What the agent is offered: every tool, and leave to call each
+        // unasked but eval.
+        let json = s.eval_to_string("(%alist-ref (agent-profile-now) :tools #f)").unwrap();
+        let json: String = serde_json::from_str(&json).expect("a Scheme string is a JSON string here");
+        let tools: serde_json::Value = serde_json::from_str(&json).expect("the tool list is JSON");
+        let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["buffers", "buffer_read", "buffer_edit", "buffer_write", "diagnostics", "open_file", "eval"]);
+        assert_eq!(tools[2]["inputSchema"]["required"], serde_json::json!(["old", "new"]));
+        assert_eq!(tools[1]["inputSchema"]["properties"]["from"]["type"], "integer");
+        let allowed = s.eval_to_string("(%alist-ref (agent-profile-now) :allowed-tools #f)").unwrap();
+        assert!(allowed.contains("mcp__edit__buffer_edit") && !allowed.contains("mcp__edit__eval"), "{allowed}");
+
+        // And a call from the agent itself: the CLI asks, the handler
+        // answers, the answer goes back down the conversation's channel.
+        s.call(r#"(visit-buffer (buffer-by-name "main.scm")) (focus-agent) (agent-submit "call the tool")"#);
+        let t0 = std::time::Instant::now();
+        while s.eval_to_string("(pair? ended)").as_deref() != Ok("#t") {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the turn never ended");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            s.poll();
+        }
+        let answer: serde_json::Value = serde_json::from_str(std::fs::read_to_string(format!("{dir}/tool-answer")).unwrap().trim()).unwrap();
+        let said = answer["response"]["response"]["mcp_response"]["result"]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(said, "2\t;; mine\n3\t(define b 2)\n4\t", "buffer_read main.scm from line 2, unsaved line and all");
+        let argv = std::fs::read_to_string(format!("{dir}/argv")).unwrap();
+        assert!(argv.contains(r#""edit":{"name":"edit","type":"sdk"}"#) || argv.contains(r#""edit":{"type":"sdk","name":"edit"}"#), "{argv}");
+        crate::agent::stop();
+        app::show_agent(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A6's exit, against the REAL `claude` (two small turns, by hand:
+    /// `cargo test -p edit --lib the_real_claude_works_in -- --ignored
+    /// --nocapture`): a bug that exists ONLY in the buffer — the file on
+    /// disk is right — found, and fixed in the buffer, where one undo takes
+    /// the fix back and the file is never written.
+    #[test]
+    #[ignore = "spends real turns on the logged-in Claude subscription"]
+    fn the_real_claude_works_in_an_unsaved_buffer() {
+        let dir = std::env::temp_dir().join(format!("edit-agent-real-buffer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        let file = format!("{dir}/area.py");
+        let on_disk = "def area(width, height):\n    return width * height\n";
+        std::fs::write(&file, on_disk).unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, std::slice::from_ref(&file)).expect("boot");
+        // The user's unsaved edit breaks it: the bug is in the buffer alone.
+        s.call(&format!(r#"(set! *agent-session-file* "{dir}/sessions.scm")
+                           (define ended '())
+                           (set! *agent-turn-ended* (lambda (status) (set! ended (cons status ended))))
+                           (set! *agent-model* "haiku")
+                           (%editor-edit 1 "width * height" "width + height")
+                           (%editor-goto-line 1 1)
+                           (focus-agent)"#));
+        let broken = crate::editorpane::text(app::EDITOR);
+        assert!(broken.contains("width + height"));
+        let ask = |s: &mut Session, what: &str| {
+            s.call(&format!(r#"(set! ended '()) (agent-submit "{what}")"#));
+            let t0 = std::time::Instant::now();
+            while s.eval_to_string("(pair? ended)").as_deref() != Ok("#t") {
+                assert!(t0.elapsed() < std::time::Duration::from_secs(180), "the turn never ended");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                s.poll();
+            }
+            let rows = s.eval_to_string("(map (lambda (i) (%pane-row-text 5 i)) (iota (%pane-row-count 5)))").unwrap();
+            eprintln!("{}\n", rows.replace("\" \"", "\n"));
+            rows
+        };
+        let rows = ask(&mut s, "What is wrong with the line my cursor is on? Answer in one sentence; change nothing.");
+        assert!(rows.contains("buffer_read"), "it read the buffer, not the file: {rows}");
+        assert!(rows.contains('+') || rows.to_lowercase().contains("sum") || rows.to_lowercase().contains("add"), "{rows}");
+        assert_eq!(crate::editorpane::text(app::EDITOR), broken, "asked to change nothing");
+
+        let rows = ask(&mut s, "Fix it.");
+        assert!(rows.contains("✎ edited area.py"), "{rows}");
+        assert!(crate::editorpane::text(app::EDITOR).contains("width * height"), "{:?}", crate::editorpane::text(app::EDITOR));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), on_disk, "the file was never written");
+        assert_eq!(s.eval_to_string("(%editor-undo 1)").unwrap(), "1");
+        assert_eq!(crate::editorpane::text(app::EDITOR), broken, "one undo takes the fix back");
+        crate::agent::stop();
+        app::show_agent(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A4's exit, against the REAL `claude` on this machine's login (one
     /// small turn, so by hand: `cargo test -p edit --lib
     /// the_real_claude_fixes -- --ignored`): a planted bug in the open

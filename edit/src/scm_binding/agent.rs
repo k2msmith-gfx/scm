@@ -27,6 +27,13 @@ fn row(e: Event) -> Val {
         Event::Denied { tool, why } => vec![text("denied"), text(tool), text(why)],
         // (The call's input stays in the kernel: %agent-answer hands it back.)
         Event::Ask { id, tool, arg, why, .. } => vec![text("ask"), text(id), text(tool), text(arg), text(why)],
+        Event::Call { id, name, args } => {
+            let mut row = vec![text("call"), text(id), text(name)];
+            row.extend(args.into_iter().flat_map(|(k, v)| [text(k), text(v)]));
+            row
+        }
+        // Answered by the bridge; never queued.
+        Event::Mcp { .. } => vec![text("note"), text("")],
         Event::Metrics(t) => vec![text("metrics"), text(t)],
         Event::Note(t) => vec![text("note"), text(t)],
         Event::Done { summary, session: s } => vec![text("done"), text(summary), session(s)],
@@ -36,6 +43,12 @@ fn row(e: Event) -> Val {
         Event::AuthDone(t) => vec![text("auth-done"), text(t)],
         Event::AuthError(t) => vec![text("auth-error"), text(t)],
     })
+}
+
+/// Byte offset AT of TEXT as the editor addresses it: (line, byte in line).
+fn place(text: &str, at: usize) -> (usize, usize) {
+    let before = &text[..at];
+    (before.matches('\n').count(), at - before.rfind('\n').map_or(0, |i| i + 1))
 }
 
 pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm::EmbedError> {
@@ -50,7 +63,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
     })?;
     // `(%agent-poll)` — every event since the last call, oldest first, each
     // a list: ("delta" T) ("text" T) ("tool" NAME ARG) ("result" T) ("denied" TOOL WHY)
-    // ("ask" ID TOOL ARG WHY)
+    // ("ask" ID TOOL ARG WHY) ("call" ID NAME KEY VALUE …)
     // ("metrics" T) ("note" T) ("done" SUMMARY SESSION) ("error" T SESSION)
     // ("cancelled" "" SESSION) ("auth" LINE) ("auth-done" T) ("auth-error" T). SESSION
     // is the id that continues the conversation, or #f.
@@ -67,6 +80,42 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         let id = val_text(args, 0).unwrap_or_default();
         let allow = !matches!(args.get(1), Some(Val::Bool(false)) | None);
         Ok(Val::Bool(agent::answer(&id, allow, &val_text(args, 2).unwrap_or_default())))
+    })?;
+    // `(%agent-tool-result id text failed?)` — answer the "call" event ID:
+    // TEXT is what the tool says. #f when that call is no longer open.
+    interp.define_fn("%agent-tool-result", |args: &[Val]| {
+        let id = val_text(args, 0).unwrap_or_default();
+        let failed = !matches!(args.get(2), Some(Val::Bool(false)) | None);
+        Ok(Val::Bool(agent::tool_result(&id, &val_text(args, 1).unwrap_or_default(), failed)))
+    })?;
+    // `(%json-string text)` — TEXT as a JSON string, quotes and all: what a
+    // tool's description is written with.
+    interp.define_fn("%json-string", |args: &[Val]| Ok(Val::Str(serde_json::Value::String(val_text(args, 0).unwrap_or_default()).to_string())))?;
+    // `(%editor-edit id old new)` — in pane ID's buffer, replace the ONE
+    // place OLD occurs with NEW, as one undo step: the number of places OLD
+    // occurs, and the edit made only when that is 1.
+    interp.define_fn("%editor-edit", |args: &[Val]| {
+        let id = super::val_num(args, 0) as u32;
+        let (old, new) = (val_text(args, 1).unwrap_or_default(), val_text(args, 2).unwrap_or_default());
+        let text = crate::editorpane::text(id);
+        let found = if old.is_empty() { 0 } else { text.matches(&old).count() };
+        if found == 1
+            && let Some(at) = text.find(&old)
+        {
+            let (from, to) = (place(&text, at), place(&text, at + old.len()));
+            crate::editorpane::replace_range(id, from.0, from.1, to.0, to.1, &new);
+        }
+        Ok(Val::Int(found as i64))
+    })?;
+    // `(%editor-rewrite id text)` — replace the whole of pane ID's buffer
+    // with TEXT as one undo step (where %editor-set-text is a LOAD, and
+    // forgets the undo).
+    interp.define_fn("%editor-rewrite", |args: &[Val]| {
+        let id = super::val_num(args, 0) as u32;
+        let text = crate::editorpane::text(id);
+        let end = place(&text, text.len());
+        crate::editorpane::replace_range(id, 0, 0, end.0, end.1, &val_text(args, 1).unwrap_or_default());
+        Ok(Val::Bool(true))
     })?;
     // `(%agent-stop)` — end the conversation's process: what a NEW
     // conversation needs, so that its first request is not the old one's
@@ -97,6 +146,10 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         "%agent-cancel",
         "%agent-stop",
         "%agent-answer",
+        "%agent-tool-result",
+        "%json-string",
+        "%editor-edit",
+        "%editor-rewrite",
         "%agent-available?",
         "%agent-auth",
         "%agent-auth-pending?",

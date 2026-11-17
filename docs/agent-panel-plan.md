@@ -1,8 +1,11 @@
 # The agent panel in `edit` — plan, 2026-11-16
 
-**Status, 2026-11-17: A0 measured; A1–A4 built** (below, "A1 and A2 as
-built", "A3 as built", "A4 as built"): the standalone has the agent, and
-its buffers follow the agent's edits; the modeler still has its own (A5). Kevin accepted
+**Status, 2026-11-17: A0 measured; A1–A4 and A6 built** (below, "A1 and
+A2 as built", "A3 as built", "A4 as built", "A6 as built"): the standalone
+has the agent, its buffers follow the agent's edits, and the agent reads
+and edits the buffers themselves. **A5, the modeler, WAITS** (Kevin,
+2026-11-17: *"I'd like to try the agent pane here first before the modeler
+integration"*). Kevin accepted
 the recommendations on D1–D7 on 2026-11-16 and then changed two of them,
 both recorded where they stand: **D1 is one process per CONVERSATION**, and
 **D3 is ask in the pane**, for programs and for files outside the project.
@@ -162,7 +165,7 @@ Each leaves both hosts green. Sizes are guesses until A0.
 | **A3** ✔ | **The standalone hosts it.** A fifth pane id and a right dock in `app.rs` (D2), an icon, `M-a`, `%show-dock`; Escape in `Session::escape` cancels a busy turn when the agent holds typing; session id stored per project root. | `cargo run -p edit -- FILE`, `M-a`, `/login`, a real question about the open file answered, restart, the conversation resumes. Kevin's use is the gate |
 | **A4** ✔ | **It edits, and the editor notices.** (The permission posture is built: see "as built".) Auto-revert of an unmodified buffer whose file changed on disk, and a loud refusal to revert a modified one; the turn's changed files listed in the transcript. | the agent fixes a planted bug in an open buffer; the buffer shows the fix without `:e!`; a buffer with unsaved edits is not overwritten |
 | **A5** | **The modeler takes it.** `14-ai.scm` sets the profile; `ai.rs`, the `%ai-*` prims, `Wake::Ai` and the pane half of `08-editor.scm` go; `MODELER_AI_*` variables keep working through the profile; Escape's kernel branch calls `edit::agent`. | ray's `test_agent_pane.py`, `test_agent_mcp.py`, `test_agent_during_render.py` (19/19) and `test_ai_catalog_modes.py` pass unchanged; `ai_census.py` and `ai_ab.py` still read the stream log; one real turn resumes a pre-existing `:ai-session` |
-| **A6** | **Editor tools for the agent** (D4). An MCP server the binary itself provides (`edit --mcp`, stdio, reaching the running editor as `14-remote` reaches `scm --serve`): open buffers and unsaved text, selection, cursor, diagnostics, open-file-at-line, eval in the attached backend; and the WRITE side the modeler's agent already has for the scene editor (`editor_write`, `editor_replace`, `editor_send`): replace a region or a whole buffer in place, each agent edit ONE undo step. | the agent answers "what is wrong with the form at point" from an UNSAVED buffer, fixes it in the buffer, and one `u` takes the fix back |
+| **A6** ✔ | **Editor tools for the agent** (D4). An MCP server the binary itself provides (`edit --mcp`, stdio, reaching the running editor as `14-remote` reaches `scm --serve`): open buffers and unsaved text, selection, cursor, diagnostics, open-file-at-line, eval in the attached backend; and the WRITE side the modeler's agent already has for the scene editor (`editor_write`, `editor_replace`, `editor_send`): replace a region or a whole buffer in place, each agent edit ONE undo step. | the agent answers "what is wrong with the form at point" from an UNSAVED buffer, fixes it in the buffer, and one `u` takes the fix back |
 | **A7** | **Reading comfort.** Replies are markdown: fenced code coloured through `Language`, `@` file mentions (the picker is already bound, `04-minibuffer.scm:546`), token streaming if A0 says partial messages are worth it, send-region-to-agent. | by eye |
 
 A1–A3 are the programming assistant in its first usable form. A5 is the
@@ -369,6 +372,56 @@ cursor is on has a bug", and `width * height` on screen with no `:e!`.
 (D3) there is no mode to switch between yet; it returns if a read-only
 "plan" posture is wanted.
 
+## A6 as built (2026-11-17)
+
+**D4 is decided by a measurement, and it is neither option that was put.**
+Not the modeler's Python script and not `edit --mcp`: an MCP server of
+type `sdk` is one the CLI reaches by asking ITS HOST, on the conversation's
+own channel — `mcp_message` control requests out, the answers back on
+stdin. So the editor's tools need no second process, no socket and no
+port, and a tool's handler is Scheme on the thread that owns the panes.
+`src/agent.rs` answers the handshake and the tool list itself; a call
+becomes an event, `(define-agent-tool …)`'s handler runs, and its answer
+goes back under the call's id. A handler may answer LATER (it is handed a
+`reply`), which is how `eval` waits on another process.
+
+The tools (25-agent — the shell's, so the modeler's agent has them the day
+it takes the pane):
+
+| tool | what it does | asks leave? |
+|---|---|---|
+| `buffers` | what is open: name, file, language, unsaved?, which is on screen and where the cursor is | no |
+| `buffer_read` | a buffer AS THE USER SEES IT, unsaved edits included, lines numbered; a range | no |
+| `buffer_edit` | replace the one occurrence of `old` with `new` IN the buffer — there at once, unsaved, one undo | no |
+| `buffer_write` | the whole text, likewise one undo | no |
+| `diagnostics` | what the reader and the language server find wrong, for the text as it stands | no |
+| `open_file` | show a file at a line | no |
+| `eval` | evaluate code in the image the buffer's forms go to (scm, ray, Guile) | **yes** |
+
+A tool the profile does not list as allowed asks through the same question
+the shell does, so "asks leave" is one flag on the definition. A host adds
+its own with `define-agent-tool`, and may still name whole servers in
+`:mcp-config`; the two are merged.
+
+Two prims came with it, because `%editor-set-text` is a LOAD and forgets
+the undo: `%editor-edit` (the one place, one undo step) and
+`%editor-rewrite`.
+
+Tests: `the_hosts_tools_are_served_on_the_control_channel` (the protocol),
+`the_agent_reads_and_edits_buffers_through_the_editors_tools` (each tool,
+and a call from the agent end to end), and the stage's exit against the
+REAL `claude`, `the_real_claude_works_in_an_unsaved_buffer` (`#[ignore]`,
+two turns; passed 2026-11-17, 4 s and 5 s): a bug that exists ONLY in the
+buffer — the file on disk is right — is named from `buffer_read`, fixed
+with `buffer_edit`, the file never written, and one undo takes the fix
+back.
+
+**Seen and left:** a `buffer_edit` that fails (its `old` not found) shows
+only as a second `→ buffer_edit` row — the stream does not say which
+results are errors. And in one of three runs the model spent a step on the
+CLI's own `ToolSearch` before its first editor tool; the tools are few
+enough that this should be measured before the modeler adds its nineteen.
+
 ## Risks
 
 - **A5 is a swap under a tested surface.** The modeler's agent has four
@@ -416,7 +469,8 @@ cursor is on has a bug", and `width * height` on screen with no `:e!`.
   `--permission-prompt-tool` — which needs A6's server first.
   *Recommend (b) for A4 with a `/mode` slash command to change it, and (d)
   as the place to end up.*
-- **D4 — how the editor's own tools reach the agent.** The modeler's are a
+- **D4 — DECIDED 2026-11-17 by measurement: on the conversation's own
+  channel** (see "A6 as built"). As first put: The modeler's are a
   Python script over a TCP port. The editor plan says "no install beyond
   the binary". *Recommend `edit --mcp`:* the same binary, stdio, no
   Python. The modeler keeps `modeler_mcp.py` either way; the profile takes
