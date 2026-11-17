@@ -24,6 +24,11 @@
 (define *rust-repl-program* "evcxr")   ; what rust-repl-start runs
 (define *rust-repl-args* '("--ide-mode" "--disable-readline"))
 (define *rust-repl* #f)                ; the REPL's id, once started
+(define *rust-cargo-program* "cargo")  ; what installs it
+; An evcxr release known to build with a rustc older than the newest one
+; wants (0.21.1 was what ran here on 2026-11-17, when the current release
+; refused rustc 1.94 for 1.95).
+(define *rust-repl-older-version* "0.21.1")
 ; request -> (callback . the jiffy it was sent at)
 (define *rust-repl-callbacks* (make-hash-table equal?))
 
@@ -49,6 +54,29 @@
                             (else (loop (- i 1)))))))
            (and dir (or (%git-root dir) dir))))))
 
+(define (rust-repl-missing)
+  "What to do about there being no evcxr, as lines: how to install it on
+  THIS machine — with the cargo that is here, or, with none, Rust first —
+  and what to try when the newest evcxr wants a newer rustc than this one."
+  (let* ((found (%rust-toolchain *rust-cargo-program*))
+         (cargo (car found))
+         (rustc (cadr found)))
+    (append
+      (list (string-append "Rust sends go to evcxr, a REPL for Rust, and there is no `" *rust-repl-program*
+                           "` here — not on the PATH, nor in cargo's bin (~/.cargo/bin)."))
+      (if cargo
+          (list "  Install it:   cargo install evcxr_repl --locked"
+                (string-append "  It compiles with your own toolchain"
+                               (if rustc (string-append " (rustc " rustc ")") "")
+                               ". If cargo answers that evcxr needs a newer rustc:")
+                "      rustup update"
+                (string-append "  or an older evcxr:   cargo install evcxr_repl --version " *rust-repl-older-version* " --locked"))
+          (list "  It is installed with cargo, and there is no cargo here either. Install Rust first:"
+                "      https://rustup.rs"
+                "  then:   cargo install evcxr_repl --locked"))
+      (list "  Then send again: the editor looks each time, so nothing needs restarting."
+            "  Until then, M-x term gives a terminal for cargo run."))))
+
 (define (rust-repl-start)
   "Start evcxr for the Rust buffers' sends, or answer the one running —
 M-x rust-repl-start. The first send from a Rust buffer starts it; this is
@@ -56,7 +84,9 @@ for starting it before then. It needs evcxr: `cargo install evcxr_repl`."
   (unless (rust-repl-running?)
     (let ((program (%pipe-which *rust-repl-program*)))
       (unless program
-        (raise (string-append "no " *rust-repl-program* " — `cargo install evcxr_repl` gives Rust a REPL")))
+        (for-each (lambda (line) (*transcript-append* line :dim)) (rust-repl-missing))
+        (*help-open*)
+        (raise (string-append "no " *rust-repl-program* " to start — how to get one is in the REPL panel")))
       (set! *rust-repl*
         (%pipe-start program *rust-repl-args* (%rust-repl-dir) %rust-ok %rust-failed ">> "))
       (echo "evcxr running — the first send compiles, and takes a few seconds")))
@@ -172,13 +202,14 @@ this image, where Rust would be read as Scheme."
           lsp)
         (append
           (list (cons :name "nothing (no evcxr)")
+                ; The how-to as the send's output, above the error's own
+                ; line, which the echo shows too and so stays short.
                 (cons :eval
                       (lambda (src)
+                        (*help-open*)
                         (list (cons :status 'error)
-                              (cons :message
-                                    (string-append "rust: a send goes nowhere without a REPL — `cargo install evcxr_repl` gives Rust one"
-                                                   " (evcxr), or run cargo in a terminal (M-x term)"))
-                              (cons :output "")))))
+                              (cons :message "rust: a send goes nowhere without a REPL — evcxr is not installed")
+                              (cons :output (%agent-join (rust-repl-missing) "\n"))))))
           lsp))))
 
 (hash-table-set! *language-backends* "rust" rust-repl-backend)

@@ -1237,8 +1237,15 @@ same transcript, the same REPL panel as a Scheme file's scm:
   remote-interrupt`, which now asks the buffer's backend); `*rust-repl-program*`
   and `*rust-repl-args*`. evcxr is looked for on the PATH and then in
   cargo's bin, where `cargo install evcxr_repl` puts it and where an editor
-  started from the dock would not find it. With none, a send says how to get
-  one and goes nowhere. Completion, describe and `M-.` stay rust-analyzer's.
+  started from the dock would not find it. **evcxr is a program the user
+  installs, not a crate `edit` links** — like `scm`, `guile` and
+  `rust-analyzer` — and it compiles with the user's own rustc. With none, a
+  send goes nowhere and says how to get one ON THAT MACHINE
+  (`rust-repl-missing`): the install line when cargo is there, with the
+  rustc it found and what to do when the newest evcxr wants a newer one
+  (`rustup update`, or an older evcxr by `--version`); Rust first, from
+  rustup.rs, when cargo is not. It looks again on every send, so nothing
+  needs restarting once it is installed. Completion, describe and `M-.` stay rust-analyzer's.
 - **The agent's `eval` tool** reaches it too, being the buffer's backend.
 - **It is not Cargo.** One file that is a module of a crate (`use crate::…`,
   `mod x;`) does not load into evcxr whole, though its functions do one at

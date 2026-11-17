@@ -27,6 +27,20 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
     interp.define_fn("%pipe-which", |args: &[Val]| {
         Ok(crate::pipe::which(&val_text(args, 0).unwrap_or_default()).map_or(Val::Bool(false), |p| Val::Str(p.to_string_lossy().into_owned())))
     })?;
+    // `(%rust-toolchain cargo)` — (cargo's path, rustc's version) as far as
+    // each is here, else #f in its place: what the "no evcxr" message reads
+    // to say how to get one on THIS machine.
+    interp.define_fn("%rust-toolchain", |args: &[Val]| {
+        let cargo = crate::pipe::which(&val_text(args, 0).unwrap_or_else(|| "cargo".into()));
+        // rustc beside that cargo, else the PATH's.
+        let rustc = cargo.as_ref().and_then(|c| Some(c.parent()?.join("rustc")).filter(|p| p.is_file())).or_else(|| crate::pipe::which("rustc"));
+        let version = rustc.and_then(|r| std::process::Command::new(r).arg("--version").output().ok()).and_then(|o| {
+            // "rustc 1.94.0 (… 2026-…)" -> "1.94.0"
+            String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).map(str::to_string)
+        });
+        let or_false = |v: Option<String>| v.map_or(Val::Bool(false), Val::Str);
+        Ok(Val::List(vec![or_false(cargo.map(|c| c.to_string_lossy().into_owned())), or_false(version)]))
+    })?;
     // `(%pipe-start program args cwd ok failed prompt)` — start PROGRAM, a
     // REPL read a line at a time whose answers end in the text OK or
     // FAILED and which writes PROMPT before it reads: its id. Raises with
@@ -104,6 +118,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
     })?;
     Ok(vec![
         "%pipe-which",
+        "%rust-toolchain",
         "%pipe-start",
         "%pipe-send",
         "%pipe-poll",

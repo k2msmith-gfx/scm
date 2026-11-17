@@ -2375,7 +2375,26 @@ mod tests {
         let got = send(&mut s, "(eval-last-sexp)");
         assert!(got.contains("=> ran: sq(4)"), "{got}");
         s.call(r#"(rust-repl-stop) (set! *rust-repl-program* "/nonexistent/evcxr") (%pane-clear 2) (eval-last-sexp)"#);
-        assert!(rows(&mut s).contains("a send goes nowhere without a REPL — `cargo install evcxr_repl`"), "{}", rows(&mut s));
+        // …and how to get one, for THIS machine: with a cargo, the install
+        // line, this rustc, and the way out when evcxr wants a newer one.
+        let got = rows(&mut s);
+        assert!(got.contains("error: rust: a send goes nowhere without a REPL — evcxr is not installed"), "{got}");
+        assert!(got.contains("there is no `/nonexistent/evcxr` here"), "{got}");
+        if crate::pipe::which("cargo").is_some() {
+            assert!(got.contains("Install it:   cargo install evcxr_repl --locked"), "{got}");
+            assert!(got.contains("(rustc 1.") && got.contains("rustup update") && got.contains("--version 0.21.1 --locked"), "{got}");
+        }
+        assert!(got.contains("Then send again"), "{got}");
+        // With no cargo either: Rust first.
+        s.call(r#"(set! *rust-cargo-program* "/nonexistent/cargo") (%pane-clear 2) (eval-last-sexp)"#);
+        let got = rows(&mut s);
+        assert!(got.contains("there is no cargo here either") && got.contains("https://rustup.rs"), "{got}");
+        assert!(!got.contains("rustup update"), "{got}");
+        // M-x rust-repl-start says the same, and raises rather than start.
+        s.call(r#"(%pane-clear 2) (guard (e (#t (set! *rust-repl* 'raised))) (rust-repl-start))"#);
+        assert_eq!(s.eval_to_string("*rust-repl*").unwrap(), "raised");
+        assert!(rows(&mut s).contains("https://rustup.rs"), "{}", rows(&mut s));
+        s.call("(set! *rust-repl* #f)");
         app::show_panel(None);
         let _ = std::fs::remove_dir_all(dir);
     }
