@@ -40,7 +40,7 @@
 ; and :arg, which may repeat. A key that is absent is the CLI's own default.
 
 (define agent-editor-note
-  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. You also have the editor's own tools (mcp__edit__*): buffers, buffer_read, buffer_edit, buffer_write, diagnostics, open_file and eval. A file marked as having unsaved edits is NEWER in the editor than on disk: Read would show you a stale copy and Edit would be refused by the editor, so read it with buffer_read and change it with buffer_edit, which edits the buffer in place where the user watches and can undo. For a file with no unsaved edits either way works, and the editor reloads it as soon as you change it on disk. After a change, diagnostics tells you what the editor now finds wrong.")
+  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. You also have the editor's own tools (mcp__edit__*): buffers, buffer_read, buffer_edit, buffer_write, buffer_save, buffer_close, diagnostics, open_file, eval, and — to drive the editor itself — editor_commands, editor_command and editor_eval. When the user asks for something of the EDITOR (a colour theme, the REPL, the terminal, a file opened, a buffer saved or closed) do it with these rather than explaining how: open_file opens a file in a buffer, buffer_save and buffer_close save and close one, and editor_command runs a UI command such as load-theme or repl (editor_commands lists them). A file marked as having unsaved edits is NEWER in the editor than on disk: Read would show you a stale copy and Edit would be refused by the editor, so read it with buffer_read and change it with buffer_edit, which edits the buffer in place where the user watches and can undo. For a file with no unsaved edits either way works, and the editor reloads it as soon as you change it on disk. After a change, diagnostics tells you what the editor now finds wrong.")
 
 ; ── What the editor shows, for the agent ───────────────────────────────────
 ; The agent reads files itself; what it cannot see is the USER — which file
@@ -208,10 +208,27 @@ try a tool by hand."
                   (unless answered
                     (set! answered #t)
                     (answer (%text text) (if failed #t #f))))))
-    (if (not tool)
-        (reply (string-append "the editor has no tool named " name) #t)
-        (guard (e (#t (reply (%agent-error-text e) #t)))
-          ((list-ref tool 3) args reply)))))
+    ; An argument the tool does not take, or one it needs and was not given,
+    ; is answered with what it DOES take: a call made on a guess is
+    ; corrected by its own error.
+    (define (takes)
+      (let ((params (caddr tool)))
+        (if (null? params)
+            "it takes no arguments"
+            (string-append "it takes: "
+                           (%agent-join (map (lambda (p)
+                                               (string-append (car p) " (" (cadr p)
+                                                              (if (%list-ref/default p 3 #f) ", required)" ")")))
+                                             params)
+                                        ", ")))))
+    (cond ((not tool) (reply (string-append "the editor has no tool named " name) #t))
+          ((find (lambda (kv) (not (assoc (car kv) (caddr tool)))) args)
+            => (lambda (kv) (reply (string-append name " has no argument " (car kv) " — " (takes)) #t)))
+          ((find (lambda (p) (and (%list-ref/default p 3 #f) (not (assoc (car p) args)))) (caddr tool))
+            => (lambda (p) (reply (string-append name " needs " (car p) " — " (takes)) #t)))
+          (else
+            (guard (e (#t (reply (%agent-error-text e) #t)))
+              ((list-ref tool 3) args reply))))))
 
 (define (agent-call id name args)
   ; A call from the agent: its answer goes back under the call's id.
@@ -341,6 +358,129 @@ try a tool by hand."
             (visit-file-text path)
             (when line (%editor-goto-line (editor-pane-id) (max 0 (- line 1))))
             (reply (string-append "Showing " path (if line (string-append " at line " (number->string line)) ""))))))))
+
+(define-agent-tool "buffer_save"
+  "Save an open editor buffer to its file, as the user's C-x C-s does. Use it after buffer_edit when the user asked for the change to be saved."
+  '(("buffer" "string" "The buffer's name or its file's path. Omit for the buffer on screen."))
+  (lambda (args reply)
+    (let* ((eid (editor-pane-id)) (buf (%agent-buffer args)) (path (buffer-path buf)))
+      (cond ((not path) (reply "that buffer has no file: tell the user, who can save it under a name (C-x C-s)" #t))
+            (else
+              (if (equal? buf (%editor-active-buffer eid)) (save-buffer) (save-buffer-text! buf))
+              (hash-table-set! *agent-file-marks* path (%agent-file-mark path))
+              (agent-append (string-append "✓ saved " (%text (buffer-name buf))) :dim)
+              (reply (string-append "Saved " path)))))))
+
+(define-agent-tool "buffer_close"
+  "Close an open editor buffer. One with unsaved edits is NOT closed unless you buffer_save it first, or pass discard=true because the user said to throw the edits away."
+  '(("buffer" "string" "The buffer's name or its file's path. Omit for the buffer on screen.")
+    ("discard" "boolean" "true to close it even with unsaved edits, losing them."))
+  (lambda (args reply)
+    (let* ((eid (editor-pane-id))
+           (buf (%agent-buffer args))
+           (cur (%editor-active-buffer eid))
+           (name (%text (buffer-name buf)))
+           (dirty (any (lambda (row) (and (equal? (car row) buf) (positive? (cadr row)))) (%editor-buffer-list eid))))
+      (if (and dirty (not (equal? (%agent-arg args "discard" "false") "true")))
+          (reply (string-append name " has unsaved edits: buffer_save it first, or ask the user whether to discard them") #t)
+          (begin
+            (%editor-buffer-switch eid buf)
+            ; (kill-buffer asks before it drops unsaved edits; these were
+            ; just declared discarded.)
+            (when dirty (%editor-mark-saved eid))
+            (kill-buffer)
+            (unless (equal? cur buf) (visit-buffer cur))
+            (reply (string-append "Closed " name)))))))
+
+; THE EDITOR'S COMMANDS (Kevin, 2026-11-17: "loading a new theme, open a
+; repl …"). The editor is Scheme, and every command a key or M-x runs is a
+; procedure, so the agent drives the UI by calling them. Two doors: the
+; commands NAMED HERE — ones that only change what the editor shows — are
+; called unasked, with literal arguments; anything else is Scheme evaluated
+; in the editor's own image, which can do whatever the editor can, and so
+; asks. A host adds its own to the list.
+(define *agent-ui-commands*
+  '("focus-scene-editor" "focus-agent" "sync-buffers-with-disk" "show-keys"
+    "text-size+" "text-size-" "set-text-size" "toggle-markdown-view"))
+
+(define (%agent-contains? text part)
+  (let ((n (string-length text)) (m (string-length part)))
+    (let loop ((i 0))
+      (cond ((> (+ i m) n) #f)
+            ((string=? (substring text i (+ i m)) part) #t)
+            (else (loop (+ i 1)))))))
+
+(define (%agent-command-line name)
+  ; "name — the first line of its docstring", for a list of commands.
+  (let* ((doc (%doc-of name))
+         (line (if doc
+                   (let ((ls (filter (lambda (l) (not (equal? (string-trim-both l) "")))
+                                     (string-split doc "\n"))))
+                     ; A docstring may open with its own signature line.
+                     (string-trim-both (if (and (pair? ls) (pair? (cdr ls)) (string-prefix? "(" (string-trim-both (car ls))))
+                                           (string-append (car ls) " — " (cadr ls))
+                                           (if (pair? ls) (car ls) ""))))
+                   "")))
+    (string-append name (if (equal? line "") "" (string-append " — " line)))))
+
+(define-agent-tool "editor_commands"
+  "List the editor's own commands — what its keys and M-x run: themes, panels, the REPL, the terminal, buffers, search. With no query: the ones editor_command may call unasked. With a query: every command whose name contains it, marked when it is one of those."
+  '(("query" "string" "Part of a command's name, e.g. theme, repl, buffer."))
+  (lambda (args reply)
+    (let* ((query (%agent-arg args "query"))
+           (free (filter (lambda (n) (procedure? (%env-ref (string->symbol n) #f))) *agent-ui-commands*))
+           (names (if query
+                      (filter (lambda (n) (%agent-contains? n query)) (list-sort string<? (command-candidates)))
+                      free)))
+      (reply
+        (if (null? names)
+            (string-append "no command has " query " in its name")
+            (%agent-join
+              (map (lambda (n)
+                     (string-append (if (and query (member n free)) "[unasked] " "") (%agent-command-line n)))
+                   names)
+              "\n"))))))
+
+(define (%agent-literals text)
+  ; The data in TEXT when every one is a literal — a string, a number, a
+  ; boolean, a keyword, or a quoted symbol — else #f: arguments that are
+  ; values, with nothing in them to evaluate.
+  (let ((port (open-input-string text)))
+    (let loop ((acc '()))
+      (let ((d (read port)))
+        (cond ((eof-object? d) (reverse acc))
+              ((or (string? d) (number? d) (boolean? d) (keyword? d)) (loop (cons d acc)))
+              ((and (pair? d) (eq? (car d) 'quote) (pair? (cdr d)) (symbol? (cadr d))) (loop (cons (cadr d) acc)))
+              (else #f))))))
+
+(define-agent-tool "editor_command"
+  "Run one of the editor's commands that only change what the editor shows — the ones editor_commands lists with no query: a colour theme, the REPL or terminal panel, the file tree, the text size. `args` is the command's arguments as Scheme literals, e.g. `:dracula`, `16`, `\"notes.md\"`. For any other command, or anything that needs evaluating, use editor_eval."
+  '(("name" "string" "The command's name, e.g. load-theme." #t)
+    ("args" "string" "Its arguments, as Scheme literals separated by spaces. Omit for none."))
+  (lambda (args reply)
+    (let* ((name (%agent-arg args "name" ""))
+           (f (%env-ref (string->symbol name) #f))
+           (given (guard (e (#t #f)) (%agent-literals (%agent-arg args "args" "")))))
+      (cond ((not (member name *agent-ui-commands*))
+              (reply (string-append name " is not one of the commands editor_command may call — editor_commands lists them; editor_eval runs anything, with the user's leave") #t))
+            ((not (procedure? f)) (reply (string-append "this editor has no command " name) #t))
+            ((not given) (reply "args must be Scheme literals: strings, numbers, #t/#f, :keywords or 'symbols" #t))
+            (else
+              (let ((r (apply f given)))
+                (agent-append (string-append "⌘ " name (if (null? given) "" (string-append " " (%agent-arg args "args" "")))) :dim)
+                (reply (string-append "Ran (" name (if (null? given) "" (string-append " " (%agent-arg args "args" ""))) ")"
+                                      (if (or (not r) (eq? r #t)) "" (string-append " => " (*show-value* r)))))))))))
+
+(define-agent-tool "editor_eval"
+  "Evaluate Scheme in the EDITOR's own image — where its commands, keymaps and settings live — and return what it printed and its value. This can do anything the editor can: bind a key, define a command, call any command with computed arguments. The user is asked before each call. (To evaluate code in the user's PROGRAM, use eval.)"
+  '(("code" "string" "Scheme forms, evaluated in order; the last one's value is returned." #t))
+  (lambda (args reply)
+    (let* ((r (in-process-eval (%agent-arg args "code" "")))
+           (out (string-trim-right (%alist-ref r :output ""))))
+      (if (eq? (%alist-ref r :status #f) 'ok)
+          (reply (string-append out (if (equal? out "") "" "\n") "=> " (%text (%alist-ref r :printed ""))))
+          (reply (string-append out (if (equal? out "") "" "\n") "error: " (%text (%alist-ref r :message ""))) #t))))
+  #t)
 
 (define-agent-tool "eval"
   "Evaluate code in the running image the buffer's forms are sent to — the program the user is working on (a Scheme REPL process, ray, Guile), where their definitions are live — and return what it printed and its value. Use it to try an expression or check a definition. The user is asked before each call."
@@ -513,38 +653,112 @@ exactly as it is; when the agent changed that file, the pane says so —
 (define *agent-asks* '())
 (define *agent-allowed* '())
 
+; A PLACE, ONCE GRANTED, IS NOT ASKED FOR AGAIN (Kevin, 2026-11-17). Leave
+; given for a file is leave for its directory and everything under it: to
+; write there (which is also to read there) when a write was allowed, to
+; read when a read was. Grants belong to the PROJECT the agent runs in, not
+; to one conversation — C-l does not forget them, /revoke does — and a
+; host with somewhere to keep them keeps them across restarts.
+;   *agent-grants-ref* / *agent-grants-set!*   the grants of a project, a
+;                        list of (directory . "write" | "read")
+; A command allowed with y is not asked for again either, word for word,
+; for the rest of the conversation.
+(define *agent-write-tools* '("Write" "Edit" "MultiEdit" "NotebookEdit"))
+(define *agent-read-tools* '("Read" "Glob" "Grep"))
+(define *agent-grant-table* (make-hash-table equal?))
+(define *agent-grants-ref* (lambda (project) (hash-table-ref/default *agent-grant-table* project '())))
+(define *agent-grants-set!* (lambda (project grants) (hash-table-set! *agent-grant-table* project grants)))
+(define *agent-commands-allowed* '())
+
+(define (%agent-project)
+  (or *agent-turn-dir* (%alist-ref (*agent-profile*) :cwd "")))
+
+(define (%agent-dirname path)
+  ; The directory PATH is in; PATH itself when it is one.
+  (if (guard (e (#t #f)) (files-dir? path))
+      path
+      (let loop ((i (- (string-length path) 1)))
+        (cond ((< i 1) "/")
+              ((char=? (string-ref path i) #\/) (substring path 0 i))
+              (else (loop (- i 1)))))))
+
+(define (%agent-file-ask? tool arg)
+  ; Is this a question about a FILE, by a path we can place?
+  (and (or (member tool *agent-write-tools*) (member tool *agent-read-tools*))
+       (string-prefix? "/" arg)))
+
+(define (agent-granted? tool path)
+  "Has leave already been given for TOOL at PATH — a grant on its directory
+  or one above it, to write, or to read when TOOL only reads?"
+  (any (lambda (g)
+         (and (or (equal? path (car g)) (string-prefix? (string-append (car g) "/") path))
+              (or (equal? (cdr g) "write") (member tool *agent-read-tools*))))
+       (*agent-grants-ref* (%agent-project))))
+
+(define (agent-grant! tool path)
+  ; Leave for TOOL at PATH becomes leave for its directory.
+  (let* ((dir (%agent-dirname path))
+         (kind (if (member tool *agent-write-tools*) "write" "read"))
+         (project (%agent-project))
+         (others (filter (lambda (g) (not (equal? (car g) dir))) (*agent-grants-ref* project)))
+         (had (assoc dir (*agent-grants-ref* project))))
+    ; A read granted where a write already was does not take the write away.
+    (*agent-grants-set!* project
+      (append others (list (cons dir (if (and had (equal? (cdr had) "write")) "write" kind)))))
+    dir))
+
 (define (%agent-ask-shown tool arg)
   (string-append tool (if (equal? arg "") "" (string-append " " (%agent-cut (%agent-first-line arg) 300)))))
 
 (define (agent-asked id tool arg why)
-  (cond ((member tool *agent-allowed*)
+  (cond ((or (member tool *agent-allowed*)
+             (and (%agent-file-ask? tool arg) (agent-granted? tool arg))
+             (member (cons tool arg) *agent-commands-allowed*))
           (%agent-answer id #t "")
           (agent-show (string-append "✓ " (%agent-ask-shown tool arg)) :dim))
         (else
           (set! *agent-asks* (append *agent-asks* (list (list id tool arg))))
           (agent-show (string-append "? " (%agent-ask-shown tool arg)) :accent)
-          (agent-append (string-append "  y allow · n deny · a allow every " tool
-                                       " call in this conversation · or say what to do instead")
-                        :dim)
+          (agent-append
+            (if (%agent-file-ask? tool arg)
+                (string-append "  y allow, here and from now on in " (%agent-dirname arg)
+                               " · once · n deny · or say what to do instead")
+                (string-append "  y allow · n deny · a allow every " tool
+                               " call in this conversation · or say what to do instead"))
+            :dim)
           (echo "agent: asks leave — " (%agent-ask-shown tool arg)))))
 
 (define (agent-answer text)
   "Answer the agent's oldest open question with TEXT, as typed at agent>:
-  y or yes allows the call; a or always allows it and every later call of
-  that tool in this conversation; n or no refuses it; anything else refuses
-  it and is what the agent is told — \"use cargo check instead\"."
+  y or yes allows the call, and REMEMBERS it — for a file, its directory
+  and everything under it, from now on in this project; for a command,
+  that command for the rest of the conversation. once allows this call and
+  remembers nothing. a or always allows every later call of that tool in
+  this conversation. n or no refuses; anything else refuses and is what the
+  agent is told — \"use cargo check instead\"."
   (let* ((ask (car *agent-asks*))
-         (id (car ask)) (tool (cadr ask))
+         (id (car ask)) (tool (cadr ask)) (arg (caddr ask))
          (word (string-downcase (string-trim-both text)))
          (always (member word '("a" "always")))
-         (allow (or always (member word '("y" "yes"))))
-         (no (member word '("n" "no"))))
+         (once (member word '("once" "1")))
+         (yes (member word '("y" "yes")))
+         (allow (or always once yes))
+         (no (member word '("n" "no")))
+         (place (%agent-file-ask? tool arg)))
     (set! *agent-asks* (cdr *agent-asks*))
     (when always (set! *agent-allowed* (cons tool *agent-allowed*)))
     (cond ((not (%agent-answer id (if allow #t #f) (if (or allow no) "" text)))
             (agent-append "that question is no longer open" :dim))
           (always (agent-append (string-append "→ allowed, and every " tool " call from here on") :dim))
-          (allow (agent-append "→ allowed" :dim))
+          ((and yes place)
+            (agent-append (string-append "→ allowed, and not asked again in " (agent-grant! tool arg)
+                                         (if (member tool *agent-write-tools*) "" " (to read)")
+                                         " — /grants lists, /revoke forgets")
+                          :dim))
+          (yes
+            (set! *agent-commands-allowed* (cons (cons tool arg) *agent-commands-allowed*))
+            (agent-append "→ allowed, and not asked again for that in this conversation" :dim))
+          (allow (agent-append "→ allowed, this once" :dim))
           (else (agent-append "→ refused" :dim)))
     (unless (null? *agent-asks*)
       (agent-append (string-append "? " (%agent-ask-shown (cadr (car *agent-asks*)) (caddr (car *agent-asks*)))) :accent))))
@@ -610,7 +824,8 @@ exactly as it is; when the agent changed that file, the pane says so —
 (define *agent-last-tool* #f)
 (define *agent-quiet-results*
   '("Read" "Edit" "Write" "MultiEdit" "NotebookEdit" "ToolSearch"
-    "buffers" "buffer_read" "buffer_edit" "buffer_write" "open_file"))
+    "buffers" "buffer_read" "buffer_edit" "buffer_write" "buffer_save" "buffer_close"
+    "open_file" "editor_commands" "editor_command"))
 
 (define (%agent-in-project path)
   ; PATH as the project sees it: without the turn's directory in front.
@@ -640,6 +855,8 @@ exactly as it is; when the agent changed that file, the pane says so —
   ; How a step reads when the host has nothing to say about it: (style
   ; text), or (#f) for no row at all.
   (cond ((equal? kind "text") (list :normal a))
+        ; (Its own row, "⌘ load-theme :dracula", says more.)
+        ((and (equal? kind "tool") (equal? a "editor_command")) (list #f))
         ((equal? kind "tool")
           (list :dim (string-append "→ " a (if (equal? b "") ""
                                                (string-append " " (%agent-cut (%agent-first-line (%agent-in-project b)) 160))))))
@@ -798,10 +1015,20 @@ exactly as it is; when the agent changed that file, the pane says so —
     ((equal? cmd "/logout") (auth "logout"))
     ((equal? cmd "/status") (auth "status"))
     ((equal? cmd "/new") (new-conversation))
+    ((equal? cmd "/grants")
+      (let ((grants (*agent-grants-ref* (%agent-project))))
+        (if (null? grants)
+            (agent-append "no place outside the project has been granted — the agent asks, and y remembers" :dim)
+            (for-each (lambda (g) (agent-append (string-append "  " (cdr g) "  " (car g)) :dim)) grants))))
+    ((equal? cmd "/revoke")
+      (*agent-grants-set!* (%agent-project) '())
+      (set! *agent-commands-allowed* '())
+      (set! *agent-allowed* '())
+      (agent-append "forgotten: the agent asks again before it leaves the project or runs a program" :dim))
     ((equal? cmd "/help")
-      (agent-append "commands: /login /logout /status /new /model — anything else is a request to the agent. Escape interrupts it." :dim))
+      (agent-append "commands: /login /logout /status /new /model /grants /revoke — anything else is a request to the agent. Escape interrupts it." :dim))
     (else
-      (agent-append (string-append "unknown command " cmd " — /login /logout /status /new /model /help") :error))))
+      (agent-append (string-append "unknown command " cmd " — /login /logout /status /new /model /grants /revoke /help") :error))))
 
 (define (agent-submit text)
   (%edit! :hist #f)
@@ -872,6 +1099,7 @@ done, and the conversation is still there to go on with."
   (set! *agent-stream* #f)
   (set! *agent-asks* '())
   (set! *agent-allowed* '())
+  (set! *agent-commands-allowed* '())
   (*agent-session-set!* (%alist-ref (*agent-profile*) :cwd "") #f)
   (agent-append "— new conversation —" :dim))
 

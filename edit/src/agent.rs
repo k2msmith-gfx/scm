@@ -131,6 +131,12 @@ pub struct Profile {
     pub tools: Option<String>,
     /// The name those tools are served under; `edit` when not given.
     pub tool_server: Option<String>,
+    /// The CLI's `ENABLE_TOOL_SEARCH`. With tools of the host's and nothing
+    /// said here it is `false`: left to itself the CLI DEFERS MCP tools
+    /// behind a search step, and the model then either spends a turn
+    /// looking one up (1.5 s, measured) or calls it with arguments it
+    /// guessed — `command` for a parameter named `name` (2026-11-17).
+    pub tool_search: Option<String>,
     /// A directory each turn's raw stream is copied into, a file per turn.
     pub stream_log: Option<PathBuf>,
     /// The conversation to continue.
@@ -169,6 +175,7 @@ impl Profile {
                 "tool-prefix" => p.tool_prefix = Some(value),
                 "tools" => p.tools = Some(value),
                 "tool-server" => p.tool_server = Some(value),
+                "tool-search" => p.tool_search = Some(value),
                 "stream-log" => p.stream_log = Some(value.into()),
                 "session" => p.session = Some(value),
                 "arg" => p.extra_args.push(value),
@@ -460,9 +467,13 @@ impl Turn {
             // permission mode already allows, never get this far.
             Some("control_request") if ev["request"]["subtype"].as_str() == Some("can_use_tool") => {
                 let r = &ev["request"];
+                // Named as a `Tool` event names it: the host's own tools
+                // without their server's prefix.
+                let tool = r["tool_name"].as_str().unwrap_or("");
+                let own = format!("mcp__{}__", profile.tool_server());
                 emit(Event::Ask {
                     id: ev["request_id"].as_str().unwrap_or("").to_string(),
-                    tool: r["tool_name"].as_str().unwrap_or("").to_string(),
+                    tool: tool.strip_prefix(&own).unwrap_or(tool).to_string(),
                     arg: tool_arg(&r["input"]),
                     why: r["decision_reason"].as_str().unwrap_or("").to_string(),
                     input: r["input"].to_string(),
@@ -648,6 +659,11 @@ fn start(shared: &Arc<Shared>, key: Vec<String>, turn: InFlight) -> Result<(), S
         cmd.current_dir(dir);
     }
     cmd.args(argv(&turn.profile)?);
+    match (&turn.profile.tool_search, &turn.profile.tools) {
+        (Some(v), _) => drop(cmd.env("ENABLE_TOOL_SEARCH", v)),
+        (None, Some(_)) => drop(cmd.env("ENABLE_TOOL_SEARCH", "false")),
+        (None, None) => {}
+    }
     if let Some(id) = &turn.profile.session {
         cmd.args(["--resume", id]);
     }
@@ -854,6 +870,7 @@ pub fn send(prompt: String, profile: Profile) -> Result<(), String> {
     key.push(bin.to_string_lossy().into_owned());
     key.push(profile.cwd.as_ref().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default());
     key.push(profile.tool_prefix.clone().unwrap_or_default());
+    key.push(profile.tool_search.clone().unwrap_or_default());
     shared.cancelling.store(false, Ordering::SeqCst);
     let turn = InFlight { bin, prompt, profile, began: std::time::Instant::now(), retried: false };
     {
@@ -1067,7 +1084,7 @@ pub(crate) fn fake_claude(name: &str, body: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("claude");
-    let script = format!("#!/bin/sh\nD='{}'\nprintf '%s\\n' \"$@\" > \"$D/argv\"\n[ \"$1\" = auth ] || echo started >> \"$D/starts\"\n{body}\n", dir.display());
+    let script = format!("#!/bin/sh\nD='{}'\nprintf '%s\\n' \"$@\" > \"$D/argv\"\n[ \"$1\" = auth ] || echo \"started tool-search=$ENABLE_TOOL_SEARCH\" >> \"$D/starts\"\n{body}\n", dir.display());
     // Written under another name and renamed: a test on another thread that
     // spawns while this file is open for writing would hand its child the
     // descriptor, and running the script would then fail as "text busy".
@@ -1083,7 +1100,8 @@ pub(crate) fn fake_claude(name: &str, body: &str) -> PathBuf {
 /// and answered by ANSWER (shell, run once per request, the line in
 /// `$line`); a request with "long" in it is begun and left unanswered; an
 /// interrupt closes the turn the way the CLI does; a request with "leave"
-/// in it asks leave to run `cargo test` and closes on the answer; one with
+/// in it asks leave to run `cargo test` and closes on the answer, and one
+/// with "outside" leave to Write `$D/elsewhere/notes.txt`; one with
 /// "call the tool" in it shakes hands with the host's tool server, calls
 /// `buffer_read` and closes on that answer, kept in `$D/tool-answer`.
 #[cfg(test)]
@@ -1112,6 +1130,8 @@ pub(crate) fn fake_conversation(answer: &str) -> String {
       echo '{{"type":"control_request","request_id":"c-1","request":{{"subtype":"mcp_message","server_name":"edit","message":{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}}}}}'
       echo '{{"type":"assistant","message":{{"id":"m","content":[{{"type":"tool_use","name":"mcp__edit__buffer_read","input":{{"buffer":"main.scm","from":2}}}}]}}}}'
       echo '{{"type":"control_request","request_id":"c-2","request":{{"subtype":"mcp_message","server_name":"edit","message":{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"buffer_read","arguments":{{"buffer":"main.scm","from":2}}}}}}}}}}';;
+    *outside*)
+      printf '{{"type":"control_request","request_id":"q-2","request":{{"subtype":"can_use_tool","tool_name":"Write","input":{{"file_path":"%s","content":"x"}}}}}}\n' "$D/elsewhere/notes.txt";;
     *leave*)
       echo '{{"type":"control_request","request_id":"q-1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"cargo test","description":"Run the tests"}},"decision_reason":"This command requires approval"}}}}';;
     *long*)
@@ -1477,6 +1497,7 @@ not json at all
         let config: serde_json::Value = serde_json::from_str(&argv[argv.iter().position(|a| a == "--mcp-config").unwrap() + 1]).unwrap();
         assert_eq!(config["mcpServers"]["edit"], serde_json::json!({"type": "sdk", "name": "edit"}));
         assert_eq!(config["mcpServers"]["modeler"]["command"], "python3");
+        assert_eq!(lines(&dir, "starts"), ["started tool-search=false"], "its tools are not deferred behind a search");
         // The handshake and the list went back before any call did.
         // (The stand-in keeps each line as it reads it, a moment after.)
         let t0 = std::time::Instant::now();

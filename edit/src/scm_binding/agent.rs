@@ -327,9 +327,9 @@ EOF"#;
         let rows = settle(&mut interp, "(pair? *agent-asks*)");
         assert_eq!(rows[rows.len() - 2], "? Bash cargo test", "{rows:?}");
         assert!(rows[rows.len() - 1].contains("y allow · n deny · a allow every Bash call"), "{rows:?}");
-        eval(&mut interp, r#"(agent-submit "y")"#);
+        eval(&mut interp, r#"(agent-submit "once")"#);
         let rows = settle(&mut interp, "(pair? ended)");
-        assert!(rows.contains(&"→ allowed".to_string()) && rows.contains(&"42".to_string()), "{rows:?}");
+        assert!(rows.contains(&"→ allowed, this once".to_string()) && rows.contains(&"42".to_string()), "{rows:?}");
         // Anything that is not yes or no refuses, and is what it is told.
         eval(&mut interp, r#"(set! ended '()) (agent-submit "leave, again")"#);
         settle(&mut interp, "(pair? *agent-asks*)");

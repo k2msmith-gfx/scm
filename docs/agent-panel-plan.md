@@ -422,6 +422,54 @@ results are errors. And in one of three runs the model spent a step on the
 CLI's own `ToolSearch` before its first editor tool; the tools are few
 enough that this should be measured before the modeler adds its nineteen.
 
+## In use: what Kevin asked for next (2026-11-17)
+
+*"Beautiful, love it! I need a few features though…"*
+
+**1. Leave given for a place is not asked for again.** `y` to a file
+outside the project grants its DIRECTORY and everything under it — to
+write (and so to read) when a write was allowed, to read when a read was —
+for the project, not the conversation: kept in
+`~/.config/edit/agent-grants.scm`, by project, across restarts, and not
+forgotten by `C-l`. `once` allows the call and remembers nothing; `/grants`
+lists; `/revoke` forgets. A command allowed with `y` is not asked for again,
+word for word, for the rest of the conversation; `a` is still every call of
+that tool. The question's own line says which of these `y` will be.
+(`leave_given_for_a_place_is_remembered`.) The grant is the pane's, answered
+before the question is shown; the CLI still asks, and is told yes.
+
+**2. The editor's own commands, for the agent.** Five more tools:
+
+| tool | what it does | asks leave? |
+|---|---|---|
+| `buffer_save` | a buffer to its file, as C-x C-s | no |
+| `buffer_close` | close one; not over unsaved edits unless told they are discarded | no |
+| `editor_commands` | list the editor's commands, or search them by name | no |
+| `editor_command` | run one that only changes what the editor SHOWS, with literal arguments | no |
+| `editor_eval` | Scheme in the editor's own image — anything the editor can do | **yes** |
+
+Which commands are the unasked ones is a list, `*agent-ui-commands*`, that
+the host adds to: the standalone's are its themes (`load-theme`,
+`save-theme-choice`), its panels (`repl`, `toggle-terminal`,
+`toggle-files`, `toggle-agent`) and the text size. `editor_command` takes
+only literals — a string, a number, a keyword — so nothing is evaluated on
+that door; everything else goes through `editor_eval` and is asked for.
+
+Against the REAL `claude` (`the_real_claude_drives_the_editor`,
+`#[ignore]`; passed 2026-11-17): "switch the editor to the dracula theme
+and open the REPL" — 4 s, two calls; "open notes.txt, change red to blue in
+its buffer, save it and close that buffer" — 7 s, five calls, the file
+changed and the buffer gone.
+
+**What that run found first, and fixed:** the CLI DEFERS MCP tools behind
+its own `ToolSearch`, and the model called `editor_command` without having
+seen its schema — with `command:` for a parameter named `name` — and was
+refused twice. The process is now started with `ENABLE_TOOL_SEARCH=false`
+whenever the host has tools (the schemas ride in the cached prefix: about
+22k tokens more context here, with the account's own connectors in it,
+and no search turn), and a call with an argument the tool does not take is
+answered with the arguments it DOES take.
+
 ## Risks
 
 - **A5 is a swap under a tested surface.** The modeler's agent has four

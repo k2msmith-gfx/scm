@@ -460,6 +460,48 @@ Every ray file of the same checkout shares it, so they all start over."
 ; THE CONVERSATION SURVIVES A RESTART: its id is filed by the directory it
 ; runs in, in ~/.config/edit/agent-sessions.scm, and the next request there
 ; resumes it. C-l forgets it.
+; What the standalone lets the agent call unasked (25-agent's
+; editor_command): its themes and its panels. load-theme with a name applies
+; it for this run; save-theme-choice makes it the one edit opens in.
+(set! *agent-ui-commands*
+  (append *agent-ui-commands*
+          '("load-theme" "save-theme-choice" "theme-names"
+            "repl" "toggle-repl" "toggle-terminal" "toggle-files" "toggle-agent" "other-pane")))
+
+; LEAVE GIVEN FOR A PLACE IS KEPT, by project, in
+; ~/.config/edit/agent-grants.scm — a file to read, and to edit.
+(define *agent-grants-file* "~/.config/edit/agent-grants.scm")
+(define *agent-grants-read* #f)
+
+(define (agent-grants-load)
+  (unless *agent-grants-read*
+    (set! *agent-grants-read* #t)
+    (guard (e (#t #f))
+      (let ((path (expand-home *agent-grants-file*)))
+        (when (file-exists? path)
+          (for-each (lambda (kv) (when (and (pair? kv) (string? (car kv)) (list? (cdr kv)))
+                                   (hash-table-set! *agent-grant-table* (car kv) (cdr kv))))
+                    (call-with-input-file path read)))))))
+
+(set! *agent-grants-ref*
+  (lambda (project) (agent-grants-load) (hash-table-ref/default *agent-grant-table* project '())))
+(set! *agent-grants-set!*
+  (lambda (project grants)
+    (agent-grants-load)
+    (hash-table-set! *agent-grant-table* project grants)
+    (guard (e (#t (echo "agent: could not save " *agent-grants-file* ": " (*show-value* e))))
+      (spit (expand-home *agent-grants-file*)
+            (string-append
+              ";; Where the agent may read and write outside each project without asking (edit, 25-agent).\n"
+              ";; ((project (directory . \"write\" | \"read\") …) …) — /grants lists, /revoke forgets.\n"
+              (let ((out (open-output-string)))
+                (write (filter (lambda (kv) (pair? (cdr kv)))
+                               (map (lambda (project) (cons project (hash-table-ref/default *agent-grant-table* project '())))
+                                    (hash-table-keys *agent-grant-table*)))
+                       out)
+                (get-output-string out))
+              "\n")))))
+
 (define *agent-session-file* "~/.config/edit/agent-sessions.scm")
 (define *agent-sessions-read* #f)
 

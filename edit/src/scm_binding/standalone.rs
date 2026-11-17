@@ -1760,20 +1760,67 @@ mod tests {
         assert!(!failed && text.contains("hi") && text.contains("=> 3"), "{text}");
         let (failed, text) = tool(&mut s, r#""eval" "code" "(car 5)""#);
         assert!(failed && text.contains("error: car"), "{text}");
+        // A call made on a guess is corrected by its own error.
+        let (failed, text) = tool(&mut s, r#""editor_command" "command" "repl""#);
+        assert!(failed && text.contains("has no argument command — it takes: name (string, required), args (string)"), "{text}");
+        let (failed, text) = tool(&mut s, r#""buffer_edit" "old" "x""#);
+        assert!(failed && text.contains("buffer_edit needs new"), "{text}");
         let (failed, text) = tool(&mut s, r#""no_such_tool""#);
         assert!(failed && text.contains("no tool named"), "{text}");
 
+        // Save and close. A buffer with unsaved edits is saved to its file;
+        // one is not closed over them unless they are declared discarded.
+        s.call(r#"(visit-buffer (buffer-by-name "main.scm"))"#);
+        let (failed, text) = tool(&mut s, r#""buffer_save" "buffer" "other.scm""#);
+        assert!(!failed, "{text}");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "(define c 30)\n(define c2 3)\n", "the agent's edit, now on disk");
+        assert!(tool(&mut s, r#""buffers""#).1.lines().any(|l| l.contains("other.scm") && !l.contains("UNSAVED")));
+        let (failed, text) = tool(&mut s, r#""buffer_close""#);
+        assert!(failed && text.contains("unsaved edits"), "main.scm still has the user's: {text}");
+        assert_eq!(s.eval_to_string(r#"(if (buffer-by-name "main.scm") 1 0)"#).unwrap(), "1");
+        let (failed, _) = tool(&mut s, r#""buffer_close" "buffer" "other.scm""#);
+        assert!(!failed);
+        assert_eq!(s.eval_to_string(r#"(if (buffer-by-name "other.scm") 1 0)"#).unwrap(), "0", "closed");
+        assert_eq!(on_screen(), "(define a 1)\n;; mine\n(define b 2)\n", "and the user's buffer is still on screen");
+        assert!(!tool(&mut s, r#""buffer_save""#).0);
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "(define a 1)\n;; mine\n(define b 2)\n");
+
+        // The editor's own commands: the ones that only change what it
+        // shows run unasked, with literal arguments; nothing else does.
+        let (_, listed) = tool(&mut s, r#""editor_commands""#);
+        assert!(listed.contains("load-theme — ") && listed.contains("toggle-terminal") && !listed.contains("kill-buffer"), "{listed}");
+        let (_, listed) = tool(&mut s, r#""editor_commands" "query" "theme""#);
+        assert!(listed.contains("[unasked] load-theme") && listed.contains("apply-theme") && !listed.contains("[unasked] apply-theme"), "{listed}");
+        let bg = s.eval_to_string("(%get-color :editor-bg)").unwrap();
+        let (failed, text) = tool(&mut s, r#""editor_command" "name" "load-theme" "args" ":nano-light""#);
+        assert!(!failed && text.contains("(load-theme :nano-light)"), "{text}");
+        assert_ne!(s.eval_to_string("(%get-color :editor-bg)").unwrap(), bg, "the theme changed");
+        s.call("(load-theme :one-dark)");
+        assert_eq!(app::panel(), None);
+        assert!(!tool(&mut s, r#""editor_command" "name" "repl""#).0);
+        assert_eq!(app::panel(), Some(app::Panel::Repl), "the REPL is open");
+        let (failed, text) = tool(&mut s, r#""editor_command" "name" "kill-buffer""#);
+        assert!(failed && text.contains("editor_eval"), "{text}");
+        let (failed, text) = tool(&mut s, r#""editor_command" "name" "set-text-size" "args" "(+ 7 7)""#);
+        assert!(failed && text.contains("literals"), "nothing is evaluated here: {text}");
+        let (failed, text) = tool(&mut s, r#""editor_eval" "code" "(define agent-made 6) (* agent-made 7)""#);
+        assert!(!failed && text.contains("=> 42"), "{text}");
+
         // What the agent is offered: every tool, and leave to call each
-        // unasked but eval.
+        // unasked but the two that evaluate.
         let json = s.eval_to_string("(%alist-ref (agent-profile-now) :tools #f)").unwrap();
         let json: String = serde_json::from_str(&json).expect("a Scheme string is a JSON string here");
         let tools: serde_json::Value = serde_json::from_str(&json).expect("the tool list is JSON");
         let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["buffers", "buffer_read", "buffer_edit", "buffer_write", "diagnostics", "open_file", "eval"]);
+        assert_eq!(
+            names,
+            ["buffers", "buffer_read", "buffer_edit", "buffer_write", "diagnostics", "open_file", "buffer_save", "buffer_close", "editor_commands", "editor_command", "editor_eval", "eval"]
+        );
         assert_eq!(tools[2]["inputSchema"]["required"], serde_json::json!(["old", "new"]));
         assert_eq!(tools[1]["inputSchema"]["properties"]["from"]["type"], "integer");
         let allowed = s.eval_to_string("(%alist-ref (agent-profile-now) :allowed-tools #f)").unwrap();
-        assert!(allowed.contains("mcp__edit__buffer_edit") && !allowed.contains("mcp__edit__eval"), "{allowed}");
+        assert!(allowed.contains("mcp__edit__buffer_edit") && allowed.contains("mcp__edit__editor_command"), "{allowed}");
+        assert!(!allowed.contains("mcp__edit__eval") && !allowed.contains("mcp__edit__editor_eval"), "evaluating asks: {allowed}");
 
         // And a call from the agent itself: the CLI asks, the handler
         // answers, the answer goes back down the conversation's channel.
@@ -1791,6 +1838,148 @@ mod tests {
         assert!(argv.contains(r#""edit":{"name":"edit","type":"sdk"}"#) || argv.contains(r#""edit":{"type":"sdk","name":"edit"}"#), "{argv}");
         crate::agent::stop();
         app::show_agent(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Leave given for a place is not asked for again (Kevin, 2026-11-17):
+    /// y to a write outside the project grants its directory, to write and
+    /// to read, kept by project across restarts; `once` remembers nothing;
+    /// a command allowed with y is not asked for again in the conversation.
+    #[test]
+    fn leave_given_for_a_place_is_remembered() {
+        let turn = r#"      echo '{"type":"result","is_error":false,"result":"ok","session_id":"s-1","num_turns":1}'"#;
+        let bin = crate::agent::fake_claude("grants", &crate::agent::fake_conversation(turn));
+        let dir = bin.parent().unwrap().to_string_lossy().into_owned();
+        std::fs::create_dir_all(format!("{dir}/elsewhere/deeper")).unwrap();
+        let src = format!("{dir}/main.scm");
+        std::fs::write(&src, "(define a 1)\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, std::slice::from_ref(&src)).expect("boot");
+        s.call(&format!(r#"(set! *agent-session-file* "{dir}/sessions.scm")
+                           (set! *agent-grants-file* "{dir}/grants.scm")
+                           (define ended '())
+                           (set! *agent-turn-ended* (lambda (status) (set! ended (cons status ended))))
+                           (set! *agent-profile* (lambda () (agent-profile-extend (agent-code-profile) :bin "{dir}/claude" :cwd "{dir}")))
+                           (focus-agent)
+                           (define (rows) (map (lambda (i) (%pane-row-text 5 i)) (iota (%pane-row-count 5))))"#));
+        let until = |s: &mut Session, what: &str| {
+            let t0 = std::time::Instant::now();
+            while s.eval_to_string(what).as_deref() != Ok("#t") {
+                assert!(t0.elapsed() < std::time::Duration::from_secs(20), "never: {what}\n{}", s.eval_to_string("(rows)").unwrap());
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                s.poll();
+            }
+            s.eval_to_string("(rows)").unwrap()
+        };
+        let submit = |s: &mut Session, what: &str| s.call(&format!(r#"(set! ended '()) (agent-submit "{what}")"#));
+        let elsewhere = format!("{dir}/elsewhere");
+
+        // `once`: this call, and the next is asked again.
+        submit(&mut s, "write outside");
+        let rows = until(&mut s, "(pair? *agent-asks*)");
+        assert!(rows.contains(&format!("? Write {elsewhere}/notes.txt")) || rows.contains("? Write elsewhere/notes.txt"), "{rows}");
+        assert!(rows.contains(&format!("y allow, here and from now on in {elsewhere} · once · n deny")), "{rows}");
+        s.call(r#"(agent-submit "once")"#);
+        until(&mut s, "(pair? ended)");
+        submit(&mut s, "write outside again");
+        until(&mut s, "(pair? *agent-asks*)");
+        // y: its directory, from now on.
+        s.call(r#"(agent-submit "y")"#);
+        let rows = until(&mut s, "(pair? ended)");
+        assert!(rows.contains(&format!("→ allowed, and not asked again in {elsewhere}")), "{rows}");
+        submit(&mut s, "write outside a third time");
+        let rows = until(&mut s, "(pair? ended)");
+        assert_eq!(rows.matches("? Write ").count(), 2, "the third was not a question: {rows}");
+        assert_eq!(rows.matches("✓ Write ").count(), 1, "{rows}");
+        let granted = |s: &mut Session, tool: &str, path: &str| s.eval_to_string(&format!(r#"(if (agent-granted? "{tool}" "{path}") 1 0)"#)).unwrap() == "1";
+        assert!(granted(&mut s, "Edit", &format!("{elsewhere}/deeper/x.rs")), "and everything under it");
+        assert!(granted(&mut s, "Read", &format!("{elsewhere}/notes.txt")), "to write is to read");
+        assert!(!granted(&mut s, "Write", &format!("{dir}/elsewhere-not/x")), "a name that only starts the same is another place");
+        assert!(!granted(&mut s, "Write", "/etc/hosts"));
+
+        // Kept by project, in a file, for the next start — and not
+        // forgotten with the conversation.
+        let filed = std::fs::read_to_string(format!("{dir}/grants.scm")).expect("filed");
+        assert!(filed.contains(&elsewhere) && filed.contains("\"write\""), "{filed}");
+        s.call(r#"(new-conversation) (set! *agent-grants-read* #f) (set! *agent-grant-table* (make-hash-table equal?))"#);
+        assert!(granted(&mut s, "Write", &format!("{elsewhere}/notes.txt")), "read back");
+        s.call(r#"(agent-submit "/grants")"#);
+        assert!(s.eval_to_string("(rows)").unwrap().contains(&format!("write  {elsewhere}")));
+
+        // A read granted somewhere is not leave to write there.
+        s.call(r#"(agent-grant! "Read" "/tmp/only-read/a.txt")"#);
+        assert!(granted(&mut s, "Grep", "/tmp/only-read/b.txt") && !granted(&mut s, "Write", "/tmp/only-read/b.txt"));
+
+        // A command: y is that command, for this conversation.
+        submit(&mut s, "by your leave");
+        until(&mut s, "(pair? *agent-asks*)");
+        s.call(r#"(agent-submit "y")"#);
+        let rows = until(&mut s, "(pair? ended)");
+        assert!(rows.contains("not asked again for that in this conversation"), "{rows}");
+        submit(&mut s, "by your leave, again");
+        let rows = until(&mut s, "(pair? ended)");
+        assert!(rows.contains("✓ Bash cargo test"), "{rows}");
+
+        // /revoke: asked again.
+        s.call(r#"(agent-submit "/revoke")"#);
+        assert!(!granted(&mut s, "Write", &format!("{elsewhere}/notes.txt")));
+        submit(&mut s, "write outside once more");
+        until(&mut s, "(pair? *agent-asks*)");
+        s.call(r#"(agent-submit "n")"#);
+        until(&mut s, "(pair? ended)");
+        crate::agent::stop();
+        app::show_agent(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The REAL `claude` driving the editor itself (two small turns, by
+    /// hand: `cargo test -p edit --lib the_real_claude_drives -- --ignored
+    /// --nocapture`): a theme and the REPL from a request in English, then
+    /// a file opened, changed in its buffer, saved and closed.
+    #[test]
+    #[ignore = "spends real turns on the logged-in Claude subscription"]
+    fn the_real_claude_drives_the_editor() {
+        let dir = std::env::temp_dir().join(format!("edit-agent-real-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        std::fs::write(format!("{dir}/main.py"), "print('main')\n").unwrap();
+        std::fs::write(format!("{dir}/notes.txt"), "colour: red\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, &[format!("{dir}/main.py")]).expect("boot");
+        s.call(&format!(r#"(set! *agent-session-file* "{dir}/sessions.scm")
+                           (set! *agent-grants-file* "{dir}/grants.scm")
+                           (define ended '())
+                           (set! *agent-turn-ended* (lambda (status) (set! ended (cons status ended))))
+                           (set! *agent-model* "haiku")
+                           (load-theme :one-dark)
+                           (focus-agent)"#));
+        let ask = |s: &mut Session, what: &str| {
+            s.call(&format!(r#"(set! ended '()) (agent-submit "{what}")"#));
+            let t0 = std::time::Instant::now();
+            while s.eval_to_string("(pair? ended)").as_deref() != Ok("#t") {
+                assert!(
+                    t0.elapsed() < std::time::Duration::from_secs(90),
+                    "the turn never ended:\n{}",
+                    s.eval_to_string("(map (lambda (i) (%pane-row-text 5 i)) (iota (%pane-row-count 5)))").unwrap().replace("\" \"", "\n")
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                s.poll();
+            }
+            let rows = s.eval_to_string("(map (lambda (i) (%pane-row-text 5 i)) (iota (%pane-row-count 5)))").unwrap();
+            eprintln!("{}\n", rows.replace("\" \"", "\n"));
+        };
+        let bg = s.eval_to_string("(%get-color :editor-bg)").unwrap();
+        ask(&mut s, "Switch the editor to the dracula theme and open the REPL.");
+        assert_ne!(s.eval_to_string("(%get-color :editor-bg)").unwrap(), bg, "the theme changed");
+        assert_eq!(app::panel(), Some(app::Panel::Repl), "the REPL is open");
+
+        ask(&mut s, "Open notes.txt in the editor, change red to blue in its buffer, save it and close that buffer.");
+        assert_eq!(std::fs::read_to_string(format!("{dir}/notes.txt")).unwrap(), "colour: blue\n");
+        assert_eq!(s.eval_to_string(r#"(if (buffer-by-name "notes.txt") 1 0)"#).unwrap(), "0", "closed");
+        assert_eq!(s.eval_to_string(r#"(if (buffer-by-name "main.py") 1 0)"#).unwrap(), "1");
+        crate::agent::stop();
+        app::show_agent(false);
+        s.call("(load-theme :one-dark)");
         let _ = std::fs::remove_dir_all(dir);
     }
 
