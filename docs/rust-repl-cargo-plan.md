@@ -1,7 +1,15 @@
 # Rust sends from inside a Cargo project — plan, 2026-11-17
 
-**PROPOSED; R0 (the measurements) done 2026-11-17, nothing built. To do later** (Kevin, 2026-11-17: *"lets write a
-plan for this to do later"*).
+**PARKED 2026-11-17, after R0** (Kevin: *"somehow I think this is going to
+get very complicated and I don't know how much I will use it"*). R0, the
+measurements, is done and below; R1–R4 and the decisions are not started.
+By hand it already works: in a Rust buffer's REPL panel,
+`:dep my-crate = { path = "/abs/project" }` makes the project's `pub`
+items usable, and cargo builds its tree, resolves its `workspace = true`
+entries and rebuilds it when a source file changes. Take this up again
+only if that gets typed often — and then the one-command form first
+(`M-x rust-repl-project`: the package name and that one `:dep`, about an
+hour), not the whole plan.
 
 Kevin: *"can evcxr for rust resolve `use` statements and read the
 Cargo.toml files for a project?"*

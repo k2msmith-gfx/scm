@@ -1263,8 +1263,11 @@ same transcript, the same REPL panel as a Scheme file's scm:
   `mod x;`) does not load into evcxr whole, though its functions do one at
   a time; and evcxr keeps what it was sent until `rust-repl-restart`.
   Telling evcxr about the PROJECT — its crate and its `[dependencies]`, by
-  `:dep`, and `crate::` as the project — is planned, not built:
-  [rust-repl-cargo-plan.md](rust-repl-cargo-plan.md).
+  `:dep`, and `crate::` as the project — was planned and is PARKED after
+  its measurements: [rust-repl-cargo-plan.md](rust-repl-cargo-plan.md).
+  By hand it works now: `:dep my-crate = { path = "/abs/project" }` at the
+  REPL panel makes the project's `pub` items usable from sends, and cargo
+  rebuilds it when its source changes.
 
 Tests: `language::rust` (the cutting, on a file of awkward cases),
 `pipe` (the framing, against a stand-in), `a_rust_buffer_sends_to_evcxr`
