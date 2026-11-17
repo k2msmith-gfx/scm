@@ -1,7 +1,9 @@
 # Common Lisp in `edit`, through SBCL — plan, 2026-11-17
 
-**PROPOSED, nothing built.** L0 (the measurements) is done and is below;
-decisions D1–D6 at the end are Kevin's.
+**IN PROGRESS.** L0 (the measurements) and L1 (the server) are done; both
+are below. Kevin, 2026-11-17: *"I would probably switch to edit if it
+supported all of the L features"* — so all of L1–L7, in D6's order (L1–L3,
+L7, L4–L6), with each decision as recommended.
 
 Kevin, 2026-11-17: *"what is the level of effort to support sbcl to the
 same level as guile or scm?"* — and, after the Guile reader check landed:
@@ -124,7 +126,7 @@ Guile's do without Guile.
 | | what | exit criterion |
 |---|---|---|
 | **L0** ✔ | Measure SBCL (above). | this table |
-| **L1** | **The server.** `edit/sbcl/serve.lisp`: a listener on the address it is given, a thread for each connection; `eval` (every form of the text, in order; the last one's values; what was printed; warnings collected and returned with the output), an error as its message with the calls it raised in, `complete`, `describe`, `parse`, `ping`, and `interrupt` from a second connection. The debugger never opens: `sb-ext:*invoke-debugger-hook*` answers an error instead. `*standard-input*` is empty, so a `(read-line)` ends rather than hangs. | the protocol's own conformance, driven from Rust as `remote.rs`'s tests drive scm and Guile: a value, output with a failure, a multi-form send, completion of a name just defined, describe with docstring and lambda list, an interrupt of `(loop)` that leaves the server up |
+| **L1** ✔ | **The server.** `edit/sbcl/serve.lisp`: a listener on the address it is given, a thread for each connection; `eval` (every form of the text, in order; the last one's values; what was printed; warnings collected and returned with the output), an error as its message with the calls it raised in, `complete`, `describe`, `parse`, `ping`, and `interrupt` from a second connection. The debugger never opens: `sb-ext:*invoke-debugger-hook*` answers an error instead. `*standard-input*` is empty, so a `(read-line)` ends rather than hangs. | the protocol's own conformance, driven from Rust as `remote.rs`'s tests drive scm and Guile: a value, output with a failure, a multi-form send, completion of a name just defined, describe with docstring and lambda list, an interrupt of `(loop)` that leaves the server up |
 | **L2** | **The language.** `language/lisp.rs`: Scheme's scanner with Common Lisp's differences — `#\|…\|#`, `#\\Space`, `\|a symbol\|`, `#'f`, `#+x`/`#-x`, `:keyword` and `#:uninterned`, `pkg:name`; indentation by a table of body forms (`defun`, `let`, `when`, `flet`, `loop`…); the bracket marks Guile's has. Structural editing allowed for it. | a file of awkward cases highlights and indents as expected; a stray `)` and an open form are marked with no SBCL running |
 | **L3** | **The shell.** `27-lisp.scm`: `sbcl-start`/`-stop`, `lisp-mode`, detection (`.lisp`, `.lsp`, `.cl`, `.asd`), the backend (the remote backend, with `:complete`, `:doc`, `:signature` asking in the buffer's package), the running-process hook so TAB asks SBCL, the buffer's package from its `in-package`, the REPL panel's prompt (`CL-USER> `, following the REPL's package) and its own "is this whole?" (brackets — scm's reader does not read `#'f`). | against a real SBCL: each send key, `=> 49`, `=> SQ` for a `defun` (which Common Lisp answers itself), an error's message, describe on a name and on an argument, TAB in the buffer and at the REPL offering a function just sent, a two-package file sending each form to its own package |
 | **L4** | **Read marks.** SBCL's reader on the buffer's text, through `readcheck.rs` as built: `edit-serve:read-check` reads in a throwaway package with the buffer's use-list and `*read-eval*` nil, and answers where it stopped. | `#\\notachar` and `(foo:bar)` are marked on their line in SBCL's words; `#.(…)` is not; mending clears the mark; reading leaves no symbol behind in the user's package |
@@ -142,6 +144,67 @@ Sizes, from Guile's: the server about 350 lines (packages, lambda lists and
 the debugger hook are what Guile's did not need); the language about 200;
 the shell about 200; tests and this document's "as built" sections beside
 them.
+
+## L1 as built (2026-11-17)
+
+`edit/sbcl/serve.lisp`, 460 lines, loaded as
+
+    sbcl --noinform --disable-debugger --load serve.lisp --end-toplevel-options 127.0.0.1:PORT
+
+and listening in 0.1 s without an init file. It answers every request the
+protocol has, as `edit/guile/serve.scm` does, a thread per connection.
+
+- **Requests are read by a reader of the server's own**, not Common
+  Lisp's: the wire spells strings as Scheme does (`\n`, `\t`), which CL's
+  reader would take as `n` and `t`. It reads only the plist a request is,
+  and interns nothing a client sends.
+- **`eval`** reads the text's forms one at a time in the connection's
+  `*package*` and evaluates each; the answer is the last one's values,
+  printed and joined with `, ` (`; No values` for none), and everything
+  printed to standard, error or trace output. `*`, `**`, `/`, `+` and the
+  rest are kept as SBCL's REPL keeps them. `(in-package …)` lasts for the
+  connection (the REPL panel's), not for a buffer's next send — the
+  buffer's own package is L3's.
+- **The compiler's warnings** come back in the output, one line each
+  (`; warning: The function CAR is called with two arguments…`,
+  `; style-warning: undefined function: …`), and as a `:warnings` list,
+  which the client ignores today and L6 will read.
+- **An error** answers with its report (the reader's `Stream: …` paragraph
+  taken off) and the calls it was raised in, from the one that signalled
+  outwards, with the server's frames, `EVAL`'s and the signalling
+  machinery's taken out: `(INNER 5)`, `(OUTER 4)`. A tail call leaves no
+  frame — SBCL's, not the server's. A top-level form `eval` compiled into
+  an anonymous function shows as the form, so an interrupted `(loop)` is
+  `(LOOP)`. A send whose text does not read answers what is wrong with the
+  text and no calls.
+- **The debugger never opens.** `sb-ext:*invoke-debugger-hook*` and
+  `*debugger-hook*` answer instead, so `(break "look here")` comes back
+  as a failure with its message. Standard input is an empty stream, so
+  `(read-line)` ends with an end-of-file error instead of waiting for a
+  terminal. (L7 replaces the first with a break served over the
+  connection.)
+- **`interrupt`**, from a second connection, interrupts every thread
+  evaluating a request: `host-stopped`, message `interrupted`, and the
+  calls where it was. The server stays up.
+- **`complete`** offers the symbols the package can see that name
+  something (a function, macro, variable, class or special operator),
+  lower case; `pkg:` completes a package's external symbols and `pkg::`
+  all of its own; package names complete as `pkg:`. A name with lower case
+  letters of its own comes back `|Like This|`. Keywords are not offered.
+- **`describe`** takes `foo`, `pkg:foo` or `|Mixed|` without interning:
+  kind (`procedure`, `generic function`, `macro`, `special operator`,
+  `variable`, `constant`, `class`), the value, the docstring, and the
+  signature from `sb-introspect`, lower case and without package prefixes:
+  `(mapcar function list &rest more-lists)`.
+- **`parse`** reads in a scratch package with the same use-list, with
+  `#.` reading its form and evaluating nothing; a name in a package that
+  does not exist yet is complete text, not invalid.
+- `ping` and `stream` answer `sbcl 2.6.4`.
+
+Tests (`remote.rs`, `sbcl_tests`, skipped without `sbcl`):
+`sbcl_answers_the_protocol` (every case above, through `remote.rs`'s own
+`start` and `ask`) and `an_interrupt_stops_sbcl_and_it_stays_up`.
+`compile-file` of the server is free of warnings.
 
 ## Risks
 

@@ -804,3 +804,138 @@ mod guile_tests {
         s.call("(guile-stop)");
     }
 }
+
+/// L1 of docs/sbcl-plan.md: SBCL through the same protocol — an SBCL
+/// running edit/sbcl/serve.lisp, driven here as a client drives it.
+#[cfg(test)]
+mod sbcl_tests {
+    use super::*;
+
+    fn sbcl_on_path() -> bool {
+        std::process::Command::new("sbcl").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    /// An SBCL serving on a free port, connected: the connection's id. No
+    /// init file, so the test is the same on every machine.
+    fn start_sbcl() -> u32 {
+        let serve = concat!(env!("CARGO_MANIFEST_DIR"), "/sbcl/serve.lisp");
+        let args: Vec<String> = ["--noinform", "--disable-debugger", "--no-userinit", "--load", serve, "--end-toplevel-options", "{addr}"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        start("sbcl", &args, 0, None).expect("sbcl serves")
+    }
+
+    fn ask_ok(id: u32, op: Op) -> Outcome {
+        ask(id, op, Duration::from_secs(20)).expect("an answer").outcome
+    }
+
+    fn eval(id: u32, code: &str) -> Outcome {
+        ask_ok(id, Op::Eval { code: code.into(), source: None })
+    }
+
+    fn value(id: u32, code: &str) -> (String, String) {
+        match eval(id, code) {
+            Outcome::Value { value, output } => (value, output),
+            other => panic!("{code}: {other:?}"),
+        }
+    }
+
+    fn failure(id: u32, code: &str) -> (String, String, bool, Vec<String>) {
+        match eval(id, code) {
+            Outcome::Failed { message, output, host_stopped, backtrace } => (message, output, host_stopped, backtrace),
+            other => panic!("{code}: {other:?}"),
+        }
+    }
+
+    /// The exit criterion of L1: a value, output kept with a failure, a
+    /// multi-form send, completion of a name just defined, describe with
+    /// docstring and lambda list — and what would open SBCL's debugger, or
+    /// wait for a terminal, answers instead.
+    #[test]
+    fn sbcl_answers_the_protocol() {
+        if !sbcl_on_path() {
+            eprintln!("sbcl is not on the PATH: skipped");
+            return;
+        }
+        let c = start_sbcl();
+        assert!(matches!(ask_ok(c, Op::Ping), Outcome::Pong { version } if version.starts_with("sbcl ")));
+        assert_eq!(value(c, "(+ 1 2)").0, "3");
+        // Every form, in order; the last one's value; what they printed.
+        let (v, out) = value(c, "(defun sq (x) \"Squares X.\" (* x x))\n(print :hi)\n(sq 7)");
+        assert_eq!(v, "49");
+        assert!(out.contains(":HI"), "{out:?}");
+        assert_eq!(value(c, "(values 1 \"two\")").0, "1, \"two\"");
+        assert_eq!(value(c, "(values)").0, "; No values");
+        // An error: SBCL's message, what was printed before it, the calls.
+        let (msg, out, stopped, frames) = failure(c, "(defun inner (x) (car x)) (defun outer (x) (1+ (inner (1+ x)))) (format t \"before~%\") (outer 4)");
+        assert!(msg.contains("is not of type") && msg.contains("LIST"), "{msg}");
+        assert_eq!(out, "before\n");
+        assert!(!stopped, "the script failed; the host did not stop it");
+        assert_eq!(frames.first().map(String::as_str), Some("(INNER 5)"), "the calls start where it broke: {frames:?}");
+        assert!(frames.iter().any(|f| f.starts_with("(OUTER 4)")), "{frames:?}");
+        assert!(!frames.iter().any(|f| f.contains("EDIT-SERVE")), "none of the server's own: {frames:?}");
+        // The compiler's warnings come back with a send that compiled.
+        let (v, out) = value(c, "(defun bad (x) (undefined-fn-zz x) (car 1 2))");
+        assert_eq!(v, "BAD");
+        assert!(out.contains("; warning: The function CAR is called with two arguments"), "{out:?}");
+        assert!(out.contains("; style-warning: undefined function: COMMON-LISP-USER::UNDEFINED-FN-ZZ"), "{out:?}");
+        // What would open the debugger, or read from a terminal, answers.
+        assert_eq!(failure(c, "(break \"look here\")").0, "look here");
+        assert!(failure(c, "(read-line)").0.starts_with("end of file"));
+        let (msg, _, _, frames) = failure(c, "(sq 3");
+        assert_eq!(msg, "end of file: a form is not closed");
+        assert!(frames.is_empty(), "the text was wrong, not a call: {frames:?}");
+        // The image's names: one just defined, and SBCL's own.
+        let cands = |p: &str| match ask_ok(c, Op::Complete { prefix: p.into() }) {
+            Outcome::Candidates(names) => names,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(cands("sq"), ["sq", "sqrt"]);
+        assert!(cands("sb-ext:*invoke").contains(&"sb-ext:*invoke-debugger-hook*".to_string()));
+        let describe = |n: &str| match ask_ok(c, Op::Describe { name: n.into() }) {
+            Outcome::Described(d) => d,
+            other => panic!("{other:?}"),
+        };
+        let d = describe("sq").expect("sq is bound");
+        assert_eq!((d.kind.as_str(), d.signature.as_deref(), d.doc.as_deref()), ("procedure", Some("(sq x)"), Some("Squares X.")));
+        assert_eq!(describe("mapcar").unwrap().signature.as_deref(), Some("(mapcar function list &rest more-lists)"));
+        assert_eq!(describe("*print-base*").unwrap().kind, "variable");
+        assert!(describe("nothing-here-zz").is_none());
+        // Is the text whole? A name in a package not made yet is.
+        let framing = |code: &str| match ask_ok(c, Op::Parse { code: code.into() }) {
+            Outcome::Framed(f) => f,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(framing("(a (b"), scm::Framing::Incomplete);
+        assert_eq!(framing("(nopkg-zz:bar #.(error \"no\"))"), scm::Framing::Complete);
+        assert_eq!(framing(")"), scm::Framing::Invalid);
+        // A REPL's (in-package …) lasts for its connection.
+        assert_eq!(value(c, "(in-package :sb-ext) *package*").0, "#<PACKAGE \"SB-EXT\">");
+        assert_eq!(value(c, "*package*").0, "#<PACKAGE \"SB-EXT\">");
+        close(c);
+    }
+
+    /// An interrupt from a second connection stops a runaway where it
+    /// runs, says the host stopped it, and leaves the server up.
+    #[test]
+    fn an_interrupt_stops_sbcl_and_it_stays_up() {
+        if !sbcl_on_path() {
+            eprintln!("sbcl is not on the PATH: skipped");
+            return;
+        }
+        let c = start_sbcl();
+        // Past the timeout, ask interrupts down a second connection.
+        let answer = ask(c, Op::Eval { code: "(loop)".into(), source: None }, Duration::from_millis(500)).expect("an answer");
+        match answer.outcome {
+            Outcome::Failed { message, host_stopped, backtrace, .. } => {
+                assert_eq!(message, "interrupted");
+                assert!(host_stopped);
+                assert_eq!(backtrace, ["(LOOP)"], "where it was");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(value(c, "(+ 1 1)").0, "2", "the server is still up");
+        close(c);
+    }
+}
