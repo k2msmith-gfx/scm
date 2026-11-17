@@ -159,6 +159,7 @@ mod clipboard;
 mod editor;
 mod lsp;
 mod menu;
+mod lisp;
 mod pipe;
 mod readcheck;
 pub mod remote;
@@ -173,7 +174,7 @@ mod xref;
 /// evaluates these after installing the prims and before its own prelude,
 /// so its files can bind the shell's hooks and add to its chains — never the
 /// other way round.
-pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust", "21-ray", "22-warnings", "23-structure", "24-refactor", "25-agent", "26-rust-repl"];
+pub const SHELL: &[&str] = &["00-base", "01-handlers", "02-keymap", "03-menus", "04-minibuffer", "05-buffers", "06-help", "07-backend", "08-sends", "09-complete", "10-xref", "11-diagnostics", "12-error-pane", "13-term", "14-remote", "15-guile", "16-repl-commands", "17-files", "18-search", "19-ex", "20-rust", "21-ray", "22-warnings", "23-structure", "24-refactor", "25-agent", "26-rust-repl", "27-lisp"];
 
 /// Where [`SHELL`]'s files are in the tree this binary was built from. They
 /// are read from there while it exists, so an edit to one takes effect
@@ -214,6 +215,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("24-refactor", include_str!("../scm/24-refactor.scm")),
     ("25-agent", include_str!("../scm/25-agent.scm")),
     ("26-rust-repl", include_str!("../scm/26-rust-repl.scm")),
+    ("27-lisp", include_str!("../scm/27-lisp.scm")),
     ("host/prelude", include_str!("../scm/host/prelude.scm")),
     ("host/standalone", include_str!("../scm/host/standalone.scm")),
     ("host/themes", include_str!("../scm/host/themes.scm")),
@@ -224,8 +226,10 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("themes/nano-dark", include_str!("../scm/themes/nano-dark.scm")),
 ];
 
-/// Guile's REPL server, compiled in for the same reason (see `%edit-path`).
+/// Guile's and SBCL's REPL servers, compiled in for the same reason (see
+/// `%edit-path`).
 const GUILE_SERVE: &str = include_str!("../guile/serve.scm");
+const SBCL_SERVE: &str = include_str!("../sbcl/serve.lisp");
 
 /// Shell file NAME (`"05-buffers"`, `"host/prelude"`) as `(source, the name
 /// to report it under)`: from the tree when it is there, else the copy
@@ -248,15 +252,23 @@ pub fn shell_source(name: &str) -> Result<(String, String), String> {
 pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Result<(), scm::EmbedError> {
     crate::language::scheme::set_reader(read_check);
     // `(%edit-path rel)` — a file of the edit crate's tree, as an absolute
-    // path: Guile's serve.scm (E6), read where this binary was built, as
-    // the shell's own files are. Guile runs it as a FILE, so when the tree
-    // is gone the compiled-in copy is written to a temporary one.
+    // path: Guile's serve.scm (E6) or SBCL's serve.lisp (sbcl-plan L3),
+    // read where this binary was built, as the shell's own files are. Each
+    // runs it as a FILE, so when the tree is gone the compiled-in copy is
+    // written to a temporary one.
     interp.define_fn("%edit-path", |args| {
         let rel = val_text(args, 0).unwrap_or_default();
         let path = shell_dir().join("..").join(&rel);
-        if !path.exists() && rel == "guile/serve.scm" {
-            let tmp = std::env::temp_dir().join(format!("edit-guile-serve-{}.scm", std::process::id()));
-            if std::fs::write(&tmp, GUILE_SERVE).is_ok() {
+        let compiled_in = match rel.as_str() {
+            "guile/serve.scm" => Some((GUILE_SERVE, "guile-serve.scm")),
+            "sbcl/serve.lisp" => Some((SBCL_SERVE, "sbcl-serve.lisp")),
+            _ => None,
+        };
+        if !path.exists()
+            && let Some((src, name)) = compiled_in
+        {
+            let tmp = std::env::temp_dir().join(format!("edit-{}-{name}", std::process::id()));
+            if std::fs::write(&tmp, src).is_ok() {
                 return Ok(scm::Val::Str(tmp.to_string_lossy().into_owned()));
             }
         }
@@ -290,6 +302,7 @@ pub fn install(interp: &mut scm::Interp, installed: &mut dyn FnMut(&str)) -> Res
         .chain(warn::install(interp)?)
         .chain(agent::install(interp)?)
         .chain(pipe::install(interp)?)
+        .chain(lisp::install(interp)?)
         .chain(readcheck::install(interp)?)
     {
         installed(name);
@@ -415,6 +428,7 @@ mod tests {
             assert_eq!(*src, disk, "{name}");
         }
         assert_eq!(GUILE_SERVE, std::fs::read_to_string(shell_dir().join("../guile/serve.scm")).unwrap());
+        assert_eq!(SBCL_SERVE, std::fs::read_to_string(shell_dir().join("../sbcl/serve.lisp")).unwrap());
     }
 
     #[test]

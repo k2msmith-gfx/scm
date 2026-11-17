@@ -378,6 +378,121 @@ fn indent_at(t: &Tokens, point: (usize, usize)) -> usize {
     data
 }
 
+// ── What a send reads, and in which package (L3) ───────────────────────────
+
+/// (line, byte) in TEXT as a character offset.
+pub fn char_offset(text: &str, line: usize, byte: usize) -> usize {
+    let mut off = 0;
+    for (l, s) in text.split('\n').enumerate() {
+        if l == line {
+            return off + s.get(..byte.min(s.len())).map_or(s.chars().count(), |b| b.chars().count());
+        }
+        off += s.chars().count() + 1;
+    }
+    off.saturating_sub(1)
+}
+
+/// Every top-level form of TEXT, prefixes included (`'(a b)`, and `#+sbcl
+/// (f)` with what it guards), as character spans in order. A stray `)` is
+/// stepped over.
+pub fn toplevel_forms(text: &str) -> Vec<(usize, usize)> {
+    let toks = tokens(text);
+    let s = crate::sexp::Sexps::with_tokens(text, toks.clone());
+    let mut out = Vec::new();
+    let mut p = 0;
+    loop {
+        match s.next_datum(p) {
+            Some((a, mut b)) if b > p || a > p => {
+                // `#+feature form` is one: the feature, then what it guards.
+                let starts = |w: &str| text.chars().skip(a).take(2).collect::<String>() == w;
+                if (starts("#+") || starts("#-"))
+                    && let Some((_, e)) = s.next_datum(b)
+                {
+                    b = e;
+                }
+                out.push((a, b));
+                p = b;
+            }
+            _ => match toks.iter().find(|t| t.start >= p && t.kind == Kind::Close) {
+                Some(t) => p = t.end,
+                None => return out,
+            },
+        }
+    }
+}
+
+/// The top-level form the point (a character offset) is in, else the
+/// nearest one before it — what C-M-x sends.
+pub fn form_at(text: &str, p: usize) -> Option<(usize, usize)> {
+    let all = toplevel_forms(text);
+    all.iter().find(|&&(a, b)| a <= p && p <= b).or_else(|| all.iter().rev().find(|&&(_, b)| b <= p)).copied()
+}
+
+/// The expression that ends just before the point — what C-x C-e sends.
+pub fn form_before(text: &str, p: usize) -> Option<(usize, usize)> {
+    crate::sexp::Sexps::with_tokens(text, tokens(text)).prev_datum(p)
+}
+
+/// The package a form at the point (a character offset) is read in: the
+/// designator of the last top-level `(in-package …)` before it, as
+/// `find-package` wants it — `:my-pkg`, `#:my-pkg` and `my-pkg` upper case,
+/// `"My-Pkg"` and `|My-Pkg|` as written. None when there is none above.
+pub fn package_at(text: &str, p: usize) -> Option<String> {
+    let toks = tokens(text);
+    let chars: Vec<char> = text.chars().collect();
+    let word = |t: &Token| -> String { chars[t.start..t.end].iter().collect() };
+    let mut found = None;
+    for (i, t) in toks.iter().enumerate() {
+        if t.start >= p {
+            break;
+        }
+        if t.kind != Kind::Open || t.depth != 0 {
+            continue;
+        }
+        let (Some(head), Some(arg)) = (toks.get(i + 1), toks.get(i + 2)) else { continue };
+        let name = word(head).to_ascii_lowercase();
+        if head.kind != Kind::Atom || !matches!(name.as_str(), "in-package" | "cl:in-package" | "common-lisp:in-package") {
+            continue;
+        }
+        let w = word(arg);
+        found = match arg.kind {
+            Kind::Str => Some(w.trim_matches('"').to_string()),
+            Kind::Atom if w.starts_with('|') && w.ends_with('|') && w.len() >= 2 => Some(w[1..w.len() - 1].to_string()),
+            Kind::Atom => Some(w.trim_start_matches('#').trim_start_matches(':').to_ascii_uppercase()),
+            _ => found,
+        };
+    }
+    found
+}
+
+/// Is TEXT whole — every `(` closed, and no string, `|…|` or `#|` comment
+/// left open? What the REPL panel asks before it sends a line.
+pub fn complete(text: &str) -> bool {
+    let toks = tokens(text);
+    let chars: Vec<char> = text.chars().collect();
+    let mut depth = 0i64;
+    for t in &toks {
+        match t.kind {
+            Kind::Open => depth += 1,
+            Kind::Close => depth -= 1,
+            _ => {}
+        }
+    }
+    let Some(last) = toks.last() else { return true };
+    let w: String = chars[last.start..last.end].iter().collect();
+    let open_token = match last.kind {
+        // A string closes with an unescaped `"`.
+        Kind::Str => w.len() < 2 || !w.ends_with('"') || {
+            let body = &w[1..w.len() - 1];
+            body.chars().rev().take_while(|&c| c == '\\').count() % 2 == 1
+        },
+        Kind::Comment => w.starts_with("#|") && !w.ends_with("|#"),
+        Kind::Atom => w.chars().filter(|&c| c == '|').count() % 2 == 1,
+        _ => false,
+    };
+    depth <= 0 && !open_token
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,6 +653,36 @@ mod tests {
         assert_eq!(s.forward(pos("|a")), Some(pos(" #'g")), "a |…| symbol is one");
         assert_eq!(s.forward(pos("#'g")), Some(pos(" #(")), "#' with its name");
         assert_eq!(s.forward(pos("#(")), Some(pos(") next")), "a vector with its #");
+    }
+
+    /// What C-M-x and C-x C-e send, and in which package.
+    #[test]
+    fn what_a_send_reads() {
+        let text = "(in-package :foo)\n(defun f (x) |a (b| x) ; c\n'(1 2) #+sbcl (g)\n(in-package \"Bar\")\n(h)";
+        let at = |w: &str| text.find(w).unwrap();
+        let forms: Vec<&str> = toplevel_forms(text).iter().map(|&(a, b)| &text[a..b]).collect();
+        assert_eq!(forms, ["(in-package :foo)", "(defun f (x) |a (b| x)", "'(1 2)", "#+sbcl (g)", "(in-package \"Bar\")", "(h)"]);
+        let span = |p| form_at(text, p).map(|(a, b)| &text[a..b]);
+        assert_eq!(span(at("x) |a")), Some("(defun f (x) |a (b| x)"), "from inside it");
+        assert_eq!(span(at(" ; c")), Some("(defun f (x) |a (b| x)"), "the nearest before");
+        let before = |p| form_before(text, p).map(|(a, b)| &text[a..b]);
+        assert_eq!(before(at(" x) ;") ), Some("|a (b|"));
+        assert_eq!(before(at(" #+sbcl")), Some("'(1 2)"), "with its quote");
+        assert_eq!(package_at(text, at("(defun")).as_deref(), Some("FOO"));
+        assert_eq!(package_at(text, at("(h)")).as_deref(), Some("Bar"));
+        assert_eq!(package_at(text, 0), None);
+        assert_eq!(package_at("(in-package #:my-pkg)\nx", 22).as_deref(), Some("MY-PKG"));
+        assert_eq!(char_offset("ab\nλx", 1, 2), 4, "bytes to characters");
+    }
+
+    #[test]
+    fn whole_text() {
+        for yes in ["(+ 1 2)", "x", "", "(f \"a)\")", "'|a b|", "#| c |# 1", "(f) ; (", "\"a\\\\\""] {
+            assert!(complete(yes), "{yes}");
+        }
+        for no in ["(+ 1", "\"abc", "|a b", "#| c", "(f \"a)", "\"a\\\""] {
+            assert!(!complete(no), "{no}");
+        }
     }
 
     #[test]

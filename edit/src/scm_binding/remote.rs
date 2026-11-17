@@ -916,6 +916,112 @@ mod sbcl_tests {
         close(c);
     }
 
+    fn transcript() -> Vec<String> {
+        crate::textpane::lines(crate::app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect()
+    }
+
+    /// Always: a .lisp file opens as Lisp, and its send never falls through
+    /// to scm's image when SBCL cannot start.
+    #[test]
+    fn a_lisp_file_is_lisps_and_never_runs_as_scm() {
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-lisp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hello.lisp");
+        std::fs::write(&file, "(defun square-it (x) (* x x))\n").unwrap();
+        s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
+        assert_eq!(s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap(), "\"lisp\"");
+        s.call("(set! *sbcl-program* \"no-such-sbcl-here\") (%editor-goto-line 1 0) (eval-defun)");
+        assert!(transcript().iter().any(|l| l.starts_with("error: sbcl:")), "{:?}", transcript());
+        // With no SBCL running, a Lisp buffer completes from its own words,
+        // not scm's names.
+        let pool = s.eval_to_string("(editor-candidates)").unwrap();
+        assert!(pool.contains("\"square-it\"") && !pool.contains("\"string-map\""), "{pool}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L3's exit criterion, against a real SBCL: each send key; a defun
+    /// answers its name; an error its message; describe on a name and on an
+    /// argument; TAB in the buffer and at the REPL offering what was sent;
+    /// and a file of two packages sending each form to its own.
+    #[test]
+    fn a_lisp_buffer_sends_to_sbcl() {
+        if !sbcl_on_path() {
+            eprintln!("sbcl is not on the PATH: skipped");
+            return;
+        }
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-lisp-send-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shapes.lisp");
+        std::fs::write(
+            &file,
+            "(defpackage :shapes (:use :cl))\n(in-package :shapes)\n(defun sq (x) \"Squares X.\" (* x x))\n(sq 7)\n(in-package :cl-user)\n(defun sq (x) (list :user x))\n(sq 7)\n(car 5)\n",
+        )
+        .unwrap();
+        s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
+        // The same on every machine: no ~/.sbclrc.
+        s.call("(set! *sbcl-init* #f)");
+        let sent = |s: &mut super::super::standalone::Session, call: &str, want: &str| {
+            s.call("(%pane-clear 2)");
+            s.call(call);
+            assert!(s.settle(30.0), "SBCL answers {call}");
+            assert!(transcript().iter().any(|l| l.starts_with(want)), "{call}: want {want:?} in {:?}", transcript());
+        };
+        // C-c C-b: the whole file, from CL-USER, its in-packages taking effect.
+        sent(&mut s, "(eval-buffer)", "error: The value");
+        // C-M-x, each form in the package above it.
+        sent(&mut s, "(%editor-goto-line 1 2) (eval-defun)", "=> SQ");
+        sent(&mut s, "(%editor-goto-line 1 3) (eval-defun)", "=> 49");
+        sent(&mut s, "(%editor-goto-line 1 6) (eval-defun)", "=> (:USER 7)");
+        // C-x C-e: the expression before the point.
+        sent(&mut s, "(%editor-select 1 3 0 6) (eval-last-sexp)", "=> 49");
+        // An error: SBCL's message.
+        s.call("(%pane-clear 2) (%editor-goto-line 1 7) (eval-defun)");
+        assert!(s.settle(30.0));
+        assert!(transcript().iter().any(|l| l == "error: The value 5 is not of type LIST when binding LIST"), "{:?}", transcript());
+        // Describe, in the buffer's package: on the name and on an argument.
+        let echo = || crate::textpane::lines(crate::app::MINIBUFFER).last().map(|(_, l)| l.clone()).unwrap_or_default();
+        for (from, to, what) in [(1, 3, "on the name"), (4, 5, "on an argument")] {
+            s.call(&format!("(%pane-clear 2) (%editor-select 1 3 {from} {to}) (editor-describe)"));
+            let t = transcript();
+            assert!(t.iter().any(|l| l == "Squares X."), "{what}: {t:?}");
+            assert_eq!(echo(), "(sq x)", "{what}");
+        }
+        // TAB in the buffer offers SBCL's names, what was sent included.
+        let pool = s.eval_to_string("(editor-candidates)").unwrap();
+        assert!(pool.contains("\"sq\"") && pool.contains("\"mapcar\""), "the buffer's pool is SBCL's");
+        // The REPL: SBCL's prompt in the REPL's own package, which an
+        // in-package typed there changes.
+        s.call("(repl)");
+        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"CL-USER> \"");
+        let line = |s: &mut super::super::standalone::Session, text: &str| {
+            for c in text.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+            assert!(s.settle(30.0));
+        };
+        line(&mut s, "(in-package :shapes)");
+        let t0 = std::time::Instant::now();
+        while s.eval_to_string("(repl-prompt)").unwrap() != "\"SHAPES> \"" {
+            s.poll();
+            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "the prompt follows the package");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        line(&mut s, "(sq 2)");
+        assert!(transcript().iter().any(|l| l == "SHAPES> (sq 2)"), "{:?}", transcript());
+        assert!(transcript().iter().any(|l| l == "=> 4"), "{:?}", transcript());
+        // A line left open waits for the rest.
+        line(&mut s, "(+ 1");
+        line(&mut s, "2)");
+        assert!(transcript().iter().any(|l| l == "=> 3"), "{:?}", transcript());
+        s.call("(sbcl-stop)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An interrupt from a second connection stops a runaway where it
     /// runs, says the host stopped it, and leaves the server up.
     #[test]

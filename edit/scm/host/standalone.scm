@@ -292,7 +292,8 @@ Every ray file of the same checkout shares it, so they all start over."
   ; module), the separate scm's `scm λ > `, or the editor's image's
   ; `scheme λ > ` — the λ kept for both scm images (Kevin, 2026-11-13). A
   ; continuation lines up under the form, as the prompt's width of spaces.
-  (let ((p (cond ((repl-guile?) "scheme@(guile-user)> ")
+  (let ((p (cond ((backend-op (repl-backend) :prompt) => (lambda (prompt) (prompt)))   ; SBCL's CL-USER> (27-lisp)
+                 ((repl-guile?) "scheme@(guile-user)> ")
                  ; A Rust buffer's REPL is evcxr, in evcxr's own prompt.
                  ((backend-op (repl-backend) :whole?) "rust >> ")
                  ((string-prefix? "scm at " (%alist-ref (repl-backend) :name "")) "scm λ > ")

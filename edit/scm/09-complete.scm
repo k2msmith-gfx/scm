@@ -116,12 +116,13 @@
   falls back to the buffer's own words."
   (cdr (editor-pool)))
 
-(define (buffer-words text)
-  "The distinct words of TEXT — letters, digits and `_`, three characters
-  or more, not starting with a digit: the completion pool of a buffer whose
-  language this image cannot answer for."
+(define (buffer-words text (more ""))
+  "The distinct words of TEXT — letters, digits and `_`, and any character
+  in MORE (a Lisp's `-`, `*`), three characters or more, not starting with a
+  digit: the completion pool of a buffer whose language this image cannot
+  answer for."
   (define seen (make-hash-table equal?))
-  (define (word-char? c) (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_)))
+  (define (word-char? c) (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_) (memv c (string->list more))))
   (let loop ((cs (string->list text)) (word '()))
     (define (bank!)
       (when (and (>= (length word) 3) (not (char-numeric? (last word))))

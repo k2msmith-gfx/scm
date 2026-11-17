@@ -31,7 +31,7 @@
 
 (defpackage :edit-serve
   (:use :cl)
-  (:export #:main))
+  (:export #:main #:in #:complete-in #:describe-in))
 
 (in-package :edit-serve)
 
@@ -124,11 +124,20 @@ method must not cost the answer."
   (safely (lambda () (prin1-to-string v)) "#<unprintable>"))
 
 (defun message-of (c)
-  "C's report, without the `Stream: …` paragraph SBCL's reader errors end in."
+  "C's report on one line: SBCL lays a report out over several (\"The
+value~%  5~%is not of type~%  LIST\"), and an editor's echo line shows the
+first. The `Stream: …` paragraph its reader errors end in is taken off."
   (let* ((text (safely (lambda () (princ-to-string c))
                        (format nil "~a (unprintable report)" (type-of c))))
-         (cut (search (format nil "~%~%") text)))
-    (string-trim '(#\Space #\Newline) (if cut (subseq text 0 cut) text))))
+         (cut (search (format nil "~%~%") text))
+         (text (string-trim '(#\Space #\Newline) (if cut (subseq text 0 cut) text))))
+    (with-output-to-string (out)
+      (let ((space nil))
+        (loop for ch across text
+              do (if (member ch '(#\Space #\Newline #\Tab))
+                     (setf space t)
+                     (progn (when space (write-char #\Space out) (setf space nil))
+                            (write-char ch out))))))))
 
 (defun lowercase-name (s)
   "S as a reader would have to be given it, lower case: a name with lower case
@@ -227,10 +236,15 @@ debugger's frames, cut where the server's own begin."
               /// // // / / values
               +++ ++ ++ + + form)))))
 
+(defvar *print-package* nil
+  "The package a send's values print in: the one `in` evaluated it in, so
+a buffer's symbols print as that buffer would write them.")
+
 (defun values-text (values)
-  (if values
-      (format nil "~{~a~^, ~}" (mapcar #'printed values))
-      "; No values"))
+  (let ((*package* (or *print-package* *package*)))
+    (if values
+        (format nil "~{~a~^, ~}" (mapcar #'printed values))
+        "; No values")))
 
 (defun answer-eval (id code)
   (let* ((out (make-string-output-stream))
@@ -239,7 +253,7 @@ debugger's frames, cut where the server's own begin."
          (warnings '())
          (result
            (catch 'request
-             (let ((*standard-output* out) (*error-output* out) (*trace-output* out)
+             (let ((*standard-output* out) (*error-output* out) (*trace-output* out) (*print-package* nil)
                    (*standard-input* no-input) (*terminal-io* io) (*query-io* io) (*debug-io* io)
                    ;; Whatever would open the debugger answers instead.
                    (sb-ext:*invoke-debugger-hook* (lambda (c hook) (declare (ignore hook)) (fail-from-condition c)))
@@ -354,30 +368,75 @@ own), and package names themselves as `pkg:`."
                   (string-upcase base))))
     (and pkg (plusp (length key)) (find-symbol key (if (eql colon 0) (find-package :keyword) pkg)))))
 
+(defun describe-parts (s)
+  "What describe says of symbol S: (kind value signature doc), the last two
+NIL when there are none."
+  (let* ((fn (and (fboundp s) (not (special-operator-p s)) (not (macro-function s)) (fdefinition s)))
+         (kind (cond ((special-operator-p s) "special operator")
+                     ((macro-function s) "macro")
+                     ((typep fn 'generic-function) "generic function")
+                     (fn "procedure")
+                     ((boundp s) (if (constantp s) "constant" "variable"))
+                     (t "class")))
+         (lambda-list (and (fboundp s)
+                           (ignore-errors (sb-introspect:function-lambda-list
+                                           (or (macro-function s) (fdefinition s))))))
+         (signature (and (fboundp s) (lambda-list-text (lowercase-name s) lambda-list)))
+         (doc (or (and (fboundp s) (documentation s 'function))
+                  (and (boundp s) (documentation s 'variable))
+                  (and (find-class s nil) (documentation s 'type))))
+         (value (cond ((fboundp s) (printed (if (macro-function s) (macro-function s) (fdefinition s))))
+                      ((boundp s) (let ((*print-length* 20) (*print-level* 4)) (printed (symbol-value s))))
+                      (t (printed (find-class s))))))
+    (list kind value signature doc)))
+
 (defun answer-describe (id name)
   (let ((s (find-named name)))
     (if (not (and s (meaningful-p s)))
         (format nil "(:id ~a :status ok :bound #f)" id)
-        (let* ((fn (and (fboundp s) (not (special-operator-p s)) (not (macro-function s)) (fdefinition s)))
-               (kind (cond ((special-operator-p s) "special operator")
-                           ((macro-function s) "macro")
-                           ((typep fn 'generic-function) "generic function")
-                           (fn "procedure")
-                           ((boundp s) (if (constantp s) "constant" "variable"))
-                           (t "class")))
-               (lambda-list (and (fboundp s)
-                                 (ignore-errors (sb-introspect:function-lambda-list
-                                                 (or (macro-function s) (fdefinition s))))))
-               (signature (and (fboundp s) (lambda-list-text (lowercase-name s) lambda-list)))
-               (doc (or (and (fboundp s) (documentation s 'function))
-                        (and (boundp s) (documentation s 'variable))
-                        (and (find-class s nil) (documentation s 'type))))
-               (value (cond ((fboundp s) (printed (if (macro-function s) (macro-function s) (fdefinition s))))
-                            ((boundp s) (let ((*print-length* 20) (*print-level* 4)) (printed (symbol-value s))))
-                            (t (printed (find-class s))))))
+        (destructuring-bind (kind value signature doc) (describe-parts s)
           (format nil "(:id ~a :status ok :bound #t :name ~a :kind ~a :value ~a~@[ :signature ~a~]~@[ :doc ~a~])"
                   id (wire-string (lowercase-name s)) (wire-string kind) (wire-string value)
                   (and signature (wire-string signature)) (and doc (wire-string doc)))))))
+
+;;; ---- a buffer's package -------------------------------------------------
+;;; A send from a buffer is read and evaluated in the package of the
+;;; nearest `(in-package …)` above it, as SLIME's are — the editor finds the
+;;; name in the text and asks through an ordinary `eval` of these. The REPL
+;;; panel's lines are evaluated in the connection's own *PACKAGE*.
+
+(defun package-named (name)
+  "The package NAME (as `find-package` takes it), else CL-USER and a note
+saying so."
+  (let ((pkg (and name (plusp (length name)) (find-package name))))
+    (if pkg
+        (values pkg nil)
+        (values (find-package :cl-user)
+                (format nil "package ~a does not exist yet: read in CL-USER" name)))))
+
+(defun in (package code)
+  "Evaluate CODE's forms in PACKAGE: the last one's values, printed as that
+package would write them."
+  (multiple-value-bind (pkg note) (package-named package)
+    (when note (format t "; ~a~%" note))
+    (setf *print-package* pkg)
+    (let ((*package* pkg))
+      (values-list (eval-forms code)))))
+
+(defun complete-in (package prefix)
+  "The names PREFIX begins, as `complete` answers them, seen from PACKAGE."
+  (let ((*package* (package-named package)))
+    (completions prefix)))
+
+(defun describe-in (package name)
+  "(kind signature doc) of NAME seen from PACKAGE — \"\" where there is
+none — or NIL when it names nothing."
+  (let* ((*package* (package-named package))
+         (s (find-named name)))
+    (and s (meaningful-p s)
+         (destructuring-bind (kind value signature doc) (describe-parts s)
+           (declare (ignore value))
+           (list kind (or signature "") (or doc ""))))))
 
 ;;; ---- the requests -------------------------------------------------------
 

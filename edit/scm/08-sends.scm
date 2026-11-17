@@ -153,6 +153,13 @@
 
 (define *send-failed* #f)   ; did the last send raise? (eval-owning reads it)
 
+; What a buffer's send RUNS may be the language's to wrap: a Common Lisp
+; buffer's forms are read in the package of the nearest (in-package …)
+; above the point (27-lisp), which only the text says. Language -> (lambda
+; (run label) …) answering what to evaluate; the REPL's lines are not
+; wrapped.
+(define *language-send-wrap* (make-hash-table equal?))
+
 (define (editor-send-local src label (run src))
   "Eval SRC in THIS IMAGE's REPL env: output and value echo into the REPL
   transcript, errors also flash the echo area, and the retained scene syncs
@@ -169,7 +176,10 @@
   ;; process answers LATER (:eval-async, 14-remote): the send returns at
   ;; once and send-answer runs when the answer comes, so the window stays
   ;; live while the form runs. This image's answers now.
-  (let ((backend (backend-of (%editor-active-buffer (editor-pane-id)))))
+  (let* ((buf (%editor-active-buffer (editor-pane-id)))
+         (backend (backend-of buf))
+         (wrap (hash-table-ref/default *language-send-wrap* (%buffer-language (editor-pane-id) buf) #f))
+         (run (if wrap (wrap run label) run)))
     (cond ((backend-op backend :eval-async)
             => (lambda (eval-async)
                  (echo label ": running in " (%alist-ref backend :name "another process")
