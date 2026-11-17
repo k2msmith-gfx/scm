@@ -1,8 +1,8 @@
 # The agent panel in `edit` — plan, 2026-11-16
 
-**Status, 2026-11-17: A0 measured; A1, A2 and A3 built** (below, "A1 and
-A2 as built", "A3 as built"): the standalone has the agent; the modeler
-still has its own (A5). Kevin accepted
+**Status, 2026-11-17: A0 measured; A1–A4 built** (below, "A1 and A2 as
+built", "A3 as built", "A4 as built"): the standalone has the agent, and
+its buffers follow the agent's edits; the modeler still has its own (A5). Kevin accepted
 the recommendations on D1–D7 on 2026-11-16 and then changed two of them,
 both recorded where they stand: **D1 is one process per CONVERSATION**, and
 **D3 is ask in the pane**, for programs and for files outside the project.
@@ -160,7 +160,7 @@ Each leaves both hosts green. Sizes are guesses until A0.
 | **A1** ✔ | **The bridge.** `edit/src/agent.rs` ported from `ai.rs`: spawn, stderr drain, stream parse, metrics de-duplicated by message id, cancel, stale-session retry, `claude auth`. `Bridge::over(reader)` for tests. The Messages-API backend and the one-shot mode are NOT ported (D5). | unit tests over canned `.jsonl` (text, tool use, tool result with an image, compaction, error result, a stream cut mid-line); a `sleep` child killed by `cancel()` reports `Cancelled`; no real turn spent |
 | **A2** ✔ | **Prims and pane.** `scm_binding/agent.rs` (`%agent-send`, `-poll`, `-cancel`, `-busy?`, `-session`, `-session-set`, `-reset`, `-auth`, `-auth-pending`, `-auth-input`); `25-agent.scm` in `SHELL` and `EMBEDDED`; the profile. | a bare-interpreter test drives `agent-submit` against a fake `claude` (a shell script that prints canned events, named by `EDIT_CLAUDE_BIN`) and asserts the transcript rows; `/status` against a fake `auth` |
 | **A3** ✔ | **The standalone hosts it.** A fifth pane id and a right dock in `app.rs` (D2), an icon, `M-a`, `%show-dock`; Escape in `Session::escape` cancels a busy turn when the agent holds typing; session id stored per project root. | `cargo run -p edit -- FILE`, `M-a`, `/login`, a real question about the open file answered, restart, the conversation resumes. Kevin's use is the gate |
-| **A4** | **It edits, and the editor notices.** (The permission posture is built: see "as built".) Auto-revert of an unmodified buffer whose file changed on disk, and a loud refusal to revert a modified one; the turn's changed files listed in the transcript. | the agent fixes a planted bug in an open buffer; the buffer shows the fix without `:e!`; a buffer with unsaved edits is not overwritten |
+| **A4** ✔ | **It edits, and the editor notices.** (The permission posture is built: see "as built".) Auto-revert of an unmodified buffer whose file changed on disk, and a loud refusal to revert a modified one; the turn's changed files listed in the transcript. | the agent fixes a planted bug in an open buffer; the buffer shows the fix without `:e!`; a buffer with unsaved edits is not overwritten |
 | **A5** | **The modeler takes it.** `14-ai.scm` sets the profile; `ai.rs`, the `%ai-*` prims, `Wake::Ai` and the pane half of `08-editor.scm` go; `MODELER_AI_*` variables keep working through the profile; Escape's kernel branch calls `edit::agent`. | ray's `test_agent_pane.py`, `test_agent_mcp.py`, `test_agent_during_render.py` (19/19) and `test_ai_catalog_modes.py` pass unchanged; `ai_census.py` and `ai_ab.py` still read the stream log; one real turn resumes a pre-existing `:ai-session` |
 | **A6** | **Editor tools for the agent** (D4). An MCP server the binary itself provides (`edit --mcp`, stdio, reaching the running editor as `14-remote` reaches `scm --serve`): open buffers and unsaved text, selection, cursor, diagnostics, open-file-at-line, eval in the attached backend; and the WRITE side the modeler's agent already has for the scene editor (`editor_write`, `editor_replace`, `editor_send`): replace a region or a whole buffer in place, each agent edit ONE undo step. | the agent answers "what is wrong with the form at point" from an UNSAVED buffer, fixes it in the buffer, and one `u` takes the fix back |
 | **A7** | **Reading comfort.** Replies are markdown: fenced code coloured through `Language`, `@` file mentions (the picker is already bound, `04-minibuffer.scm:546`), token streaming if A0 says partial messages are worth it, send-region-to-agent. | by eye |
@@ -332,6 +332,42 @@ Tested by `the_agent_has_a_column_and_knows_what_the_editor_shows`
 test keeps a frame to look at. **Not yet done by a person:** a real
 conversation from the window — that is the stage's exit criterion and it
 is Kevin's.
+
+## A4 as built (2026-11-17)
+
+The agent works on the files on disk; the buffers follow
+(`sync-buffers-with-disk`, 25-agent — the shell's, so the modeler's too).
+
+- **A buffer with no edits of its own is reloaded** when its file changes,
+  the cursor kept on its line, and the pane says `↻ reloaded NAME`: after
+  each result of one of the agent's edit tools, and at the end of every
+  turn — which is what catches a file a COMMAND changed (a formatter).
+  The buffer on screen and the ones that are not.
+- **A buffer with unsaved edits is never touched.** When the agent changed
+  its file the pane says so, in red, once: `:e!` takes the file's version,
+  `C-x C-s` keeps yours. The agent is told beforehand, too — the `<editor>`
+  block marks the file, and its prompt says the editor will not take a
+  change to it.
+- **A changed file is found by its size and time** (`%os-stat`), noted
+  when a request goes out, so a step does not read every open file; a file
+  the agent's own edit tools named is compared by its text whatever the
+  clock says. Without `%os-stat` (a host that has none) only those are
+  checked.
+- **A reload is a load**: the buffer's undo does not reach back across it.
+  Edits made in the buffer as undo steps are A6's.
+- **The transcript got quieter in the doing**: a path under the project is
+  shown from the project, a file read back and an edit's "updated" get no
+  row (the reload says it), and any other result is its first four lines.
+
+Tests: `a_buffer_follows_the_agents_edit_unless_it_has_edits_of_its_own`
+against the stand-in, and the stage's exit against the REAL `claude`,
+`the_real_claude_fixes_a_bug_in_the_open_buffer` (`#[ignore]`, one turn;
+passed 2026-11-17 in 5 s): a wrong line under the cursor, "the line my
+cursor is on has a bug", and `width * height` on screen with no `:e!`.
+
+**Not done:** the plan's `/mode` command. With leave asked in the pane
+(D3) there is no mode to switch between yet; it returns if a read-only
+"plan" posture is wanted.
 
 ## Risks
 

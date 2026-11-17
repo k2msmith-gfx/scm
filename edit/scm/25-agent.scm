@@ -40,7 +40,7 @@
 ; and :arg, which may repeat. A key that is absent is the CLI's own default.
 
 (define agent-editor-note
-  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. A file marked as having unsaved edits is NEWER in the editor than on disk: what you read from disk may be stale, so say so and ask them to save (C-x C-s) before you edit it.")
+  "You are running inside `edit`, a text editor, in a side panel: the user reads your replies in a narrow transcript beside their source, so keep prose short and put code in fenced blocks. Files you change on disk are the files open in the editor. Each request opens with an <editor> block the editor wrote, not the user: the file they are looking at, where their cursor is, the line it is on, what they have selected, and the other files open. \"This\", \"here\", \"this function\" mean that place. A file marked as having unsaved edits is NEWER in the editor than on disk: what you read from disk may be stale, and the editor will not take your change to it, so say so and ask them to save (C-x C-s) before you edit it. A file with no unsaved edits is reloaded in the editor as soon as you change it.")
 
 ; ── What the editor shows, for the agent ───────────────────────────────────
 ; The agent reads files itself; what it cannot see is the USER — which file
@@ -171,6 +171,100 @@ How a host makes its agent out of the code profile:
 (define *agent-session-ref* (lambda (dir) (hash-table-ref/default *agent-sessions* dir #f)))
 (define *agent-session-set!* (lambda (dir id) (hash-table-set! *agent-sessions* dir id)))
 
+; ── The agent edits files; the buffers follow (A4) ─────────────────────────
+; It works on the files on disk, with its own tools and with whatever it
+; runs (a formatter rewrites what it likes). A buffer with NO edits of its
+; own is that file as it was, so when the file changes the buffer is
+; reloaded and says so. A buffer WITH unsaved edits is never touched: the
+; pane says, in red, that the two have parted, and how to choose.
+;
+; A changed file is found by its size and time (%os-stat), noted when a
+; request goes out — reading every open file on every step would be the
+; cost of the feature — and a file the agent's own edit tools NAMED is
+; compared by its text whatever the clock says.
+(define *agent-edit-tools* '("Edit" "Write" "MultiEdit" "NotebookEdit"))
+(define *agent-touched* '())                       ; files its edit tools named, this turn
+(define *agent-warned* '())                        ; and those already warned of
+(define *agent-file-marks* (make-hash-table equal?))   ; path -> (size modified)
+
+(define (%agent-file-mark path)
+  (let ((stat (%env-ref '%os-stat #f)))
+    (and stat
+         (let ((st (stat path)))
+           (and st (list (%alist-ref st :size #f) (%alist-ref st :modified #f)))))))
+
+(define (%agent-file-buffers)
+  ; (buffer path dirty?) for each buffer on a file that is text and exists.
+  (let ((eid (editor-pane-id)))
+    (if (not eid)
+        '()
+        (filter-map
+          (lambda (row)
+            (let ((path (buffer-path (car row))))
+              (and path (file-exists? path) (*writable-path?* path)
+                   (list (car row) path (positive? (cadr row))))))
+          (%editor-buffer-list eid)))))
+
+(define (agent-note-files)
+  "Note every open file as it is on disk now: what a later
+  sync-buffers-with-disk measures change from."
+  (for-each (lambda (b) (hash-table-set! *agent-file-marks* (cadr b) (%agent-file-mark (cadr b))))
+            (%agent-file-buffers)))
+
+(define (%agent-reload buf path)
+  ; BUF's text from PATH, when they differ; the cursor stays on its line.
+  ; #t when it was reloaded. (As a LOAD: the buffer's undo does not reach
+  ; back across it. Edits made in the buffer, undoable, are A6's.)
+  (let* ((eid (editor-pane-id))
+         (cur (%editor-active-buffer eid))
+         (there (equal? cur buf)))
+    (unless there (%editor-buffer-switch eid buf))
+    (let* ((disk (slurp path))
+           (changed (and disk
+                         (not (positive? (%editor-markdown? eid)))
+                         (not (equal? disk (%editor-text eid))))))
+      (when changed
+        (let ((line (car (%editor-cursor eid))))
+          (%editor-set-text eid disk)
+          (%editor-mark-saved eid)
+          (%editor-goto-line eid line)))
+      (unless there (%editor-buffer-switch eid cur))
+      (if changed #t #f))))
+
+(define (sync-buffers-with-disk)
+  "(sync-buffers-with-disk)  ->  the buffers reloaded
+
+Bring the open buffers up to their files — M-x sync-buffers-with-disk, and
+what the agent pane does after each of the agent's edits and at the end of
+every turn. A buffer with no unsaved edits whose file has changed is
+reloaded, the cursor kept on its line. A buffer WITH unsaved edits is left
+exactly as it is; when the agent changed that file, the pane says so —
+`:e!` takes the file's version, C-x C-s keeps yours."
+  (let ((reloaded '()))
+    (for-each
+      (lambda (b)
+        (let* ((buf (car b)) (path (cadr b)) (dirty (caddr b))
+               (touched (any (lambda (t) (same-file? t path)) *agent-touched*))
+               (mark (%agent-file-mark path))
+               (moved (or touched (not mark)
+                          (not (equal? mark (hash-table-ref/default *agent-file-marks* path mark))))))
+          (hash-table-set! *agent-file-marks* path mark)
+          (cond ((not moved) #f)
+                ((not dirty)
+                  (when (%agent-reload buf path)
+                    (set! reloaded (cons buf reloaded))
+                    (agent-append (string-append "↻ reloaded " (%text (buffer-name buf))) :dim)))
+                ((and touched (not (member path *agent-warned*)))
+                  (set! *agent-warned* (cons path *agent-warned*))
+                  (agent-append
+                    (string-append "✗ " (%text (buffer-name buf))
+                                   " has unsaved edits, and the agent changed its file — the buffer is NOT reloaded."
+                                   " :e! takes the file's version; C-x C-s keeps yours.")
+                    :error)))))
+      (%agent-file-buffers))
+    (unless (null? reloaded) (*buffers-changed*))
+    (reverse reloaded)))
+
 ; ── The transcript ─────────────────────────────────────────────────────────
 
 (define agent-prompt "agent> ")
@@ -288,12 +382,45 @@ How a host makes its agent out of the code profile:
 (define (%agent-first-line text)
   (car (string-split (string-trim-both text) "\n")))
 
+; The tool whose result comes next, and the tools whose results are not
+; worth a row: a file read back is the file, and an edit's "updated" is said
+; better by the buffer reloading.
+(define *agent-last-tool* #f)
+(define *agent-quiet-results* '("Read" "Edit" "Write" "MultiEdit" "NotebookEdit"))
+
+(define (%agent-in-project path)
+  ; PATH as the project sees it: without the turn's directory in front.
+  (let ((dir (and *agent-turn-dir* (string-append *agent-turn-dir* "/"))))
+    (cond ((and dir (string-prefix? dir path)) (substring path (string-length dir) (string-length path)))
+          ; (macOS: /var is /private/var, and the two spell one directory.)
+          ((and dir (string-prefix? (string-append "/private" dir) path))
+            (substring path (+ 8 (string-length dir)) (string-length path)))
+          (else path))))
+
+(define (%agent-head text lines width)
+  ; The first LINES lines of TEXT, each cut to WIDTH, and a mark when there
+  ; was more.
+  (let* ((all (string-split (string-trim-both text) "\n"))
+         (kept (let loop ((ls all) (n lines) (acc '()))
+                 (if (or (null? ls) (zero? n)) (reverse acc)
+                     (loop (cdr ls) (- n 1)
+                           (cons (if (> (string-length (car ls)) width)
+                                     (string-append (substring (car ls) 0 width) " …")
+                                     (car ls))
+                                 acc))))))
+    (string-append
+      (apply string-append (cdr (apply append (map (lambda (l) (list "\n" l)) kept))))
+      (if (> (length all) lines) "\n…" ""))))
+
 (define (agent-default-row kind a b)
-  ; How a step reads when the host has nothing to say about it.
+  ; How a step reads when the host has nothing to say about it: (style
+  ; text), or (#f) for no row at all.
   (cond ((equal? kind "text") (list :normal a))
         ((equal? kind "tool")
-          (list :dim (string-append "→ " a (if (equal? b "") "" (string-append " " (%agent-cut (%agent-first-line b) 160))))))
-        ((equal? kind "result") (list :dim (%agent-cut a 400)))
+          (list :dim (string-append "→ " a (if (equal? b "") ""
+                                               (string-append " " (%agent-cut (%agent-first-line (%agent-in-project b)) 160))))))
+        ((and (equal? kind "result") (member *agent-last-tool* *agent-quiet-results*)) (list #f))
+        ((equal? kind "result") (list :dim (%agent-head a 4 200)))
         ; A refusal is not a tool result like the others: the agent was
         ; asked for something and could not do it.
         ((equal? kind "denied") (list :error (string-append "✗ " a " was not allowed — " b)))
@@ -303,6 +430,12 @@ How a host makes its agent out of the code profile:
         (else (list :normal a))))
 
 (define (agent-turn-over status)
+  ; Whatever the turn left on disk — its last edit, a command's output —
+  ; the buffers have before the user looks.
+  (guard (e (#t #f)) (sync-buffers-with-disk))
+  (set! *agent-touched* '())
+  (set! *agent-warned* '())
+  (set! *agent-last-tool* #f)
   (set! *agent-steps* 0)
   (set! *agent-asks* '())
   (set! *agent-turn-dir* #f)
@@ -321,7 +454,9 @@ How a host makes its agent out of the code profile:
     (unless (member kind '("delta" "text")) (set! *agent-stream* #f))
     (cond
       ; ("ask" id tool arg why)
-      ((equal? kind "ask") (agent-asked a b (%list-ref/default row 3 "") (%list-ref/default row 4 "")))
+      ((equal? kind "ask")
+        (set! *agent-last-tool* b)
+        (agent-asked a b (%list-ref/default row 3 "") (%list-ref/default row 4 "")))
       ((equal? kind "delta")
         (when (agent-id)
           (agent-stream-draw (string-append (if *agent-stream* (vector-ref *agent-stream* 2) "") a))))
@@ -352,9 +487,16 @@ How a host makes its agent out of the code profile:
       ((equal? kind "auth-done") (unless (equal? a "") (agent-append a :dim)))
       ((equal? kind "auth-error") (agent-append (string-append "[agent] " a) :error))
       (else
+        ; An edit tool names its file BEFORE it writes; its result is when
+        ; the file has changed.
+        (when (and (equal? kind "tool") (member a *agent-edit-tools*) (not (equal? b "")))
+          (set! *agent-touched* (cons b *agent-touched*)))
+        (when (and (equal? kind "result") (pair? *agent-touched*))
+          (guard (e (#t #f)) (sync-buffers-with-disk)))
         (set! *agent-steps* (+ *agent-steps* 1))
         (let ((shown (or (*agent-row* kind a b) (agent-default-row kind a b))))
-          (agent-show (cadr shown) (car shown)))
+          (when (car shown) (agent-show (cadr shown) (car shown))))
+        (when (equal? kind "tool") (set! *agent-last-tool* a))
         (echo "agent: step " *agent-steps* " — "
               (cond ((equal? kind "tool") (string-append a " " (%agent-cut (%agent-first-line b) 60)))
                     ((equal? kind "metrics") a)
@@ -387,6 +529,7 @@ How a host makes its agent out of the code profile:
   (let* ((profile (agent-profile-now))
          (dir (%alist-ref profile :cwd ""))
          (session (*agent-session-ref* dir)))
+    (guard (e (#t #f)) (agent-note-files))
     (agent-append "thinking…" :dim)
     (set! *agent-pending* (- (%pane-row-count (agent-id)) 1))
     (set! *agent-turn-dir* dir)

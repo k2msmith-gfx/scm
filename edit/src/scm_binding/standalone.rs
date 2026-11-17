@@ -1598,6 +1598,115 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The agent edits files on disk, and the buffers follow (A4): a buffer
+    /// with no edits of its own shows the agent's change without `:e!` —
+    /// the one on screen and one that is not — and a buffer WITH unsaved
+    /// edits is left exactly as it is, the pane saying that they parted.
+    #[test]
+    fn a_buffer_follows_the_agents_edit_unless_it_has_edits_of_its_own() {
+        // Each request: the stand-in names both files to its Edit tool,
+        // appends a line to each, and reports.
+        let turn = r#"      for f in main.scm other.scm; do
+        printf '{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","name":"Edit","input":{"file_path":"%s"}}]}}\n' "$D/$f"
+        echo ';; the agent was here' >> "$D/$f"
+        echo '{"type":"user","message":{"content":[{"type":"tool_result","content":"updated"}]}}'
+      done
+      echo '{"type":"result","is_error":false,"result":"Both changed.","session_id":"s-1","num_turns":3}'"#;
+        let bin = crate::agent::fake_claude("follows", &crate::agent::fake_conversation(turn));
+        let dir = bin.parent().unwrap().to_string_lossy().into_owned();
+        let (main, other) = (format!("{dir}/main.scm"), format!("{dir}/other.scm"));
+        std::fs::write(&main, "(define a 1)\n(define b 2)\n").unwrap();
+        std::fs::write(&other, "(define c 3)\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, &[other.clone(), main.clone()]).expect("boot");
+        s.call(&format!(r#"(set! *agent-session-file* "{dir}/sessions.scm")
+                           (define ended '())
+                           (set! *agent-turn-ended* (lambda (status) (set! ended (cons status ended))))
+                           (set! *agent-profile* (lambda () (agent-profile-extend (agent-code-profile) :bin "{dir}/claude")))
+                           (focus-agent)
+                           (define (rows) (map (lambda (i) (%pane-row-text 5 i)) (iota (%pane-row-count 5))))"#));
+        let ask = |s: &mut Session, what: &str| {
+            s.call(&format!(r#"(set! ended '()) (agent-submit "{what}")"#));
+            let t0 = std::time::Instant::now();
+            while s.eval_to_string("(pair? ended)").as_deref() != Ok("#t") {
+                assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the turn never ended");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                s.poll();
+            }
+            s.eval_to_string("(rows)").unwrap()
+        };
+        assert_eq!(s.eval_to_string("(buffer-path (%editor-active-buffer 1))").unwrap(), format!("{main:?}"), "main.scm is on screen");
+        s.call("(%editor-goto-line 1 1)");
+
+        let rows = ask(&mut s, "change them");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(define a 1)\n(define b 2)\n;; the agent was here\n", "no :e! needed");
+        assert_eq!(s.eval_to_string("(%editor-dirty? 1)").unwrap(), "0", "and it is the file, not an edit");
+        assert_eq!(crate::editorpane::cursor(app::EDITOR).0, 1, "the cursor kept its line");
+        assert!(rows.contains("↻ reloaded main.scm") && rows.contains("↻ reloaded other.scm"), "{rows}");
+        assert_eq!(s.eval_to_string("(buffer-path (%editor-active-buffer 1))").unwrap(), format!("{main:?}"), "still on screen");
+        s.call(r#"(visit-buffer (buffer-by-name "other.scm"))"#);
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(define c 3)\n;; the agent was here\n", "the buffer that was not on screen, too");
+
+        // Unsaved edits in main.scm: the agent's change to its file does
+        // NOT reach the buffer, and the pane says so, once.
+        s.call(r#"(visit-buffer (buffer-by-name "main.scm")) (%editor-replace 1 0 0 0 0 ";; mine\n")"#);
+        let mine = crate::editorpane::text(app::EDITOR);
+        let rows = ask(&mut s, "and again");
+        assert_eq!(crate::editorpane::text(app::EDITOR), mine, "unsaved work is not overwritten");
+        assert_eq!(rows.matches("✗ main.scm has unsaved edits").count(), 1, "{rows}");
+        assert_eq!(rows.matches("↻ reloaded other.scm").count(), 2, "the clean one followed again: {rows}");
+        assert!(std::fs::read_to_string(&main).unwrap().ends_with(";; the agent was here\n;; the agent was here\n"));
+        // What the agent was told about that buffer, before it edited.
+        let sent = std::fs::read_to_string(format!("{dir}/stdin")).unwrap();
+        assert!(sent.lines().nth(1).unwrap().contains("main.scm (unsaved edits)"), "{sent}");
+
+        // A file changed by something else — a command it ran — is found at
+        // the end of the turn by its size and time; M-x does the same.
+        std::fs::write(&other, "(define c 4)\n").unwrap();
+        s.call("(sync-buffers-with-disk) (visit-buffer (buffer-by-name \"other.scm\"))");
+        assert_eq!(crate::editorpane::text(app::EDITOR), "(define c 4)\n");
+        crate::agent::stop();
+        app::show_agent(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A4's exit, against the REAL `claude` on this machine's login (one
+    /// small turn, so by hand: `cargo test -p edit --lib
+    /// the_real_claude_fixes -- --ignored`): a planted bug in the open
+    /// buffer, a request that says only "this line", and the fix on screen.
+    #[test]
+    #[ignore = "spends a real turn on the logged-in Claude subscription"]
+    fn the_real_claude_fixes_a_bug_in_the_open_buffer() {
+        let dir = std::env::temp_dir().join(format!("edit-agent-real-fix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        let file = format!("{dir}/area.py");
+        std::fs::write(&file, "def area(width, height):\n    return width + height\n").unwrap();
+        app::resize(1200, 700, 1.0);
+        let mut s = Session::boot(None, std::slice::from_ref(&file)).expect("boot");
+        s.call(&format!(r#"(set! *agent-session-file* "{dir}/sessions.scm")
+                           (define ended '())
+                           (set! *agent-turn-ended* (lambda (status) (set! ended (cons status ended))))
+                           (set! *agent-model* "haiku")
+                           (%editor-goto-line 1 1)
+                           (focus-agent)
+                           (agent-submit "The line my cursor is on has a bug: an area is not a sum. Fix it in the file.")"#));
+        let t0 = std::time::Instant::now();
+        while s.eval_to_string("(pair? ended)").as_deref() != Ok("#t") {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(120), "the turn never ended");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            s.poll();
+        }
+        let rows = s.eval_to_string("(map (lambda (i) (%pane-row-text 5 i)) (iota (%pane-row-count 5)))").unwrap();
+        eprintln!("{}", rows.replace("\" \"", "\n"));
+        assert_eq!(s.eval_to_string("ended").unwrap(), "(\"done\")", "{rows}");
+        assert!(crate::editorpane::text(app::EDITOR).contains("width * height"), "the buffer shows the fix: {:?}", crate::editorpane::text(app::EDITOR));
+        assert!(rows.contains("↻ reloaded area.py"), "{rows}");
+        crate::agent::stop();
+        app::show_agent(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// The terminal runs the LOGIN shell, not $SHELL: under `nix develop`
     /// $SHELL is a bash without readline, and Tab completed nothing (Kevin,
     /// 2026-11-14). Here: the login shell, then Tab completing in it.

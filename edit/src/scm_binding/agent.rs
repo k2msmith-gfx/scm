@@ -206,10 +206,11 @@ EOF"#;
         assert_eq!(texts(eval(&mut interp, "(rows)")), ["you> fix", "thinking…"], "it says it is working");
         let rows = settle(&mut interp, "(pair? ended)");
         assert_eq!(rows[0], "you> fix");
-        assert_eq!(&rows[1..6], ["I'll fix it.", "One moment.", "→ Edit /p/main.rs", "updated", "✗ Bash was not allowed — This command requires approval"]);
-        assert_eq!(rows[6], "Fixed.");
-        assert!(rows[7].starts_with("· ") && rows[7].contains("2 turns · 1 tools"), "the meter: {rows:?}");
-        assert_eq!(rows.len(), 8, "the summary only repeated the last text, so it is not drawn again: {rows:?}");
+        // (No row for the Edit's "updated": a buffer reloading says it.)
+        assert_eq!(&rows[1..5], ["I'll fix it.", "One moment.", "→ Edit /p/main.rs", "✗ Bash was not allowed — This command requires approval"]);
+        assert_eq!(rows[5], "Fixed.");
+        assert!(rows[6].starts_with("· ") && rows[6].contains("2 turns · 1 tools"), "the meter: {rows:?}");
+        assert_eq!(rows.len(), 7, "the summary only repeated the last text, so it is not drawn again: {rows:?}");
         assert_eq!(eval(&mut interp, "ended"), Val::List(vec![Val::Str("done".into())]));
         let first = argv();
         assert!(first.contains("--permission-mode\nacceptEdits\n") && first.contains("--permission-prompt-tool\nstdio\n"), "{first}");
