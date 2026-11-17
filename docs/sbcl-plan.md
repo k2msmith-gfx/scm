@@ -1,7 +1,7 @@
 # Common Lisp in `edit`, through SBCL — plan, 2026-11-17
 
-**IN PROGRESS.** L0 (the measurements) and L1 (the server) are done; both
-are below. Kevin, 2026-11-17: *"I would probably switch to edit if it
+**IN PROGRESS.** L0 (the measurements), L1 (the server) and L2 (the
+language) are done; each is below. Kevin, 2026-11-17: *"I would probably switch to edit if it
 supported all of the L features"* — so all of L1–L7, in D6's order (L1–L3,
 L7, L4–L6), with each decision as recommended.
 
@@ -127,7 +127,7 @@ Guile's do without Guile.
 |---|---|---|
 | **L0** ✔ | Measure SBCL (above). | this table |
 | **L1** ✔ | **The server.** `edit/sbcl/serve.lisp`: a listener on the address it is given, a thread for each connection; `eval` (every form of the text, in order; the last one's values; what was printed; warnings collected and returned with the output), an error as its message with the calls it raised in, `complete`, `describe`, `parse`, `ping`, and `interrupt` from a second connection. The debugger never opens: `sb-ext:*invoke-debugger-hook*` answers an error instead. `*standard-input*` is empty, so a `(read-line)` ends rather than hangs. | the protocol's own conformance, driven from Rust as `remote.rs`'s tests drive scm and Guile: a value, output with a failure, a multi-form send, completion of a name just defined, describe with docstring and lambda list, an interrupt of `(loop)` that leaves the server up |
-| **L2** | **The language.** `language/lisp.rs`: Scheme's scanner with Common Lisp's differences — `#\|…\|#`, `#\\Space`, `\|a symbol\|`, `#'f`, `#+x`/`#-x`, `:keyword` and `#:uninterned`, `pkg:name`; indentation by a table of body forms (`defun`, `let`, `when`, `flet`, `loop`…); the bracket marks Guile's has. Structural editing allowed for it. | a file of awkward cases highlights and indents as expected; a stray `)` and an open form are marked with no SBCL running |
+| **L2** ✔ | **The language.** `language/lisp.rs`: Scheme's scanner with Common Lisp's differences — `#\|…\|#`, `#\\Space`, `\|a symbol\|`, `#'f`, `#+x`/`#-x`, `:keyword` and `#:uninterned`, `pkg:name`; indentation by a table of body forms (`defun`, `let`, `when`, `flet`, `loop`…); the bracket marks Guile's has. Structural editing allowed for it. | a file of awkward cases highlights and indents as expected; a stray `)` and an open form are marked with no SBCL running |
 | **L3** | **The shell.** `27-lisp.scm`: `sbcl-start`/`-stop`, `lisp-mode`, detection (`.lisp`, `.lsp`, `.cl`, `.asd`), the backend (the remote backend, with `:complete`, `:doc`, `:signature` asking in the buffer's package), the running-process hook so TAB asks SBCL, the buffer's package from its `in-package`, the REPL panel's prompt (`CL-USER> `, following the REPL's package) and its own "is this whole?" (brackets — scm's reader does not read `#'f`). | against a real SBCL: each send key, `=> 49`, `=> SQ` for a `defun` (which Common Lisp answers itself), an error's message, describe on a name and on an argument, TAB in the buffer and at the REPL offering a function just sent, a two-package file sending each form to its own package |
 | **L4** | **Read marks.** SBCL's reader on the buffer's text, through `readcheck.rs` as built: `edit-serve:read-check` reads in a throwaway package with the buffer's use-list and `*read-eval*` nil, and answers where it stopped. | `#\\notachar` and `(foo:bar)` are marked on their line in SBCL's words; `#.(…)` is not; mending clears the mark; reading leaves no symbol behind in the user's package |
 | **L5** | **`M-.`.** Ask SBCL where a name is defined (`sb-introspect`), falling back on the editor's own index of `defun`/`defmacro`/`defvar` forms for a file never loaded. | `M-.` on a call jumps to its `defun` in another file, loaded or not; `M-,` comes back |
@@ -205,6 +205,50 @@ Tests (`remote.rs`, `sbcl_tests`, skipped without `sbcl`):
 `sbcl_answers_the_protocol` (every case above, through `remote.rs`'s own
 `start` and `ask`) and `an_interrupt_stops_sbcl_and_it_stays_up`.
 `compile-file` of the server is free of warnings.
+
+## L2 as built (2026-11-17)
+
+`edit/src/language/lisp.rs`, the language `lisp` ("Lisp" on the modeline).
+
+- **Its own tokens.** scm-text reads Scheme, and probing it on Common Lisp
+  found three places where that moves brackets: `|a (b|` split at the
+  space (and opened a list), `[ ] { }` taken as brackets when CL reads them
+  as letters, and `#'f` read as a stray `#` and a quote. So `lisp::tokens`
+  splits the text as CL's reader does — `|…|` and `\x` escapes in symbols,
+  nesting `#|…|#`, `#\Space`, and `#'`, `#.`, `#+`, `#-`, `#p`, `#c`,
+  `#2A`, `#S`, `#1=` and a vector's `#` as PREFIXES of the datum after
+  them — into scm-text's own `Token`s. Everything downstream takes them
+  as it takes Scheme's.
+- **Shared with Scheme, not copied.** `scheme.rs`'s placement, clean line
+  starts, scan and incremental re-scan became `Tokens::of` (with a
+  `Dialect`), `scan_tokens` and `rescan_with`; Scheme and Lisp both call
+  them, and only an atom's colour asks the dialect. The re-scan is checked
+  against a full scan over random edits for Lisp as it is for Scheme.
+- **Colours**: `:key`, `#:sym` and `&key` as keywords; `t`, `nil`, numbers
+  (`1/2`, `2.5d0`, `#x1F`, not `1+`) and characters as literals; a feature
+  expression (`#+sbcl`) as a keyword; the name after `#'` as a call; a
+  form's head as a call, except a quoted list's or a vector's or an
+  array's.
+- **Indentation is Emacs's Common Lisp's**: a body form (`defun`, `let`,
+  `when`, `handler-case`, anything `def…`, `with-…` or `do-…`) indents its
+  body two in; a call's arguments line up under the first when the first
+  is on the head's line, and under the head when not; `if` lines up its
+  arguments, as CL style has it; a local function in `flet`, `labels` or
+  `macrolet` indents its body two in from its `(f`; data (`'(…)`, `#(…)`)
+  lines up under its first element.
+- **Bracket marks** need no SBCL: Guile's check, now `guile::bracket_marks`
+  and shared. A stray `)` is an error where it stands; a form left open is
+  marked quietly at its outermost `(`.
+- **Structural editing** (the `C-M-` keys, paredit's, pairing, vi's `%`)
+  is on for Lisp, over Lisp's tokens (`Sexps::with_tokens`): `|a (b|`,
+  `#'g` and `#(1 2)` each move as one expression. `[` and `{` are not
+  paired in Lisp, being letters there. Rename stays Scheme's — its scope
+  analysis is Scheme's binding forms.
+- The agent's replies colour a ```` ```lisp ````, ```` ```common-lisp ````
+  or ```` ```cl ```` block as a Lisp buffer is coloured.
+
+Not yet: nothing opens a `.lisp` file as Lisp, and nothing sends — that is
+L3's.
 
 ## Risks
 

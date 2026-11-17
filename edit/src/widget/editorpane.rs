@@ -1886,7 +1886,18 @@ pub fn set_pairing(on: bool) {
 
 /// Does this buffer read as Lisp, where expressions are the unit?
 fn lispy(lang: &'static dyn language::Language) -> bool {
-    matches!(lang.name(), "scheme" | "guile")
+    matches!(lang.name(), "scheme" | "guile" | "lisp")
+}
+
+/// The text's expressions, split as the buffer's language reads it:
+/// Common Lisp's tokens are its own (`|a (b|` is one symbol), the Schemes'
+/// are scm-text's.
+fn sexps(lang: &'static dyn language::Language, text: &str) -> crate::sexp::Sexps {
+    if lang.name() == "lisp" {
+        crate::sexp::Sexps::with_tokens(text, language::lisp::tokens(text))
+    } else {
+        crate::sexp::Sexps::new(text)
+    }
 }
 
 /// The buffer's text as one string, and the cursor as a char offset in it.
@@ -1944,11 +1955,15 @@ fn pair_typed(e: &mut Editor<'static>, lang: &'static dyn language::Language, ch
     if !PAIRING.with(|p| p.get()) || !lispy(lang) || !matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"') {
         return false;
     }
+    // In Common Lisp `[` and `{` are letters like any other.
+    if lang.name() == "lisp" && matches!(ch, '[' | ']' | '{' | '}') {
+        return false;
+    }
     if !matches!(e.selection(), Selection::None) {
         return false;
     }
     let (text, p) = text_and_point(e);
-    match crate::sexp::Sexps::new(&text).type_char(p, ch) {
+    match sexps(lang, &text).type_char(p, ch) {
         Some(c) => {
             apply_change(e, &c);
             true
@@ -1965,10 +1980,10 @@ fn pair_deleted(e: &mut Editor<'static>, lang: &'static dyn language::Language, 
     }
     let (text, p) = text_and_point(e);
     let near = if forward { text.chars().nth(p) } else { p.checked_sub(1).and_then(|q| text.chars().nth(q)) };
-    if !matches!(near, Some('(' | ')' | '[' | ']' | '{' | '}' | '"')) {
+    if !matches!(near, Some('(' | ')' | '[' | ']' | '{' | '}' | '"')) || (lang.name() == "lisp" && !matches!(near, Some('(' | ')' | '"'))) {
         return false;
     }
-    let s = crate::sexp::Sexps::new(&text);
+    let s = sexps(lang, &text);
     match if forward { s.delete_forward(p) } else { s.backspace(p) } {
         Some(c) => {
             apply_change(e, &c);
@@ -2008,7 +2023,7 @@ pub fn sexp(id: u32, op: &str) -> SexpOut {
         if op == "indent-defun" {
             let lines_of = |e: &Editor<'static>, s: usize, t: usize| (cursor_at(e, s).line, cursor_at(e, t).line);
             let (text, p) = text_and_point(&pane.editor);
-            let sx = crate::sexp::Sexps::new(&text);
+            let sx = sexps(pane.lang, &text);
             let (l0, l1, first) = match pane.editor.selection_bounds() {
                 Some((a, b)) => (a.line, if b.index == 0 && b.line > a.line { b.line - 1 } else { b.line }, true),
                 None if lispy(pane.lang) => match sx.toplevel_at(p) {
@@ -2056,7 +2071,7 @@ pub fn sexp(id: u32, op: &str) -> SexpOut {
         }
         if op == "form-text" {
             let (text, p) = text_and_point(&pane.editor);
-            return match crate::sexp::Sexps::new(&text).form_at(p) {
+            return match sexps(pane.lang, &text).form_at(p) {
                 Some((a, b)) => SexpOut::Text(text.chars().skip(a).take(b - a).collect()),
                 None => SexpOut::Nothing,
             };
@@ -2082,7 +2097,7 @@ pub fn sexp(id: u32, op: &str) -> SexpOut {
             return SexpOut::Done;
         }
         let (text, p) = text_and_point(&pane.editor);
-        let s = crate::sexp::Sexps::new(&text);
+        let s = sexps(pane.lang, &text);
         let moved = |pane: &mut Doc, to: Option<usize>| match to {
             Some(q) => {
                 pane.close_insert_run();
@@ -2250,7 +2265,7 @@ pub fn act(id: u32, kind: &str, arg: Option<&str>, x: f64, y: f64) -> Option<Str
                             && pane.vi.cmd.to_string().is_empty()
                         {
                             let (text, p) = text_and_point(&pane.editor);
-                            if let Some(q) = crate::sexp::Sexps::new(&text).matching(p) {
+                            if let Some(q) = sexps(pane.lang, &text).matching(p) {
                                 let at = cursor_at(&pane.editor, q);
                                 pane.editor.set_cursor(at);
                             }
@@ -3682,7 +3697,7 @@ fn modeline_left(doc: &Doc, diags: &[language::Diagnostic]) -> String {
     // A Lisp's error is its reader's; another language's is its server's
     // (rust-analyzer's type error), which reads fine.
     if let Some(d) = diags.iter().find(|d| d.is_error()) {
-        let what = if matches!(doc.lang.name(), "scheme" | "guile") { "unreadable" } else { "error" };
+        let what = if lispy(doc.lang) { "unreadable" } else { "error" };
         left = format!("{left} · {what} at line {}", d.start.0 + 1);
     }
     // Warnings are counted, not placed: M-g n goes to them.

@@ -825,12 +825,13 @@ exactly as it is; when the agent changed that file, the pane says so —
 ;   Append to buffer   onto its end, after a blank line
 ; A row's style is where the block is remembered: the menu reads the rows
 ; under the header back, so nothing has to be kept beside the transcript.
-(define *agent-lisps* '("lisp" "elisp" "emacs-lisp" "clojure" "racket" "janet" "common-lisp" "cl"))
+(define *agent-lisps* '("elisp" "emacs-lisp" "clojure" "racket" "janet"))
 ; A fence's language -> the editor language that colours it: the scanner the
 ; editor's own buffers are coloured by, so an example reads as the file
 ; beside it does.
 (define *agent-block-languages*
-  '(("rust" . "rust") ("rs" . "rust") ("scheme" . "scheme") ("scm" . "scheme") ("guile" . "guile")))
+  '(("rust" . "rust") ("rs" . "rust") ("scheme" . "scheme") ("scm" . "scheme") ("guile" . "guile")
+    ("lisp" . "lisp") ("common-lisp" . "lisp") ("cl" . "lisp")))
 
 (define (%agent-block-style fence)
   ; The style a block opened by FENCE's language is drawn in.

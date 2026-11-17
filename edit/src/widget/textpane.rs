@@ -109,6 +109,7 @@ impl Style {
             Self::BlockCode => "block-code",
             Self::BlockIn("rust") => "block:rust",
             Self::BlockIn("guile") => "block:guile",
+            Self::BlockIn("lisp") => "block:lisp",
             Self::BlockIn(_) => "block:scheme",
             Self::BlockHead => "block-head",
         }

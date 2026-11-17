@@ -42,8 +42,13 @@ fn closer(open: char) -> char {
 
 impl Sexps {
     pub fn new(text: &str) -> Sexps {
-        let doc = Doc::new(text);
-        let toks = doc.tokens().to_vec();
+        Sexps::with_tokens(text, Doc::new(text).tokens().to_vec())
+    }
+
+    /// The same over tokens a language other than Scheme split the text
+    /// into — Common Lisp's (`language::lisp::tokens`), whose `|a (b|` is
+    /// one symbol.
+    pub fn with_tokens(text: &str, toks: Vec<Token>) -> Sexps {
         let mut partner = vec![None; toks.len()];
         let mut stack = Vec::new();
         for (i, t) in toks.iter().enumerate() {

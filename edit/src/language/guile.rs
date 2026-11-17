@@ -52,34 +52,40 @@ impl Language for Guile {
         super::SCHEME.enclosing_head(lines, line, byte)
     }
 
-    /// The brackets, which are the same in every Scheme: a closer with
-    /// nothing to close (or closing the wrong kind) is an error where it
-    /// stands; a form left open at the end is marked quietly at its
-    /// outermost opener, as scm's Scheme marks one. The scan's brackets are
-    /// the code's — none from inside a string, a comment or a `#\(`.
+    /// The brackets, which are the same in every Scheme: [`bracket_marks`].
     fn diagnose(&self, lines: &[&str], scan: &Scan) -> Vec<Diagnostic> {
-        let mut open: Vec<u8> = Vec::new();
-        for p in &scan.parens {
-            let closes = match p.ch {
-                b')' => b'(',
-                b']' => b'[',
-                b'}' => b'{',
-                opener => {
-                    open.push(opener);
-                    continue;
-                }
-            };
-            let message = match open.pop() {
-                Some(opener) if opener == closes => continue,
-                Some(opener) => format!("`{}` closes a `{}`", p.ch as char, opener as char),
-                None => format!("`{}` closes nothing", p.ch as char),
-            };
-            return vec![Diagnostic { start: (p.line, p.byte), end: (p.line, p.byte + 1), message, severity: super::Severity::Error }];
-        }
-        // (A string or a `#|` comment left open is Guile's to say: its
-        // reader's, when one is running.)
-        if open.is_empty() { Vec::new() } else { super::scheme::open_end(lines, scan) }
+        bracket_marks(lines, scan)
     }
+}
+
+/// What is wrong with the brackets, which needs no reader: a closer with
+/// nothing to close (or closing the wrong kind) is an error where it
+/// stands; a form left open at the end is marked quietly at its outermost
+/// opener, as scm's Scheme marks one. The scan's brackets are the code's —
+/// none from inside a string, a comment or a `#\(`. Guile's and Common
+/// Lisp's (whose readers are asked the rest, when one is running).
+pub(super) fn bracket_marks(lines: &[&str], scan: &Scan) -> Vec<Diagnostic> {
+    let mut open: Vec<u8> = Vec::new();
+    for p in &scan.parens {
+        let closes = match p.ch {
+            b')' => b'(',
+            b']' => b'[',
+            b'}' => b'{',
+            opener => {
+                open.push(opener);
+                continue;
+            }
+        };
+        let message = match open.pop() {
+            Some(opener) if opener == closes => continue,
+            Some(opener) => format!("`{}` closes a `{}`", p.ch as char, opener as char),
+            None => format!("`{}` closes nothing", p.ch as char),
+        };
+        return vec![Diagnostic { start: (p.line, p.byte), end: (p.line, p.byte + 1), message, severity: super::Severity::Error }];
+    }
+    // (A string or a `#|` comment left open is the reader's to say, when
+    // one is running.)
+    if open.is_empty() { Vec::new() } else { super::scheme::open_end(lines, scan) }
 }
 
 #[cfg(test)]

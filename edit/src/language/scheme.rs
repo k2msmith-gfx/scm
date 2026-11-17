@@ -38,36 +38,7 @@ impl Language for Scheme {
     }
 
     fn scan(&self, lines: &[&str]) -> Scan {
-        let toks = Tokens::new(lines);
-        let mut out = Scan { spans: vec![Vec::new(); lines.len()], parens: Vec::new(), clean: toks.clean_lines() };
-        let span = |out: &mut Scan, (l0, b0): (usize, usize), (l1, b1): (usize, usize), t: Tok| {
-            for (l, line) in lines.iter().enumerate().take(l1 + 1).skip(l0) {
-                let s = if l == l0 { b0 } else { 0 };
-                let e = if l == l1 { b1 } else { line.len() };
-                if let Some(v) = out.spans.get_mut(l) {
-                    v.push((s, e, t));
-                }
-            }
-        };
-        for (i, p) in toks.placed.iter().enumerate() {
-            match p.tok.kind {
-                Kind::Comment => span(&mut out, p.start, p.end, Tok::Comment),
-                Kind::Str => span(&mut out, p.start, p.end, Tok::Str),
-                Kind::Prefix if toks.is_datum_comment(i) => span(&mut out, p.start, p.end, Tok::Comment),
-                Kind::Prefix => {}
-                Kind::Open | Kind::Close => {
-                    let ch = lines[p.start.0].as_bytes()[p.start.1];
-                    out.parens.push(ParenPos { line: p.start.0, byte: p.start.1, ch });
-                    span(&mut out, p.start, p.end, Tok::Paren);
-                }
-                Kind::Atom => {
-                    if let Some(tok) = toks.class(i) {
-                        span(&mut out, p.start, p.end, tok);
-                    }
-                }
-            }
-        }
-        out
+        scan_tokens(lines, &Tokens::new(lines))
     }
 
     /// Re-scan from the last clean line start at or before the edit to the
@@ -77,55 +48,7 @@ impl Language for Scheme {
     /// — a string just opened — it runs on to the next clean line, and at
     /// worst to the end.
     fn rescan(&self, old: &Scan, old_lines: &[String], lines: &[&str]) -> Option<Rescan> {
-        let (on, nn) = (old_lines.len(), lines.len());
-        // A buffer that never had text has no lines at all (cosmic-text's
-        // fresh buffer): nothing to keep, and no line 0 to start from — the
-        // UI harness found that one (2026-11-16).
-        if on == 0 || nn == 0 || old.clean.len() != on || old.spans.len() != on {
-            return None;
-        }
-        let prefix = old_lines.iter().zip(lines).take_while(|(a, b)| a.as_str() == **b).count();
-        let room = on.min(nn) - prefix;
-        let suffix = old_lines.iter().rev().zip(lines.iter().rev()).take(room).take_while(|(a, b)| a.as_str() == **b).count();
-        let start = (0..=prefix.min(on.saturating_sub(1))).rev().find(|&l| old.clean[l]).unwrap_or(0);
-        // Old lines from here down are the edit's unchanged suffix.
-        let first_kept = on - suffix;
-        let shift = |l: usize| l + nn - on;
-        for old_end in (first_kept..=on).filter(|&k| k == on || old.clean[k]) {
-            let new_end = shift(old_end);
-            if new_end < start {
-                continue;
-            }
-            // A probe line after the stretch says how the stretch ends: one
-            // space, so that a string or comment left open runs INTO it (an
-            // empty line would start exactly where the open token ends, and
-            // look clean).
-            // (Running to the end of the text, there is nothing below to
-            // hold, and no probe.)
-            let to_end = new_end == nn;
-            let probe = if to_end { None } else { Some(" ") };
-            let part: Vec<&str> = lines[start..new_end].iter().copied().chain(probe).collect();
-            let mut scan = self.scan(&part);
-            // The stretch must end clean for the old scan below to hold.
-            if !to_end {
-                let ends_clean = scan.clean.pop().unwrap_or(true);
-                scan.spans.pop();
-                if !ends_clean {
-                    continue;
-                }
-            }
-            let mut spans = old.spans[..start].to_vec();
-            spans.extend(scan.spans);
-            spans.extend_from_slice(&old.spans[old_end..]);
-            let mut clean = old.clean[..start].to_vec();
-            clean.extend(scan.clean);
-            clean.extend_from_slice(&old.clean[old_end..]);
-            let mut parens: Vec<ParenPos> = old.parens.iter().filter(|p| p.line < start).copied().collect();
-            parens.extend(scan.parens.iter().filter(|p| p.line < new_end - start).map(|p| ParenPos { line: p.line + start, ..*p }));
-            parens.extend(old.parens.iter().filter(|p| p.line >= old_end).map(|p| ParenPos { line: shift(p.line), ..*p }));
-            return Some(Rescan { scan: Scan { spans, parens, clean }, start, old_end, new_end });
-        }
-        None
+        rescan_with(self, old, old_lines, lines)
     }
 
     /// The innermost unclosed bracket's column + 2 for a `(` (the Lisp
@@ -181,6 +104,98 @@ impl Language for Scheme {
             ReadCheck::Incomplete => open_end(lines, scan),
         }
     }
+}
+
+/// A buffer's scan from its tokens, placed: the highlight spans, the
+/// brackets and the clean line starts. Scheme's and Common Lisp's (whose
+/// tokens are its own, `lisp::tokens`) are both this.
+pub(super) fn scan_tokens(lines: &[&str], toks: &Tokens) -> Scan {
+    let mut out = Scan { spans: vec![Vec::new(); lines.len()], parens: Vec::new(), clean: toks.clean_lines() };
+    let span = |out: &mut Scan, (l0, b0): (usize, usize), (l1, b1): (usize, usize), t: Tok| {
+        for (l, line) in lines.iter().enumerate().take(l1 + 1).skip(l0) {
+            let s = if l == l0 { b0 } else { 0 };
+            let e = if l == l1 { b1 } else { line.len() };
+            if let Some(v) = out.spans.get_mut(l) {
+                v.push((s, e, t));
+            }
+        }
+    };
+    for (i, p) in toks.placed.iter().enumerate() {
+        match p.tok.kind {
+            Kind::Comment => span(&mut out, p.start, p.end, Tok::Comment),
+            Kind::Str => span(&mut out, p.start, p.end, Tok::Str),
+            Kind::Prefix => {
+                if let Some(tok) = toks.prefix_class(i) {
+                    span(&mut out, p.start, p.end, tok);
+                }
+            }
+            Kind::Open | Kind::Close => {
+                let ch = lines[p.start.0].as_bytes()[p.start.1];
+                out.parens.push(ParenPos { line: p.start.0, byte: p.start.1, ch });
+                span(&mut out, p.start, p.end, Tok::Paren);
+            }
+            Kind::Atom => {
+                if let Some(tok) = toks.class(i) {
+                    span(&mut out, p.start, p.end, tok);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// [`Language::rescan`] for a language whose scan says where its clean
+/// line starts are: Scheme's, and Common Lisp's.
+pub(super) fn rescan_with(lang: &dyn Language, old: &Scan, old_lines: &[String], lines: &[&str]) -> Option<Rescan> {
+    let (on, nn) = (old_lines.len(), lines.len());
+    // A buffer that never had text has no lines at all (cosmic-text's
+    // fresh buffer): nothing to keep, and no line 0 to start from — the
+    // UI harness found that one (2026-11-16).
+    if on == 0 || nn == 0 || old.clean.len() != on || old.spans.len() != on {
+        return None;
+    }
+    let prefix = old_lines.iter().zip(lines).take_while(|(a, b)| a.as_str() == **b).count();
+    let room = on.min(nn) - prefix;
+    let suffix = old_lines.iter().rev().zip(lines.iter().rev()).take(room).take_while(|(a, b)| a.as_str() == **b).count();
+    let start = (0..=prefix.min(on.saturating_sub(1))).rev().find(|&l| old.clean[l]).unwrap_or(0);
+    // Old lines from here down are the edit's unchanged suffix.
+    let first_kept = on - suffix;
+    let shift = |l: usize| l + nn - on;
+    for old_end in (first_kept..=on).filter(|&k| k == on || old.clean[k]) {
+        let new_end = shift(old_end);
+        if new_end < start {
+            continue;
+        }
+        // A probe line after the stretch says how the stretch ends: one
+        // space, so that a string or comment left open runs INTO it (an
+        // empty line would start exactly where the open token ends, and
+        // look clean).
+        // (Running to the end of the text, there is nothing below to
+        // hold, and no probe.)
+        let to_end = new_end == nn;
+        let probe = if to_end { None } else { Some(" ") };
+        let part: Vec<&str> = lines[start..new_end].iter().copied().chain(probe).collect();
+        let mut scan = lang.scan(&part);
+        // The stretch must end clean for the old scan below to hold.
+        if !to_end {
+            let ends_clean = scan.clean.pop().unwrap_or(true);
+            scan.spans.pop();
+            if !ends_clean {
+                continue;
+            }
+        }
+        let mut spans = old.spans[..start].to_vec();
+        spans.extend(scan.spans);
+        spans.extend_from_slice(&old.spans[old_end..]);
+        let mut clean = old.clean[..start].to_vec();
+        clean.extend(scan.clean);
+        clean.extend_from_slice(&old.clean[old_end..]);
+        let mut parens: Vec<ParenPos> = old.parens.iter().filter(|p| p.line < start).copied().collect();
+        parens.extend(scan.parens.iter().filter(|p| p.line < new_end - start).map(|p| ParenPos { line: p.line + start, ..*p }));
+        parens.extend(old.parens.iter().filter(|p| p.line >= old_end).map(|p| ParenPos { line: shift(p.line), ..*p }));
+        return Some(Rescan { scan: Scan { spans, parens, clean }, start, old_end, new_end });
+    }
+    None
 }
 
 /// What reading one top-level stretch said, offsets in its own text.
@@ -288,31 +303,41 @@ pub fn set_reader(read: fn(&str) -> ReadCheck) {
 }
 
 /// A token, and where it starts and ends as (line, byte).
-struct Placed {
-    tok: Token,
-    start: (usize, usize),
-    end: (usize, usize),
+pub(super) struct Placed {
+    pub(super) tok: Token,
+    pub(super) start: (usize, usize),
+    pub(super) end: (usize, usize),
+}
+
+/// Whose tokens they are: the scan, the clean lines and the brackets are
+/// the same for both; what an atom is coloured as is not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Dialect {
+    Scheme,
+    Lisp,
 }
 
 /// The buffer's tokens, placed.
-struct Tokens<'a> {
-    lines: &'a [&'a str],
-    placed: Vec<Placed>,
+pub(super) struct Tokens<'a> {
+    pub(super) lines: &'a [&'a str],
+    pub(super) placed: Vec<Placed>,
+    dialect: Dialect,
 }
 
 impl<'a> Tokens<'a> {
     fn new(lines: &'a [&'a str]) -> Self {
         let doc = scm_text::Doc::new(&lines.join("\n"));
-        let mut walk = Walker::new(lines);
-        let placed = doc
-            .tokens()
-            .iter()
-            .map(|&tok| Placed { tok, start: walk.at(tok.start), end: walk.at(tok.end) })
-            .collect();
-        Tokens { lines, placed }
+        Self::of(lines, Dialect::Scheme, doc.tokens())
     }
 
-    fn text(&self, i: usize) -> &'a str {
+    /// TOKS, in characters over `lines` joined by newlines, placed.
+    pub(super) fn of(lines: &'a [&'a str], dialect: Dialect, toks: &[Token]) -> Self {
+        let mut walk = Walker::new(lines);
+        let placed = toks.iter().map(|&tok| Placed { tok, start: walk.at(tok.start), end: walk.at(tok.end) }).collect();
+        Tokens { lines, placed, dialect }
+    }
+
+    pub(super) fn text(&self, i: usize) -> &'a str {
         let p = &self.placed[i];
         if p.start.0 == p.end.0 {
             &self.lines[p.start.0][p.start.1..p.end.1]
@@ -324,13 +349,22 @@ impl<'a> Tokens<'a> {
     }
 
     fn is_datum_comment(&self, i: usize) -> bool {
-        self.placed[i].tok.kind == Kind::Prefix && self.text(i) == "#;"
+        self.dialect == Dialect::Scheme && self.placed[i].tok.kind == Kind::Prefix && self.text(i) == "#;"
+    }
+
+    /// A prefix's highlight class: Scheme's `#;` comments its datum out;
+    /// Common Lisp's are its own (`lisp::prefix_class`).
+    fn prefix_class(&self, i: usize) -> Option<Tok> {
+        match self.dialect {
+            Dialect::Scheme => self.is_datum_comment(i).then_some(Tok::Comment),
+            Dialect::Lisp => super::lisp::prefix_class(self.text(i)),
+        }
     }
 
     /// Which lines start clean: outside any token (a string or a `#|`
     /// comment running across lines), at depth 0, with no prefix (`'`,
     /// `#;`) waiting for its datum.
-    fn clean_lines(&self) -> Vec<bool> {
+    pub(super) fn clean_lines(&self) -> Vec<bool> {
         let mut out = Vec::with_capacity(self.lines.len());
         let (mut i, mut depth, mut waiting, mut spans) = (0usize, 0usize, false, false);
         for l in 0..self.lines.len() {
@@ -359,6 +393,9 @@ impl<'a> Tokens<'a> {
 
     /// An atom's highlight class, or `None` for plain body text.
     fn class(&self, i: usize) -> Option<Tok> {
+        if self.dialect == Dialect::Lisp {
+            return super::lisp::class(self, i);
+        }
         let word = self.text(i);
         let first = *word.as_bytes().first()?;
         let next_opens = self
@@ -388,7 +425,7 @@ impl<'a> Tokens<'a> {
     /// Is the atom at `i` a form's head — the first thing after a `(` on
     /// its own line? Comments and `#;` between don't count; a vector's `#(`
     /// opens data, not a call, and a `[` or `{` is not a call either.
-    fn is_head(&self, i: usize) -> bool {
+    pub(super) fn is_head(&self, i: usize) -> bool {
         let line = self.placed[i].start.0;
         let Some(at) = (0..i)
             .rev()
@@ -400,16 +437,22 @@ impl<'a> Tokens<'a> {
         if open.tok.kind != Kind::Open || open.start.0 != line || self.text(at) != "(" {
             return false;
         }
-        // The token before the `(`: a bare `#` glued to it makes a vector.
+        // The token before the `(`: a bare `#` glued to it makes a vector
+        // — and in Common Lisp any `#` dispatch glued to it makes data
+        // (`#(`, `#2A(`, `#c(`), except `#'(lambda …)`, which is a call.
         !(at > 0 && {
             let q = &self.placed[at - 1];
-            q.tok.kind == Kind::Atom && q.tok.end == open.tok.start && self.text(at - 1) == "#"
+            let glued = q.tok.end == open.tok.start;
+            let word = self.text(at - 1);
+            glued
+                && ((q.tok.kind == Kind::Atom && word == "#")
+                    || (q.tok.kind == Kind::Prefix && word.starts_with('#') && word != "#'"))
         })
     }
 
     /// The brackets still open just before `point`, outermost first, as
     /// (bracket, line, byte).
-    fn open_at(&self, point: (usize, usize)) -> Vec<(u8, usize, usize)> {
+    pub(super) fn open_at(&self, point: (usize, usize)) -> Vec<(u8, usize, usize)> {
         let mut stack = Vec::new();
         for (i, p) in self.placed.iter().enumerate() {
             if p.start >= point {
