@@ -123,6 +123,13 @@
 (define (symbol-candidates)
   (append (map symbol->string (apropos)) (*keyword-candidates*)))
 
+; What TAB offers at an input line that completes NAMES, as a FORWARD HOOK:
+; this image's, unless the host says the line is being typed to somewhere
+; else — the standalone's REPL evaluates where the buffer's sends go, and a
+; name defined only there is not one of this image's (Kevin, 2026-11-17: a
+; function sent from the buffer did not complete at the REPL).
+(define *input-symbols* (lambda () (symbol-candidates)))
+
 (define (command-candidates)
   "Callable, non-internal bindings — what M-x completes over."
   (append-map
@@ -204,7 +211,7 @@
           (if f (delete-duplicates (map car (f "" 100000))) '())))
       ; A LIST is the candidates themselves — a prompt over choices it
       ; computed (document-symbols' definitions).
-      (else (if (list? source) source (symbol-candidates)))))
+      (else (if (list? source) source (*input-symbols*)))))
   (%edit! :comp
     (%make-state :all all
                  :files (eq? source :files)

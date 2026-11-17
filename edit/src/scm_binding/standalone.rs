@@ -913,6 +913,21 @@ mod tests {
                 "#t",
                 "a name sent to the file's scm completes"
             );
+            // And at the REPL, which evaluates there too: TAB on `cu`
+            // offers the function just sent (Kevin, 2026-11-17: it did
+            // not — the prompt's names were this image's).
+            s.call("(repl)");
+            s.text("c");
+            s.text("u");
+            s.key("tab");
+            assert_eq!(s.eval_to_string("(and (%edit :comp) (member \"cube\" (%comp :cands)) #t)").unwrap(), "#t", "cube completes at the REPL");
+            s.key("escape");
+            s.call("(focus-scene-editor)");
+            // At a minibuffer prompt the names are still the editor's own.
+            s.call("(read-minibuffer \"Name: \" (lambda (text) #f))");
+            assert_eq!(s.eval_to_string("(and (member \"cube\" (*input-symbols*)) #t)").unwrap(), "#f");
+            s.key("C-g");
+            s.call("(focus-scene-editor)");
             s.call("(set! *editor-eldoc* #f) (%editor-goto-line 1 1)");
             s.key("right");
             s.key("right");

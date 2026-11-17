@@ -329,6 +329,25 @@ Every ray file of the same checkout shares it, so they all start over."
              (edit-insert (car (last-pair lines))))
            t))))
 
+; TAB at the REPL completes over the names of the image the REPL evaluates
+; in — the one the buffer's sends go to — as TAB in the buffer does
+; (09-complete's editor-pool): a file's scm or ray, once it runs, has the
+; names sent to it, and this image does not. Nothing is started to ask;
+; busy with a send it answers nothing, and this image's names stand in. A
+; buffer that is not Scheme (Rust, at evcxr) offers its own words.
+(set! *input-symbols*
+  (lambda ()
+    (let ((buf (%editor-active-buffer (editor-pane-id))))
+      (cond ((not (%editing-pane? 2)) (symbol-candidates))
+            ((non-scheme-buffer? buf) (buffer-words (%editor-text (editor-pane-id))))
+            (else
+              (or (and-let* ((b (running-image-backend buf))
+                             (complete (backend-op b :complete))
+                             (words (complete ""))
+                             ((pair? words)))
+                    words)
+                  (symbol-candidates)))))))
+
 (define (repl-focus)
   "Give the REPL's prompt the keyboard."
   (%focus-pane 2)
