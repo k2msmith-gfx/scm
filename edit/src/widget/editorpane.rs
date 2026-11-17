@@ -406,6 +406,7 @@ fn row_key(frame: u64, run: &cosmic_text::LayoutRun, top: f32, h: u32) -> u64 {
 }
 
 /// Draw a row's glyphs into a fresh image over `bg`.
+#[allow(clippy::too_many_arguments)]
 fn render_row(
     font_system: &mut FontSystem,
     cache: &mut SwashCache,

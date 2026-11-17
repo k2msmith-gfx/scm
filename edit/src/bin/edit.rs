@@ -72,8 +72,7 @@ fn serve(port: u16, tx: std::sync::mpsc::Sender<(String, std::sync::mpsc::Sender
         let _ = stream.write_all(b"edit> ");
         let mut pending = String::new();
         let mut buf = [0u8; 1 << 16];
-        loop {
-            let Ok(n) = stream.read(&mut buf) else { break };
+        while let Ok(n) = stream.read(&mut buf) {
             if n == 0 {
                 break;
             }

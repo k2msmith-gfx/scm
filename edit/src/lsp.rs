@@ -678,9 +678,12 @@ struct Registry {
     failed: HashMap<String, String>,
     docs: HashMap<PathBuf, Doc>,
     canonical: HashMap<String, PathBuf>,
-    /// The last hover asked: (path, version, line, byte) and its answer.
-    hover: Option<((PathBuf, i64, usize, usize), Option<(String, String)>)>,
+    /// The last hover asked and its answer.
+    hover: Option<(HoverAt, Option<(String, String)>)>,
 }
+
+/// Where a hover was asked: (path, version, line, byte).
+type HoverAt = (PathBuf, i64, usize, usize);
 
 thread_local! {
     static REGISTRY: RefCell<Registry> = RefCell::new(Registry::default());
