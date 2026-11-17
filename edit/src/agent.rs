@@ -387,6 +387,10 @@ struct Turn {
     /// is not drawn twice.
     last_text: String,
     metrics: Metrics,
+    /// The plan's limits as the CLI last reported them (`rate_limit_info`).
+    limits: Option<serde_json::Value>,
+    /// The model that answered and its context window, from the result.
+    model: Option<(String, u64)>,
 }
 
 /// The one argument of a tool call worth a transcript row: the modeler's
@@ -495,6 +499,7 @@ impl Turn {
                 }),
                 _ => {}
             },
+            Some("rate_limit_event") => self.limits = Some(ev["rate_limit_info"].clone()),
             Some("result") => {
                 self.finished = true;
                 self.is_error = ev["is_error"].as_bool().unwrap_or(false);
@@ -502,7 +507,13 @@ impl Turn {
                 self.session = ev["session_id"].as_str().map(str::to_string).or(self.session.take());
                 self.metrics.turns = ev["num_turns"].as_u64().unwrap_or(0);
                 self.metrics.api_ms = ev["duration_api_ms"].as_u64().unwrap_or(0);
+                // (The PROCESS's total so far: `read_process` takes the turn's
+                // share of it.)
                 self.metrics.cost_usd = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
+                self.model = ev["modelUsage"].as_object().and_then(|m| {
+                    // The model that did most of the talking, when a turn used more than one.
+                    m.iter().max_by_key(|(_, u)| u["outputTokens"].as_u64().unwrap_or(0)).map(|(name, u)| (name.clone(), u["contextWindow"].as_u64().unwrap_or(0)))
+                });
             }
             _ => {}
         }
@@ -550,6 +561,89 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What the conversation has used, and what the plan has left: `/usage`.
+#[derive(Default)]
+struct Usage {
+    turns: u64,
+    tools: usize,
+    out_tokens: u64,
+    /// At API list prices, as the CLI reckons it; a subscription is not
+    /// billed this.
+    cost_usd: f64,
+    /// The last turn's context, and the window it sits in.
+    context: u64,
+    window: u64,
+    model: String,
+    limits: Option<serde_json::Value>,
+}
+
+/// "2d 3h", "3h 12m", "12m": how long until the epoch second THEN.
+fn until(then: u64, now: u64) -> String {
+    let left = then.saturating_sub(now);
+    let (d, h, m) = (left / 86400, left % 86400 / 3600, left % 3600 / 60);
+    match (d, h) {
+        (0, 0) => format!("{m}m"),
+        (0, _) => format!("{h}h {m}m"),
+        _ => format!("{d}d {h}h"),
+    }
+}
+
+impl Usage {
+    /// As lines for the pane, the clock at NOW (epoch seconds).
+    fn lines(&self, now: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        match &self.limits {
+            Some(l) => {
+                let window = |name: &str| match name {
+                    "five_hour" => "5-hour window".to_string(),
+                    "seven_day" => "week".to_string(),
+                    "seven_day_opus" => "week (Opus)".to_string(),
+                    "seven_day_sonnet" => "week (Sonnet)".to_string(),
+                    other => other.replace('_', " "),
+                };
+                for (name, w) in l["unifiedWindows"].as_object().into_iter().flatten() {
+                    let used = (w["utilization"].as_f64().unwrap_or(0.0) * 100.0).round();
+                    let resets = w["resetsAt"].as_u64().map(|t| format!(" · resets in {}", until(t, now))).unwrap_or_default();
+                    out.push(format!("plan, {}: {used:.0}% used{resets}", window(name)));
+                }
+                match l["status"].as_str() {
+                    Some("allowed") | None => {}
+                    Some(status) => out.push(format!("plan: {} — {}", status.replace('_', " "), window(l["rateLimitType"].as_str().unwrap_or("limit")))),
+                }
+                if l["isUsingOverage"].as_bool() == Some(true) {
+                    out.push("plan: USING OVERAGE — this is billed beyond the subscription".into());
+                }
+            }
+            None => out.push("plan: not reported yet — it comes with the first reply".into()),
+        }
+        if self.turns == 0 {
+            out.push("this conversation: nothing asked yet".into());
+            return out;
+        }
+        let k = |n: u64| match n {
+            0..1000 => n.to_string(),
+            1000..10_000 => format!("{:.1}k", n as f64 / 1000.0),
+            _ => format!("{}k", n / 1000),
+        };
+        let mut line = format!("this conversation: {} turns · {} tools · out {} tok · context {}", self.turns, self.tools, k(self.out_tokens), k(self.context));
+        if self.window > 0 {
+            line += &format!(" of {} ({:.0}%)", k(self.window), self.context as f64 * 100.0 / self.window as f64);
+        }
+        out.push(line);
+        out.push(format!("worth ${:.2} at API list prices — on the subscription it is not billed", self.cost_usd));
+        if !self.model.is_empty() {
+            out.push(format!("model: {}", self.model));
+        }
+        out
+    }
+}
+
+/// What the conversation has used and what the plan has left, as lines.
+pub fn usage() -> Vec<String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    lock(&agent().usage).lines(now)
+}
+
 /// The `claude` a conversation is running in.
 struct Proc {
     child: std::process::Child,
@@ -585,6 +679,7 @@ struct Shared {
     grace_ms: AtomicU64,
     /// Questions not yet answered: request id -> the call's input, as JSON.
     asks: Mutex<std::collections::HashMap<String, String>>,
+    usage: Mutex<Usage>,
     /// Calls of the host's tools not yet answered: request id -> the id the
     /// answer must carry, as JSON.
     calls: Mutex<std::collections::HashMap<String, String>>,
@@ -608,6 +703,7 @@ thread_local! {
         turns: AtomicU64::new(0),
         grace_ms: AtomicU64::new(3000),
         asks: Mutex::new(std::collections::HashMap::new()),
+        usage: Mutex::new(Usage::default()),
         calls: Mutex::new(std::collections::HashMap::new()),
         auth_stdin: Mutex::new(None),
     });
@@ -711,6 +807,8 @@ fn start(shared: &Arc<Shared>, key: Vec<String>, turn: InFlight) -> Result<(), S
 fn read_process(shared: &Arc<Shared>, generation: u64, stdout: std::process::ChildStdout, profile: &Profile) {
     let mut from = std::io::BufReader::new(stdout);
     let mut log = stream_log(profile);
+    // The CLI's cost is this PROCESS's total; a turn's is the difference.
+    let mut cost_before = 0.0;
     loop {
         let turn = read_stream(&mut from, profile, &mut log, &mut |e| match e {
             Event::Mcp { id, message } => {
@@ -725,10 +823,32 @@ fn read_process(shared: &Arc<Shared>, generation: u64, stdout: std::process::Chi
                 shared.queue(e)
             }
         });
+        let mut turn = turn;
         // A question or a call the turn ended without hearing answered is
         // moot.
         lock(&shared.asks).clear();
         lock(&shared.calls).clear();
+        if turn.finished {
+            let total = turn.metrics.cost_usd;
+            turn.metrics.cost_usd = (total - cost_before).max(0.0);
+            cost_before = total;
+        }
+        {
+            let mut u = lock(&shared.usage);
+            if turn.limits.is_some() {
+                u.limits = turn.limits.take();
+            }
+            if turn.finished {
+                u.turns += turn.metrics.turns;
+                u.tools += turn.metrics.tools;
+                u.out_tokens += turn.metrics.out_tokens;
+                u.cost_usd += turn.metrics.cost_usd;
+                u.context = turn.metrics.max_context;
+                if let Some((model, window)) = turn.model.take() {
+                    (u.model, u.window) = (model, window);
+                }
+            }
+        }
         if !turn.finished {
             return process_ended(shared, generation, turn);
         }
@@ -947,7 +1067,12 @@ pub fn answer(id: &str, allow: bool, message: &str) -> bool {
 /// End the conversation's process — a NEW conversation must not be the old
 /// one's next turn. A turn being answered closes as cancelled.
 pub fn stop() {
-    kill(&agent());
+    let shared = agent();
+    kill(&shared);
+    // What the OLD conversation used is not the new one's; what the plan has
+    // left is the account's, and stays.
+    let mut u = lock(&shared.usage);
+    *u = Usage { limits: u.limits.take(), ..Usage::default() };
 }
 
 // ── /login and friends: `claude auth …` ─────────────────────────────────────
@@ -1282,6 +1407,36 @@ not json at all
     }
 
     #[test]
+    fn usage_reads_as_what_was_used_and_what_the_plan_has_left() {
+        let now = 1_794_900_000;
+        let mut u = Usage::default();
+        assert_eq!(u.lines(now), ["plan: not reported yet — it comes with the first reply", "this conversation: nothing asked yet"]);
+        u.limits = Some(serde_json::json!({
+            "status": "allowed", "rateLimitType": "seven_day", "isUsingOverage": false,
+            "unifiedWindows": {"five_hour": {"utilization": 0.612, "resetsAt": now + 3 * 3600 + 12 * 60},
+                               "seven_day": {"utilization": 0.29, "resetsAt": now + 2 * 86400 + 3 * 3600 + 59}}
+        }));
+        (u.turns, u.tools, u.out_tokens, u.cost_usd) = (12, 34, 5_230, 0.4249);
+        (u.context, u.window, u.model) = (48_100, 1_000_000, "claude-opus-5-5".into());
+        assert_eq!(
+            u.lines(now),
+            [
+                "plan, 5-hour window: 61% used · resets in 3h 12m",
+                "plan, week: 29% used · resets in 2d 3h",
+                "this conversation: 12 turns · 34 tools · out 5.2k tok · context 48k of 1000k (5%)",
+                "worth $0.42 at API list prices — on the subscription it is not billed",
+                "model: claude-opus-5-5",
+            ]
+        );
+        // A limit reached, and overage, are said loudly.
+        u.limits = Some(serde_json::json!({"status": "rejected", "rateLimitType": "five_hour", "isUsingOverage": true, "unifiedWindows": {}}));
+        let lines = u.lines(now);
+        assert_eq!(lines[0], "plan: rejected — 5-hour window");
+        assert!(lines[1].contains("USING OVERAGE"));
+        assert_eq!(until(now + 59, now), "0m");
+    }
+
+    #[test]
     fn a_missing_usage_field_costs_nothing() {
         let mut m = Metrics::default();
         m.saw_usage(None, &serde_json::Value::Null);
@@ -1330,7 +1485,9 @@ not json at all
     const ANSWER: &str = r#"      echo '{"type":"system","subtype":"init","session_id":"s-1"}'
       echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hel"}}}'
       echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"hello"}]}}'
-      echo '{"type":"result","is_error":false,"result":"hello","session_id":"s-1","num_turns":1}'"#;
+      echo '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"seven_day":{"utilization":0.5}}}}'
+      n=$(($(cat "$D/n" 2>/dev/null || echo 0) + 1)); echo $n > "$D/n"
+      echo '{"type":"result","is_error":false,"result":"hello","session_id":"s-1","num_turns":1,"total_cost_usd":'$n'.25,"modelUsage":{"claude-opus-5-5":{"outputTokens":9,"contextWindow":1000000}}}'"#;
 
     fn ended(events: &[Event]) -> bool {
         matches!(events.last(), Some(Event::Done { .. } | Event::Error { .. } | Event::Cancelled { .. }))
@@ -1361,8 +1518,17 @@ not json at all
         // The next request is a line to the SAME process: no start, no
         // --resume, nothing to wait for but the model.
         send("and again".into(), Profile { session: Some("s-1".into()), ..profile.clone() }).expect("sent");
-        wait_for(&ended);
+        let second = wait_for(&ended);
+        assert!(matches!(&events[2], Event::Metrics(m) if m.ends_with("$1.25")), "{events:?}");
+        assert!(second.iter().any(|e| matches!(e, Event::Metrics(m) if m.ends_with("$1.00"))), "the second turn's own dollar, not the total: {second:?}");
         assert_eq!(lines(&dir, "starts").len(), 1, "one process for both");
+        // The CLI's cost is the process's running total ($1.25, then $2.25):
+        // a turn's footer shows its own share, and /usage their sum.
+        let u = usage();
+        assert_eq!(u[0], "plan, week: 50% used");
+        assert!(u[1].starts_with("this conversation: 2 turns · 0 tools"), "{u:?}");
+        assert!(u[2].starts_with("worth $2.25 at API list prices"), "{u:?}");
+        assert_eq!(u[3], "model: claude-opus-5-5");
         assert!(!lines(&dir, "argv").contains(&"--resume".to_string()));
         let asked: Vec<serde_json::Value> = lines(&dir, "stdin").iter().map(|l| serde_json::from_str(l).expect("a JSON line")).collect();
         assert_eq!(asked.len(), 2);
@@ -1585,6 +1751,9 @@ not json at all
         assert!(answer(id, true, ""));
         let third = wait_for(&ended);
         assert!(third.iter().any(|e| matches!(e, Event::Result(r) if r.contains("42"))), "{third:#?}");
+        let u = usage();
+        eprintln!("{}", u.join("\n"));
+        assert!(u[0].starts_with("plan, ") && u.iter().any(|l| l.starts_with("this conversation: ")), "{u:?}");
         stop();
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -471,6 +471,18 @@ others: the project's, kept across restarts, ended by `/auto off` or
 because an agent that runs anything unasked should never be a surprise.
 Every question's own line now names `/auto` as the way to stop them.
 
+**4. `/usage`.** What the plan has left — each limit's window, how much
+of it is used and when it resets, and loudly when a limit is hit or
+overage is in use — from the `rate_limit_event` the CLI sends with every
+reply; and what this conversation has used: turns, tool calls, output
+tokens, the context against its window, the model, and what it would have
+cost at API list prices (a subscription is not billed that). Nothing is
+fetched: it is what the stream already said, so before the first reply the
+plan line says it has not been reported yet. **A bug it turned up:** the
+CLI's `total_cost_usd` is the PROCESS's running total, so with one process
+per conversation every turn's footer had been showing the whole
+conversation's dollars; a turn's footer now shows its own.
+
 **What that run found first, and fixed:** the CLI DEFERS MCP tools behind
 its own `ToolSearch`, and the model called `editor_command` without having
 seen its schema — with `command:` for a parameter named `name` — and was

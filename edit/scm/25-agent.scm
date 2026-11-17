@@ -1042,6 +1042,8 @@ exactly as it is; when the agent changed that file, the pane says so —
     ((equal? cmd "/logout") (auth "logout"))
     ((equal? cmd "/status") (auth "status"))
     ((equal? cmd "/new") (new-conversation))
+    ; /usage — what the plan has left and what this conversation has used.
+    ((equal? cmd "/usage") (for-each (lambda (line) (agent-append line :dim)) (%agent-usage)))
     ; /auto [on|off] — answer every question yes, or go back to asking.
     ((equal? (car words) "/auto")
       (let ((on (cond ((null? (cdr words)) (not (agent-auto?)))
@@ -1076,9 +1078,9 @@ exactly as it is; when the agent changed that file, the pane says so —
       (set! *agent-allowed* '())
       (agent-append "forgotten: the agent asks again before it leaves the project or runs a program" :dim))
     ((equal? cmd "/help")
-      (agent-append "commands: /login /logout /status /new /model /auto /grants /revoke — anything else is a request to the agent. Escape interrupts it." :dim))
+      (agent-append "commands: /login /logout /status /usage /new /model /auto /grants /revoke — anything else is a request to the agent. Escape interrupts it." :dim))
     (else
-      (agent-append (string-append "unknown command " cmd " — /login /logout /status /new /model /auto /grants /revoke /help") :error))))
+      (agent-append (string-append "unknown command " cmd " — /login /logout /status /usage /new /model /auto /grants /revoke /help") :error))))
 
 (define (agent-submit text)
   (%edit! :hist #f)

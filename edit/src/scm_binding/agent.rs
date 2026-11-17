@@ -117,6 +117,9 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         crate::editorpane::replace_range(id, 0, 0, end.0, end.1, &val_text(args, 1).unwrap_or_default());
         Ok(Val::Bool(true))
     })?;
+    // `(%agent-usage)` — what the conversation has used and what the plan
+    // has left, as lines: /usage.
+    interp.define_fn("%agent-usage", |_args: &[Val]| Ok(Val::List(agent::usage().into_iter().map(Val::Str).collect())))?;
     // `(%agent-stop)` — end the conversation's process: what a NEW
     // conversation needs, so that its first request is not the old one's
     // next.
@@ -145,6 +148,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         "%agent-busy?",
         "%agent-cancel",
         "%agent-stop",
+        "%agent-usage",
         "%agent-answer",
         "%agent-tool-result",
         "%json-string",
@@ -282,6 +286,11 @@ EOF"#;
         settle(&mut interp, "(pair? ended)");
         assert_eq!(starts(), 1, "no second process");
         assert!(file("stdin").contains(r"Scene: empty\nRequest: and the other one"), "{}", file("stdin"));
+
+        // /usage: what the conversation has used so far.
+        eval(&mut interp, r#"(agent-submit "/usage")"#);
+        let rows = texts(eval(&mut interp, "(rows)"));
+        assert!(rows.iter().any(|r| r.starts_with("this conversation: 4 turns · 2 tools")), "{rows:?}");
 
         // The account, from the pane; a command it does not know.
         eval(&mut interp, r#"(agent-submit "/status")"#);

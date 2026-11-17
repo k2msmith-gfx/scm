@@ -413,7 +413,7 @@ Every ray file of the same checkout shares it, so they all start over."
 (define (agent-greeting)
   (agent-append "Claude, in this project. Ask in English; RET sends." :dim)
   (agent-append "It reads and edits the project's files, and asks here before it runs a program or touches a file outside it." :dim)
-  (agent-append "Escape interrupts · C-l or /new starts over · /auto stops it asking · /model, /status, /login · /help" :dim))
+  (agent-append "Escape interrupts · C-l or /new starts over · /auto stops it asking · /usage, /model, /status · /help" :dim))
 
 (set! *agent-shown*
   (lambda (id)
