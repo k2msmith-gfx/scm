@@ -13,6 +13,7 @@
 //! that names the VM. A language server, when one is on the PATH, is
 //! [`lsp`] (E7).
 
+pub mod agent;
 pub mod app;
 pub mod film;
 pub mod host;
