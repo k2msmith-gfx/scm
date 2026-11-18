@@ -293,18 +293,20 @@ impl Doc {
     }
 
     /// Does this buffer read as its language — so the reader's diagnostics
-    /// apply? Text: a scratch buffer, or a file named as Scheme. A `.janet`
-    /// session file, a `.txt` or a `.json` is also edited here, and the
-    /// Scheme reader's complaints about it would be noise. (One language
-    /// for every buffer until E6 picks one per file.)
+    /// apply? Text: a scratch buffer, a file named as Scheme, or one set to
+    /// another language (a `.lisp` is Lisp, a `.guile` Guile). A `.janet`
+    /// session file, a `.txt` or a `.json` is also edited here, in the
+    /// default language, and the Scheme reader's complaints about it would
+    /// be noise.
     fn reads(&self) -> bool {
         self.md.is_none()
             && self.image.is_none()
             && self.video.is_none()
-            && self.path.as_deref().is_none_or(|p| {
-                let p = p.to_ascii_lowercase();
-                [".scm", ".ss", ".sld", ".sls"].iter().any(|ext| p.ends_with(ext))
-            })
+            && (self.lang.name() != language::SCHEME.name()
+                || self.path.as_deref().is_none_or(|p| {
+                    let p = p.to_ascii_lowercase();
+                    [".scm", ".ss", ".sld", ".sls"].iter().any(|ext| p.ends_with(ext))
+                }))
     }
 
     /// Close an open insert-coalescing run, banking it as one undo step.

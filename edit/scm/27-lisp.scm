@@ -184,6 +184,42 @@ error, and a REPL line whole when its brackets close."
               (cons :doc (lambda (name) #f))
               (cons :signature (lambda (name) #f))))))
 
+; ── SBCL's reader reads Lisp buffers (L4) ──────────────────────────────────
+; The kernel marks a Lisp buffer's brackets itself (language/lisp.rs); what
+; else SBCL's reader cannot read — `#\notachar`, a package that does not
+; exist, a string never closed — is asked of the SBCL that is running, as
+; 15-guile asks Guile: the kernel keeps each Lisp file's newest text
+; (%read-pending), this puts it to edit-serve:read-check when SBCL is idle,
+; and the answer comes back a mark (%read-result). It reads each form in the
+; package of the in-package before it, evaluates nothing, and leaves no
+; symbol behind. None is started to ask; one question at a time; none while
+; a restart waits for its value, which would take the question for it.
+(define *sbcl-read-check* #t)    ; #f: brackets only
+(define %sbcl-reading #f)        ; a question is out
+
+(define (sbcl-read-poll)
+  ; Put the next changed Lisp buffer to SBCL, when SBCL can take it.
+  (when (and *sbcl-read-check* (not %sbcl-reading) (not *sbcl-asking*)
+             (sbcl-running?) (zero? (%remote-running *sbcl*)))
+    (and-let* ((next (%read-pending "lisp")))
+      (let ((path (car next)) (version (cadr next)) (text (caddr next)))
+        (guard (e (#t (set! %sbcl-reading #f)))
+          (set! %sbcl-reading #t)
+          (hash-table-set! *remote-callbacks*
+            (cons *sbcl* (%remote-eval-async *sbcl* (lisp-call "read-check" text) #f))
+            (lambda (r)
+              (set! %sbcl-reading #f)
+              (let ((said (and (eq? (%alist-ref r :status #f) 'ok)
+                               (guard (e (#t #f)) (read (open-input-string (%alist-ref r :value "T")))))))
+                (if (and (pair? said) (= (length said) 3))
+                    (%read-result path version (car said) (cadr said) (caddr said))
+                    (%read-result path version #f #f "")))
+              ; The next one waiting, or this one again if it has changed.
+              (sbcl-read-poll))))))))
+
+(%read-watch "lisp")
+(set! *wake-hooks* (cons sbcl-read-poll *wake-hooks*))
+
 ; What a send reads from a Lisp buffer: the top-level form at the point and
 ; the expression before it, off Common Lisp's own tokens — `|a (b|` is one
 ; symbol, and `#+sbcl (f)` one form.

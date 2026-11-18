@@ -35,7 +35,7 @@
 
 (defpackage :edit-serve
   (:use :cl)
-  (:export #:main #:in #:complete-in #:describe-in #:*break-on-error*))
+  (:export #:main #:in #:complete-in #:describe-in #:read-check #:*break-on-error*))
 
 (in-package :edit-serve)
 
@@ -477,6 +477,62 @@ is complete text."
            (reader-error () "invalid")
            (error () "invalid"))
       (delete-package pkg))))
+
+;;; ---- read-check: what SBCL's reader cannot read (L4) ---------------------
+
+(defun line-and-column (text position)
+  "POSITION, a character index into TEXT, as (line column), both from 0."
+  (let ((line 0) (start 0))
+    (loop for i below (min position (length text))
+          when (char= (char text i) #\Newline)
+            do (incf line) (setf start (1+ i)))
+    (list line (- position start))))
+
+(defun read-check (text)
+  "Read TEXT, a buffer, to its end as SBCL would load it — each form in the
+package of the `in-package` before it — and answer T, or (line column
+message) where the reader stopped: just past what it could not read, in
+SBCL's words. Nothing is evaluated (`#.` reads its form and runs nothing)
+and nothing is left behind: forms are read in a throwaway package with the
+real one's use-list, and every other package is locked meanwhile, so
+`pkg::new-name` cannot intern there."
+  (let* ((in (make-string-input-stream text))
+         (scratch (scratch-package))
+         (*package* scratch)
+         (*readtable* (reading-readtable))
+         (*read-eval* nil)
+         (locked '()))
+    (unwind-protect
+         (progn
+           (dolist (p (list-all-packages))
+             (unless (or (eq p scratch) (sb-ext:package-locked-p p))
+               (sb-ext:lock-package p)
+               (push p locked)))
+           (loop
+             (let* ((start (file-position in))
+                    (form (handler-case
+                              (handler-case (read in nil in)
+                                ;; A name the reader would intern in a real
+                                ;; package: read the form again for its syntax
+                                ;; alone.
+                                (sb-ext:package-locked-error ()
+                                  (file-position in start)
+                                  (let ((*read-suppress* t)) (read in nil in) nil)))
+                            ((or reader-error end-of-file) (c)
+                              (return (append (line-and-column text (file-position in))
+                                              (list (if (typep c 'end-of-file) "end of file" (message-of c)))))))))
+               (when (eq form in) (return t))
+               ;; (in-package :shapes): the rest reads as SHAPES would see it.
+               (when (and (consp form) (symbolp (car form)) (string= (symbol-name (car form)) "IN-PACKAGE")
+                          (consp (cdr form)) (typep (cadr form) '(or string symbol character)))
+                 (let ((pkg (find-package (string (cadr form)))))
+                   (when pkg
+                     (let ((next (make-package (format nil "EDIT-SERVE-SCRATCH-~a" (random most-positive-fixnum))
+                                               :use (package-use-list pkg))))
+                       (delete-package *package*)
+                       (setf scratch next *package* next))))))))
+      (dolist (p locked) (sb-ext:unlock-package p))
+      (when (package-name *package*) (delete-package *package*)))))
 
 ;;; ---- complete and describe ----------------------------------------------
 

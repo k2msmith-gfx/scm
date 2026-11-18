@@ -1,9 +1,9 @@
 # Common Lisp in `edit`, through SBCL — plan, 2026-11-17
 
 **IN PROGRESS.** L0 (the measurements), L1 (the server), L2 (the
-language), L3 (the shell) and L7 (the debugger) are done; each is below. A
-`.lisp` file sends to SBCL, and an error is a break at the REPL panel. L4–L6
-are next. Kevin, 2026-11-17: *"I would probably switch to edit if it
+language), L3 (the shell), L7 (the debugger) and L4 (the read marks) are
+done; each is below. A `.lisp` file sends to SBCL, an error is a break at
+the REPL panel, and what SBCL cannot read is marked. L5 and L6 are next. Kevin, 2026-11-17: *"I would probably switch to edit if it
 supported all of the L features"* — so all of L1–L7, in D6's order (L1–L3,
 L7, L4–L6), with each decision as recommended.
 
@@ -131,7 +131,7 @@ Guile's do without Guile.
 | **L1** ✔ | **The server.** `edit/sbcl/serve.lisp`: a listener on the address it is given, a thread for each connection; `eval` (every form of the text, in order; the last one's values; what was printed; warnings collected and returned with the output), an error as its message with the calls it raised in, `complete`, `describe`, `parse`, `ping`, and `interrupt` from a second connection. The debugger never opens: `sb-ext:*invoke-debugger-hook*` answers an error instead. `*standard-input*` is empty, so a `(read-line)` ends rather than hangs. | the protocol's own conformance, driven from Rust as `remote.rs`'s tests drive scm and Guile: a value, output with a failure, a multi-form send, completion of a name just defined, describe with docstring and lambda list, an interrupt of `(loop)` that leaves the server up |
 | **L2** ✔ | **The language.** `language/lisp.rs`: Scheme's scanner with Common Lisp's differences — `#\|…\|#`, `#\\Space`, `\|a symbol\|`, `#'f`, `#+x`/`#-x`, `:keyword` and `#:uninterned`, `pkg:name`; indentation by a table of body forms (`defun`, `let`, `when`, `flet`, `loop`…); the bracket marks Guile's has. Structural editing allowed for it. | a file of awkward cases highlights and indents as expected; a stray `)` and an open form are marked with no SBCL running |
 | **L3** ✔ | **The shell.** `27-lisp.scm`: `sbcl-start`/`-stop`, `lisp-mode`, detection (`.lisp`, `.lsp`, `.cl`, `.asd`), the backend (the remote backend, with `:complete`, `:doc`, `:signature` asking in the buffer's package), the running-process hook so TAB asks SBCL, the buffer's package from its `in-package`, the REPL panel's prompt (`CL-USER> `, following the REPL's package) and its own "is this whole?" (brackets — scm's reader does not read `#'f`). | against a real SBCL: each send key, `=> 49`, `=> SQ` for a `defun` (which Common Lisp answers itself), an error's message, describe on a name and on an argument, TAB in the buffer and at the REPL offering a function just sent, a two-package file sending each form to its own package |
-| **L4** | **Read marks.** SBCL's reader on the buffer's text, through `readcheck.rs` as built: `edit-serve:read-check` reads in a throwaway package with the buffer's use-list and `*read-eval*` nil, and answers where it stopped. | `#\\notachar` and `(foo:bar)` are marked on their line in SBCL's words; `#.(…)` is not; mending clears the mark; reading leaves no symbol behind in the user's package |
+| **L4** ✔ | **Read marks.** SBCL's reader on the buffer's text, through `readcheck.rs` as built: `edit-serve:read-check` reads in a throwaway package with the buffer's use-list and `*read-eval*` nil, and answers where it stopped. | `#\\notachar` and `(foo:bar)` are marked on their line in SBCL's words; `#.(…)` is not; mending clears the mark; reading leaves no symbol behind in the user's package |
 | **L5** | **`M-.`.** Ask SBCL where a name is defined (`sb-introspect`), falling back on the editor's own index of `defun`/`defmacro`/`defvar` forms for a file never loaded. | `M-.` on a call jumps to its `defun` in another file, loaded or not; `M-,` comes back |
 | **L6** | **Warnings — past Guile's level.** What SBCL's compiler says of a form when it is sent (an undefined function, a wrong count of arguments, an unused variable) shown under the send, and marked in the buffer at the form. | sending a `defun` that calls a function that does not exist says so, and the form is marked until it is sent again clean |
 
@@ -302,6 +302,46 @@ Tests (`remote.rs`, `sbcl_tests`): `a_lisp_file_is_lisps_and_never_runs_as_scm`
 two-package file, an error, describe both ways, TAB, the REPL's prompt
 following its package, a line continued. `language::lisp`'s
 `what_a_send_reads` and `whole_text` hold the cutting.
+
+## L4 as built (2026-11-17)
+
+`edit-serve:read-check` in the server (about 60 lines), `sbcl-read-poll` in
+`27-lisp.scm`, and `readcheck.rs` unchanged — Guile's watcher, now
+watching `lisp` too.
+
+- **SBCL's reader reads each Lisp file** whenever its text changes and SBCL
+  is idle: the kernel keeps the newest text, the shell puts it to the
+  running SBCL as `(edit-serve:read-check "…")`, and where the reader
+  stopped comes back a mark in SBCL's words — `unrecognized character
+  name: "notachar"`, `Package FOO does not exist.`, `Symbol "X" not found
+  in the COMMON-LISP package.` None is started to ask; one question at a
+  time; none while a restart waits for its value's form (L7), which would
+  take the question for its answer.
+- **Packages as loading would see them.** Each form is read in a throwaway
+  package with the use-list of the package the last `(in-package …)` above
+  it names (CL-USER's before any), so `car` is CL's and the file's own
+  names intern in the throwaway. A package that does not exist yet leaves
+  the reading where it was.
+- **Nothing is evaluated and nothing is left behind.** `#.` reads its form
+  and runs nothing (the parse's readtable). `pkg::new-name` would intern in
+  the real package — SBCL's reader interns a double-colon name it has not
+  seen — so every unlocked package is locked for the read (and unlocked
+  after): the reader signals instead, and that form is read again with
+  `*read-suppress*` for its syntax alone. A single-colon name that is not
+  there is marked, never continued past, so it interns nothing either.
+- **A bug from L2, found here**: a file whose name was not Scheme's
+  (`.scm`, `.ss`, `.sld`, `.sls`) never showed its language's own marks —
+  `Doc::reads` held them back from a `.txt` read as Scheme, and so from a
+  `.lisp` read as Lisp. The bracket marks L2 tested in the language never
+  reached a `.lisp` file's pane. A buffer set to a language other than the
+  default now reads as it.
+
+Tests (`remote.rs`, `sbcl_tests`): `sbcl_reads_a_lisp_buffer_and_marks_what_it_cannot`
+— before SBCL a stray `)` marked by the editor and nothing started to ask;
+then `#\notachar` marked on its line in SBCL's words, mended and cleared,
+`#.(error …)` neither run nor marked, `shapes::brand-new` and the file's
+own `f` not interned in SHAPES, `(foo:bar)` marked, and a string never
+closed marked quietly.
 
 ## L7 as built (2026-11-17)
 

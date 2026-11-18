@@ -1228,6 +1228,74 @@ mod sbcl_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// L4's exit criterion: a Lisp FILE is read by SBCL's reader — what it
+    /// cannot read is marked on its line in SBCL's words (`#\notachar`, a
+    /// package that does not exist); `#.(…)` is not run, nor marked; mending
+    /// clears the mark; and reading leaves no symbol behind in the user's
+    /// package, `shapes::brand-new` included.
+    #[test]
+    fn sbcl_reads_a_lisp_buffer_and_marks_what_it_cannot() {
+        if !sbcl_on_path() {
+            eprintln!("sbcl is not on the PATH: skipped");
+            return;
+        }
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-lisp-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("shapes.lisp");
+        std::fs::write(
+            &file,
+            "(defpackage :shapes (:use :cl))\n(in-package :shapes)\n(defun f () (list #\\notachar))\n(defun g () (shapes::brand-new #.(error \"no\")))\n",
+        )
+        .unwrap();
+        s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
+        s.call("(set! *sbcl-init* #f)");
+        let marks = |s: &mut super::super::standalone::Session| s.eval_to_string("(map (lambda (d) (list (car d) (cadddr d) (caddr d))) (%editor-diagnostics 1))").unwrap();
+        let read = |s: &mut super::super::standalone::Session| {
+            let t0 = std::time::Instant::now();
+            loop {
+                let got = marks(s);
+                s.poll();
+                if s.settle(10.0) && s.eval_to_string("(if (or %sbcl-reading (%read-pending \"lisp\")) 1 0)").as_deref() == Ok("0") {
+                    return marks(s);
+                }
+                assert!(t0.elapsed() < std::time::Duration::from_secs(20), "SBCL never answered: {got}");
+            }
+        };
+        // No SBCL yet: the brackets are fine, so nothing is marked, and
+        // nothing was started to ask.
+        assert_eq!(marks(&mut s), "()");
+        s.poll();
+        assert_eq!(s.eval_to_string("(if (sbcl-running?) 1 0)").unwrap(), "0", "none was started to ask");
+        // The brackets are the editor's to mark, in a .lisp file too (L2),
+        // SBCL or no SBCL.
+        s.call(r#"(%editor-edit 1 "(in-package :shapes)" "(in-package :shapes))")"#);
+        assert!(marks(&mut s).contains("closes nothing"), "{}", marks(&mut s));
+        s.call(r#"(%editor-edit 1 "(in-package :shapes))" "(in-package :shapes)")"#);
+        assert_eq!(marks(&mut s), "()");
+        // A send starts it (the defpackage); from then on SBCL reads.
+        s.call("(%editor-goto-line 1 0) (eval-defun)");
+        assert!(s.settle(30.0), "SBCL answers");
+        let got = read(&mut s);
+        assert!(got.starts_with("((2 1 ") && got.contains("unrecognized character name: \\\"notachar\\\""), "line 3, in SBCL's words: {got}");
+        // Mended: the mark goes — and #.(error …) was neither run nor marked.
+        s.call(r##"(%editor-edit 1 "#\\notachar" "#\\a")"##);
+        assert_eq!(read(&mut s), "()");
+        let left = s.eval_to_string(r#"(lisp-ask *sbcl* "(list (find-symbol \"BRAND-NEW\" :shapes) (find-symbol \"F\" :shapes))")"#).unwrap();
+        assert_eq!(left, "(NIL NIL)", "reading interned nothing in SHAPES");
+        // A package that does not exist.
+        s.call(r#"(%editor-edit 1 "(list #\\a)" "(list (foo:bar))")"#);
+        let got = read(&mut s);
+        assert!(got.starts_with("((2 1 ") && got.contains("Package FOO does not exist."), "{got}");
+        // A string never closed: only the reader knows; marked quietly (0).
+        s.call(r#"(%editor-edit 1 "(list (foo:bar))" "(list \"open))")"#);
+        let got = read(&mut s);
+        assert!(got.contains("never closed") && got.contains(" 0 "), "{got}");
+        s.call("(sbcl-stop)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An interrupt from a second connection stops a runaway where it
     /// runs, says the host stopped it, and leaves the server up.
     #[test]
