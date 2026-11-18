@@ -1,9 +1,10 @@
 # Common Lisp in `edit`, through SBCL — plan, 2026-11-17
 
 **IN PROGRESS.** L0 (the measurements), L1 (the server), L2 (the
-language), L3 (the shell), L7 (the debugger) and L4 (the read marks) are
-done; each is below. A `.lisp` file sends to SBCL, an error is a break at
-the REPL panel, and what SBCL cannot read is marked. L5 and L6 are next. Kevin, 2026-11-17: *"I would probably switch to edit if it
+language), L3 (the shell), L7 (the debugger), L4 (the read marks) and L5
+(`M-.`) are done; each is below. A `.lisp` file sends to SBCL, an error is a
+break at the REPL panel, what SBCL cannot read is marked, and `M-.` finds a
+definition loaded or not. L6 is next. Kevin, 2026-11-17: *"I would probably switch to edit if it
 supported all of the L features"* — so all of L1–L7, in D6's order (L1–L3,
 L7, L4–L6), with each decision as recommended.
 
@@ -132,7 +133,7 @@ Guile's do without Guile.
 | **L2** ✔ | **The language.** `language/lisp.rs`: Scheme's scanner with Common Lisp's differences — `#\|…\|#`, `#\\Space`, `\|a symbol\|`, `#'f`, `#+x`/`#-x`, `:keyword` and `#:uninterned`, `pkg:name`; indentation by a table of body forms (`defun`, `let`, `when`, `flet`, `loop`…); the bracket marks Guile's has. Structural editing allowed for it. | a file of awkward cases highlights and indents as expected; a stray `)` and an open form are marked with no SBCL running |
 | **L3** ✔ | **The shell.** `27-lisp.scm`: `sbcl-start`/`-stop`, `lisp-mode`, detection (`.lisp`, `.lsp`, `.cl`, `.asd`), the backend (the remote backend, with `:complete`, `:doc`, `:signature` asking in the buffer's package), the running-process hook so TAB asks SBCL, the buffer's package from its `in-package`, the REPL panel's prompt (`CL-USER> `, following the REPL's package) and its own "is this whole?" (brackets — scm's reader does not read `#'f`). | against a real SBCL: each send key, `=> 49`, `=> SQ` for a `defun` (which Common Lisp answers itself), an error's message, describe on a name and on an argument, TAB in the buffer and at the REPL offering a function just sent, a two-package file sending each form to its own package |
 | **L4** ✔ | **Read marks.** SBCL's reader on the buffer's text, through `readcheck.rs` as built: `edit-serve:read-check` reads in a throwaway package with the buffer's use-list and `*read-eval*` nil, and answers where it stopped. | `#\\notachar` and `(foo:bar)` are marked on their line in SBCL's words; `#.(…)` is not; mending clears the mark; reading leaves no symbol behind in the user's package |
-| **L5** | **`M-.`.** Ask SBCL where a name is defined (`sb-introspect`), falling back on the editor's own index of `defun`/`defmacro`/`defvar` forms for a file never loaded. | `M-.` on a call jumps to its `defun` in another file, loaded or not; `M-,` comes back |
+| **L5** ✔ | **`M-.`.** Ask SBCL where a name is defined (`sb-introspect`), falling back on the editor's own index of `defun`/`defmacro`/`defvar` forms for a file never loaded. | `M-.` on a call jumps to its `defun` in another file, loaded or not; `M-,` comes back |
 | **L6** | **Warnings — past Guile's level.** What SBCL's compiler says of a form when it is sent (an undefined function, a wrong count of arguments, an unused variable) shown under the send, and marked in the buffer at the form. | sending a `defun` that calls a function that does not exist says so, and the form is marked until it is sent again clean |
 
 | **L7** ✔ | **The debugger.** An error does not unwind: the send is answered with the message, the restarts numbered and the frames, and the connection is in a BREAK — the REPL panel's prompt says so (`CL-USER[1]> `, SBCL's own `0]` counting levels). At it: a number takes that restart (one that wants a value asks for it), an expression evaluates inside the error, `:abort` gives the send up, `:top` gives up every level. The error pane (`C-h e`) shows the frames, with the locals of code compiled with `(debug 2)` or more. A send from a buffer while in a break evaluates in the break too. | the probe's six cases through the editor: `USE-VALUE` finishes the original send with its value; `CONTINUE` after a `cerror`; `(break)`; an error inside a break and out of both; a frame's locals in the error pane; and Escape/interrupt of a runaway lands in a break rather than losing the work |
@@ -302,6 +303,43 @@ Tests (`remote.rs`, `sbcl_tests`): `a_lisp_file_is_lisps_and_never_runs_as_scm`
 two-package file, an error, describe both ways, TAB, the REPL's prompt
 following its package, a line continued. `language::lisp`'s
 `what_a_send_reads` and `whole_text` hold the cutting.
+
+## L5 as built (2026-11-17)
+
+`M-.` (and `C-M-.`'s jump, and `M-,` back — 10-xref's, unchanged) in a
+Lisp buffer asks two places, through 10-xref's new `*language-definitions*`
+(language → where its names are defined), which `27-lisp` fills.
+
+- **The project's own files** (`%lisp-definitions`, `scm_binding/lisp.rs`):
+  every `.lisp`, `.lsp`, `.cl` and `.asd` under the nearest directory above
+  the file holding a `.asd` or `.git` (else the file's own; hidden
+  directories and `target`/`build` skipped, at most 3000 files), the buffer
+  on screen as it stands. A definition is a top-level form whose head
+  begins `def` — `defun`, `defmacro`, `defvar`, `defclass`, `defmethod`,
+  `define-condition`, a `defwidget` of the program's own — naming the name:
+  `(defstruct (point …))` names `point`, `(defun (setf x) …)` `x`. Names
+  match without their package prefix and case (`geo::Area` is `area`); a
+  `|Mixed|` name only itself (`language::lisp::definitions`). This finds
+  what was never loaded, and what was SENT — SBCL keeps no file for a form
+  evaluated from a string, so an editor send has no location in SBCL.
+- **SBCL, when it is running and idle** (`edit-serve:definitions-in`,
+  `sb-introspect`): what was LOADED from a file — a Quicklisp library,
+  SBCL's own source (`mapcar` opens `src/code/list.lisp` at the
+  `macrolet` that defines it). SBCL's character offset is where its reader
+  BEGAN the top-level form, so before the blank lines and comments above
+  it; the server steps past those to the form. With no offset, the
+  top-level form number is counted off with `*read-suppress*`, which
+  interns nothing.
+- The project's sites come first; one SBCL names on the same line is not
+  said twice. Several ask which, by number, as Scheme's do. None started to
+  ask; none says "no definition of NAME found".
+
+Tests: `language::lisp`'s `where_a_name_is_defined` (the forms and names),
+and `m_dot_finds_a_lisp_definition_loaded_or_not` (with `sbcl`): from a
+project's `main.lisp`, `M-.` on a call opens `src/geo.lisp` at its `defun`
+with no SBCL running and none started; `M-,` returns; a library outside the
+project that SBCL compiled and loaded is found through SBCL; a name defined
+nowhere says so.
 
 ## L4 as built (2026-11-17)
 

@@ -493,9 +493,82 @@ pub fn complete(text: &str) -> bool {
     depth <= 0 && !open_token
 }
 
+/// A symbol's name as M-. matches it: no package prefix, lower case —
+/// `shapes::Area` and `area` are one name — and a `|Mixed|` name as written.
+pub fn bare_name(word: &str) -> String {
+    let w = match word.rfind(':') {
+        Some(i) if !word.starts_with('|') => &word[i + 1..],
+        _ => word,
+    };
+    match w.strip_prefix('|').and_then(|w| w.strip_suffix('|')) {
+        Some(inner) => inner.to_string(),
+        None => w.to_ascii_lowercase(),
+    }
+}
+
+/// Where TEXT defines NAME (as [`bare_name`] has it): each top-level form
+/// whose head begins `def` — `defun`, `defmacro`, `defvar`, `defclass`,
+/// `define-condition`, a `defsomething` of the program's own — naming it,
+/// as (line, column, the defining word), the column in characters at the
+/// name. `(defstruct (point …))` names `point`, `(defun (setf x) …)` `x`.
+pub fn definitions(text: &str, name: &str) -> Vec<(usize, usize, String)> {
+    let toks = tokens(text);
+    let chars: Vec<char> = text.chars().collect();
+    let word = |t: &Token| -> String { chars[t.start..t.end].iter().collect() };
+    let mut line_starts = vec![0];
+    line_starts.extend(chars.iter().enumerate().filter(|(_, c)| **c == '\n').map(|(i, _)| i + 1));
+    let at = |p: usize| {
+        let line = line_starts.partition_point(|&s| s <= p) - 1;
+        (line, p - line_starts[line])
+    };
+    let mut out = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != Kind::Open || t.depth != 0 {
+            continue;
+        }
+        let Some(head) = toks.get(i + 1).filter(|h| h.kind == Kind::Atom) else { continue };
+        let form = bare_name(&word(head));
+        if !form.starts_with("def") {
+            continue;
+        }
+        // The name: the atom after the head, or the first of a list there
+        // — `(point (:conc-name p-))`, and `(setf x)`'s second.
+        let named = match toks.get(i + 2) {
+            Some(n) if n.kind == Kind::Atom => Some(n),
+            Some(n) if n.kind == Kind::Open => match toks.get(i + 3) {
+                Some(s) if s.kind == Kind::Atom && bare_name(&word(s)) == "setf" => toks.get(i + 4),
+                other => other,
+            }
+            .filter(|n| n.kind == Kind::Atom),
+            _ => None,
+        };
+        if let Some(n) = named
+            && bare_name(&word(n)) == name
+        {
+            let (line, column) = at(n.start);
+            out.push((line, column, form));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn where_a_name_is_defined() {
+        let src = "(in-package :shapes)\n(defun area (s) s)\n(defstruct (point (:conc-name p-)) x)\n(defmethod shapes::Area ((s point)) 0)\n(defun (setf area) (v s) v)\n(let ((area 1)) (defun inner () area))\n(define-widget area)\n";
+        assert_eq!(
+            definitions(src, &bare_name("AREA")),
+            [(1, 7, "defun".to_string()), (3, 11, "defmethod".to_string()), (4, 13, "defun".to_string()), (6, 15, "define-widget".to_string())],
+            "top-level forms only: the defun inside the let is not one"
+        );
+        assert_eq!(definitions(src, "point"), [(2, 12, "defstruct".to_string())]);
+        assert!(definitions(src, &bare_name("|Area|")).is_empty(), "a |Mixed| name is another name");
+        assert_eq!(bare_name("|Mixed Case|"), "Mixed Case");
+        assert_eq!(bare_name("cl-user::Foo"), "foo");
+    }
 
     fn words(src: &str) -> Vec<(Kind, String)> {
         let chars: Vec<char> = src.chars().collect();

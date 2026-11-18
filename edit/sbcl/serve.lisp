@@ -35,7 +35,7 @@
 
 (defpackage :edit-serve
   (:use :cl)
-  (:export #:main #:in #:complete-in #:describe-in #:read-check #:*break-on-error*))
+  (:export #:main #:in #:complete-in #:describe-in #:read-check #:definitions-in #:*break-on-error*))
 
 (in-package :edit-serve)
 
@@ -652,6 +652,67 @@ none — or NIL when it names nothing."
          (destructuring-bind (kind value signature doc) (describe-parts s)
            (declare (ignore value))
            (list kind (or signature "") (or doc ""))))))
+
+;;; ---- M-.: where a name is defined (L5) ----------------------------------
+
+(defparameter *definition-types*
+  '(:function :generic-function :method :macro :compiler-macro :variable :constant
+    :class :structure :condition :type :setf-expander :symbol-macro))
+
+(defun skip-blank (text at)
+  "The first position from AT in TEXT that is not white space or a
+comment: where a top-level form begins whose reading began at AT."
+  (let ((n (length text)))
+    (loop
+      (cond ((>= at n) (return n))
+            ((member (char text at) '(#\Space #\Tab #\Newline #\Return #\Page)) (incf at))
+            ((char= (char text at) #\;)
+             (setf at (or (position #\Newline text :start at) n)))
+            ((and (char= (char text at) #\#) (< (1+ at) n) (char= (char text (1+ at)) #\|))
+             (setf at (let ((end (search "|#" text :start2 (+ at 2)))) (if end (+ end 2) n))))
+            (t (return at))))))
+
+(defun file-line-column (path offset form-number)
+  "Where in the file at PATH a definition begins, as (line column): from
+character OFFSET when SBCL kept one — where reading its top-level form
+began, so before the blank lines and comments above it — else at the start
+of top-level form FORM-NUMBER, found by reading with *READ-SUPPRESS*,
+which interns nothing."
+  (with-open-file (in path :external-format '(:utf-8 :replacement #\?))
+    (let ((text (make-string (file-length in))))
+      (setf text (subseq text 0 (read-sequence text in)))
+      (let ((at (or offset
+                    (and form-number
+                         (let ((s (make-string-input-stream text)) (*read-suppress* t))
+                           (handler-case
+                               (loop for n from 0
+                                     do (when (= n form-number) (return (file-position s)))
+                                        (read s nil nil))
+                             (error () nil)))))))
+        (and at (line-and-column text (skip-blank text at)))))))
+
+(defun definitions-in (package name)
+  "Where SBCL knows NAME (seen from PACKAGE) to be defined in a file:
+((path line column kind) …), 0-based. A definition evaluated from a string
+— an editor send — has no file, and is not here: the editor's own index of
+the project's files finds those."
+  (let* ((*package* (package-named package))
+         (s (find-named name))
+         (out '()))
+    (when s
+      (dolist (type *definition-types*)
+        (dolist (src (ignore-errors (sb-introspect:find-definition-sources-by-name s type)))
+          (let* ((pathname (ignore-errors (sb-introspect:definition-source-pathname src)))
+                 (file (and pathname (ignore-errors (probe-file (translate-logical-pathname pathname))))))
+            (when file
+              (let ((at (ignore-errors
+                         (file-line-column file
+                                           (sb-introspect:definition-source-character-offset src)
+                                           (first (sb-introspect:definition-source-form-path src))))))
+                (when at
+                  (pushnew (list (namestring file) (first at) (second at) (string-downcase (symbol-name type)))
+                           out :test (lambda (a b) (and (equal (first a) (first b)) (eql (second a) (second b))))))))))))
+    (nreverse out)))
 
 ;;; ---- the requests -------------------------------------------------------
 

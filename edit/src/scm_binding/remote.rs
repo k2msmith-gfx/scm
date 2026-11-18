@@ -1296,6 +1296,62 @@ mod sbcl_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// L5's exit criterion: M-. on a call jumps to its `defun` in another
+    /// file — one SBCL never loaded, from the project's own files, with no
+    /// SBCL running; one SBCL loaded from outside the project, from SBCL —
+    /// and M-, comes back.
+    #[test]
+    fn m_dot_finds_a_lisp_definition_loaded_or_not() {
+        if !sbcl_on_path() {
+            eprintln!("sbcl is not on the PATH: skipped");
+            return;
+        }
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        let top = std::env::temp_dir().join(format!("edit-lisp-xref-{}", std::process::id()));
+        let (proj, lib) = (top.join("proj"), top.join("lib"));
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(proj.join("geo.asd"), "(asdf:defsystem :geo :components ((:file \"src/geo\")))\n").unwrap();
+        std::fs::write(proj.join("src/geo.lisp"), "(defpackage :geo (:use :cl))\n(in-package :geo)\n\n;; The area of a circle.\n(defun area (r)\n  (* pi r r))\n").unwrap();
+        std::fs::write(proj.join("main.lisp"), "(in-package :geo)\n(print (area 2))\n(print (far-fn 1))\n").unwrap();
+        std::fs::write(lib.join("far.lisp"), "(in-package :cl-user)\n\n(defun far-fn (x)\n  (1+ x))\n").unwrap();
+        let path = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+        s.call(&format!("(open-path \"{}\")", path(&proj.join("main.lisp"))));
+        s.call("(set! *sbcl-init* #f)");
+        let at = |s: &mut super::super::standalone::Session| s.eval_to_string("(list (%text (buffer-basename (buffer-path (%editor-active-buffer 1)))) (car (%editor-cursor 1)))").unwrap();
+        let on = |s: &mut super::super::standalone::Session, line: usize, col: usize| {
+            s.call(&format!("(%editor-goto-line 1 {line})"));
+            for _ in 0..col {
+                s.call("(%editor-act 1 \"right\")");
+            }
+        };
+        // Not loaded, no SBCL: the project's own files.
+        on(&mut s, 1, 9);
+        s.call("(find-definition-at-point)");
+        assert_eq!(at(&mut s), "(\"geo.lisp\" 4)", "the defun in src/geo.lisp");
+        assert_eq!(s.eval_to_string("(if (sbcl-running?) 1 0)").unwrap(), "0", "none was started to ask");
+        s.call("(go-back-from-definition)");
+        assert_eq!(at(&mut s), "(\"main.lisp\" 1)", "M-, comes back");
+        // Loaded from outside the project: SBCL says where.
+        s.call(&format!(
+            "(sbcl-start) (lisp-ask *sbcl* \"(load (compile-file \\\"{}\\\" :output-file \\\"{}\\\"))\")",
+            path(&lib.join("far.lisp")),
+            path(&top.join("far.fasl"))
+        ));
+        on(&mut s, 2, 9);
+        s.call("(find-definition-at-point)");
+        assert_eq!(at(&mut s), "(\"far.lisp\" 2)", "the defun SBCL loaded");
+        s.call("(go-back-from-definition)");
+        assert_eq!(at(&mut s), "(\"main.lisp\" 2)");
+        // A name defined nowhere says so.
+        s.call("(jump-to-definition \"no-such-fn\")");
+        let echo = crate::textpane::lines(crate::app::MINIBUFFER).last().map(|(_, l)| l.clone()).unwrap_or_default();
+        assert_eq!(echo, "no definition of no-such-fn found");
+        s.call("(sbcl-stop)");
+        let _ = std::fs::remove_dir_all(&top);
+    }
+
     /// An interrupt from a second connection stops a runaway where it
     /// runs, says the host stopped it, and leaves the server up.
     #[test]

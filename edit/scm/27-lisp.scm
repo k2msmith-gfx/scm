@@ -220,6 +220,32 @@ error, and a REPL line whole when its brackets close."
 (%read-watch "lisp")
 (set! *wake-hooks* (cons sbcl-read-poll *wake-hooks*))
 
+;; ── M-. (L5) ──────────────────────────────────────────────────────────────
+;; Where a name is defined, from two places: the project's Lisp files as
+;; they stand (%lisp-definitions — every `def…` form naming it, under the
+;; nearest directory above with a .asd or .git; the buffer on screen as it
+;; is, saved or not), which knows code SBCL was SENT, since SBCL keeps no
+;; file for a form evaluated from a string; and, when SBCL is running and
+;; idle, SBCL itself (sb-introspect), which knows what was LOADED from a
+;; file — a Quicklisp library, SBCL's own source. The project's come first;
+;; one SBCL names on the same line is not said twice. M-, comes back.
+(define (lisp-definition-sites name)
+  (let* ((eid (editor-pane-id))
+         (path (real-file (buffer-path (%editor-active-buffer eid))))
+         (here (if path
+                   (%lisp-definitions path name (list (list path (%text (%editor-text eid)))))
+                   '()))
+         (loaded (if (sbcl-running?)
+                     (let ((s (lisp-ask *sbcl* (lisp-call "definitions-in" (lisp-buffer-package) name))))
+                       (if (list? s) (filter (lambda (site) (and (list? site) (= (length site) 4))) s) '()))
+                     '())))
+    (append here
+            (filter (lambda (site)
+                      (not (any (lambda (h) (and (equal? (car h) (car site)) (= (cadr h) (cadr site)))) here)))
+                    loaded))))
+
+(hash-table-set! *language-definitions* "lisp" lisp-definition-sites)
+
 ; What a send reads from a Lisp buffer: the top-level form at the point and
 ; the expression before it, off Common Lisp's own tokens — `|a (b|` is one
 ; symbol, and `#+sbcl (f)` one form.

@@ -72,6 +72,12 @@ Example: (find-definitions \"stair\")"
 
 (define *definition-marks* '())   ; ((buf line index) …), newest first
 
+; Where a LANGUAGE finds its own definitions (27-lisp: SBCL's and the Lisp
+; project's), language → (lambda (name) ((path line column form) …)). A
+; language with none here is Scheme, searched as above, or asks its
+; backend (Rust's, 20-rust).
+(define *language-definitions* (make-hash-table equal?))
+
 (define (goto-site site)
   ; Visit SITE's file as text and put point on the name.
   (match site
@@ -95,17 +101,20 @@ Example: (find-definitions \"stair\")"
                       (cons (list (%editor-active-buffer eid) line index) *definition-marks*)))
       (_ #f))
     (goto-site site))
-  (define foreign (non-scheme-backend (%editor-active-buffer eid)))
-  (match (if foreign
-           ((or (backend-op foreign :definition-sites) (lambda (n) '())) name)
-           (definition-sites name))
+  (define own (hash-table-ref/default *language-definitions*
+                                      (%buffer-language eid (%editor-active-buffer eid)) #f))
+  (define foreign (and (not own) (non-scheme-backend (%editor-active-buffer eid))))
+  (match (cond (own (own name))
+               (foreign ((or (backend-op foreign :definition-sites) (lambda (n) '())) name))
+               (else (definition-sites name)))
     (()
-      (if (and (not foreign) (%env-ref (string->symbol name) #f))
-        (begin
+      (cond
+        (own (echo "no definition of " name " found"))
+        ((and (not foreign) (%env-ref (string->symbol name) #f))
           (describe-name name)
           (echo name " has no source in this scene's files or the preludes — "
                 "built into ray, or defined at the REPL; its doc is in the REPL"))
-        (echo "no definition of " name " in this scene's files or the preludes")))
+        (else (echo "no definition of " name " in this scene's files or the preludes"))))
     ((site) (go site))
     (sites
       (read-minibuffer
