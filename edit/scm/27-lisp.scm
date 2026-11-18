@@ -11,11 +11,21 @@
 ;## text here (%lisp-package), and handed to the server's edit-serve:in. The
 ;## REPL panel's lines are evaluated in the REPL's own package, which an
 ;## (in-package …) typed there changes, and its prompt says which.
+;##
+;## AN ERROR IS A BREAK (L7), as at SBCL's own prompt: the send answers its
+;## message, and the restarts are listed under it; the connection is then
+;## inside the error, a level deeper (the prompt says `CL-USER[1]> `), and
+;## what the REPL — or a buffer — sends evaluates there. A restart's number
+;## takes it (one that wants a value asks for the value's form next, or
+;## takes it on the line: `1 42`), `:abort` gives the innermost send up and
+;## `:top` all of them. C-h e shows the calls with their locals.
 
 (define *sbcl-program* "sbcl")   ; what sbcl-start runs
 (define *sbcl* #f)               ; the connection to it, once started
 (define *sbcl-init* #t)          ; load ~/.sbclrc (Quicklisp and the rest)? (D1)
 (define *sbcl-repl-package* "CL-USER")
+(define *sbcl-level* 0)          ; how many breaks deep the connection is
+(define *sbcl-asking* #f)        ; the restart waiting for its value's form
 
 (define (sbcl-args)
   ; serve.lisp, loaded as source, on the address. --disable-debugger: an
@@ -37,6 +47,8 @@ starting it before then."
   (unless (sbcl-running?)
     (set! *sbcl* (%remote-start *sbcl-program* 0 (sbcl-args)))
     (set! *sbcl-repl-package* "CL-USER")
+    (set! *sbcl-level* 0)
+    (set! *sbcl-asking* #f)
     (echo "sbcl running at " (%remote-address *sbcl*)))
   *sbcl*)
 
@@ -92,36 +104,49 @@ starting it before then."
   ; A Lisp answer as the shell takes it: NIL and "" are nothing.
   (and x (not (eq? x 'NIL)) (not (equal? x "")) x))
 
-(define (refresh-repl-package! conn)
-  ; Ask which package the REPL is in now, and redraw its prompt.
-  (hash-table-set! *remote-callbacks*
-    (cons conn (%remote-eval-async conn "(package-name *package*)" #f))
-    (lambda (r)
-      (when (eq? (%alist-ref r :status #f) 'ok)
-        (let ((name (guard (e (#t #f)) (read (open-input-string (%alist-ref r :printed ""))))))
-          (when (string? name)
-            (set! *sbcl-repl-package* name)
-            ; (The standalone's REPL panel; a host without one has no
-            ; prompt to redraw.)
-            (guard (e (#t #f))
-              (when (%editing-pane? 2) (%edit! :prompt (repl-prompt))))))))))
+(define (sbcl-prompt)
+  ; CL-USER> at the top, CL-USER[2]> two breaks down, and the restart's
+  ; name while it waits for a value: `USE-VALUE value> `.
+  (cond (*sbcl-asking*
+          (let ((close (string-contains *sbcl-asking* "]")))
+            (string-append (if close (substring *sbcl-asking* 1 close) "restart") " value> ")))
+        ((zero? *sbcl-level*) (string-append *sbcl-repl-package* "> "))
+        (else (string-append *sbcl-repl-package* "[" (number->string *sbcl-level*) "]> "))))
+
+(define (sbcl-heard! r)
+  ; An eval's answer says where the connection is now: its break level,
+  ; the restart waiting for a value, the package the REPL reads in. A break
+  ; it entered lists its restarts, numbered, under the error.
+  (set! *sbcl-level* (%alist-ref r :level 0))
+  (set! *sbcl-asking* (%alist-ref r :asking #f))
+  (set! *sbcl-repl-package* (%alist-ref r :package *sbcl-repl-package*))
+  (let ((restarts (%alist-ref r :restarts '())))
+    (unless (null? restarts)
+      (let loop ((rs restarts) (i 0))
+        (unless (null? rs)
+          (*transcript-append* (string-append "  " (number->string i) ": " (car rs)) :dim)
+          (loop (cdr rs) (+ i 1))))
+      (*transcript-append*
+        (string-append "  break " (number->string *sbcl-level*)
+                       ": a restart's number takes it, :abort gives the send up, anything else evaluates in the error")
+        :dim)
+      (echo "error: " (%alist-ref r :message "") "   — break " (number->string *sbcl-level*)
+            ": a restart's number at the REPL (C-c C-z), or :abort")))
+  ; (The standalone's REPL panel; a host without one has no prompt to
+  ; redraw.)
+  (guard (e (#t #f))
+    (when (%editing-pane? 2) (%edit! :prompt (repl-prompt)))))
 
 (define (lisp-backend conn)
   "A Lisp buffer's backend at the SBCL on CONN: the socket backend, with
 completion and describe asked in the buffer's package, the REPL's prompt
-its package's, and a REPL line whole when its brackets close."
+its package's and its break level, a break's restarts listed under its
+error, and a REPL line whole when its brackets close."
   (let ((base (remote-backend conn "sbcl")))
     (append
       (list (cons :eval-async
                   (lambda (src k)
-                    ((backend-op base :eval-async)
-                     src
-                     (lambda (r)
-                       (k r)
-                       ; A REPL line may have changed the REPL's package.
-                       (when (and (string-contains src "in-package")
-                                  (not (string-prefix? "(edit-serve:in " src)))
-                         (refresh-repl-package! conn))))))
+                    ((backend-op base :eval-async) src (lambda (r) (k r) (sbcl-heard! r)))))
             (cons :complete
                   (lambda (prefix)
                     (let ((names (lisp-ask conn (lisp-call "complete-in" (lisp-buffer-package) prefix))))
@@ -134,7 +159,7 @@ its package's, and a REPL line whole when its brackets close."
                   (lambda (name)
                     (let ((d (lisp-ask conn (lisp-call "describe-in" (lisp-buffer-package) name))))
                       (and (pair? d) (lisp-said (cadr d))))))
-            (cons :prompt (lambda () (string-append *sbcl-repl-package* "> ")))
+            (cons :prompt sbcl-prompt)
             (cons :whole? %lisp-complete?))
       (filter (lambda (op) (not (memq (car op) '(:eval-async :complete :doc :signature)))) base))))
 

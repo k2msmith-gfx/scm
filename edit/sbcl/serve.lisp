@@ -19,11 +19,15 @@
 ;;;; served on its own thread, so `:interrupt` from a second connection
 ;;;; reaches an evaluation running on the first — the protocol's rule.
 ;;;;
-;;;; The debugger never opens. An error, a `break` or anything else that
-;;;; would enter it answers the request instead, with the message and the
-;;;; calls; a server has no terminal for the debugger to read a choice from,
-;;;; and waiting on one would hang the send. (L7 replaces this with a break
-;;;; served over the connection.)
+;;;; An error does not unwind: it is a BREAK, served over the connection
+;;;; (L7). The request is answered with the message, the calls and their
+;;;; locals, and the restarts, numbered; the connection's next requests are
+;;;; then evaluated INSIDE the error, a level deeper, until one takes a
+;;;; restart — a number (`1`, or `1 (+ 2 3)` for a restart that wants a
+;;;; value), `:abort` to give the innermost send up, `:top` all of them.
+;;;; Whatever finishes answers the request last read, so a USE-VALUE's
+;;;; request is answered with the original send's value. SBCL's own
+;;;; debugger never opens: there is no terminal for it to read from.
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (require :sb-bsd-sockets)
@@ -31,7 +35,7 @@
 
 (defpackage :edit-serve
   (:use :cl)
-  (:export #:main #:in #:complete-in #:describe-in))
+  (:export #:main #:in #:complete-in #:describe-in #:*break-on-error*))
 
 (in-package :edit-serve)
 
@@ -163,17 +167,25 @@ letters of its own is written |Like This|."
 
 (defvar *lock* (sb-thread:make-mutex :name "edit-serve"))
 (defvar *evaluating* '()
-  "The threads evaluating a request right now.")
+  "The threads evaluating a request right now — once for each request, so
+a thread evaluating inside a break is here twice.")
 
 (defun interrupt-all ()
   (sb-thread:with-mutex (*lock*)
-    (dolist (th *evaluating*)
+    (dolist (th (remove-duplicates *evaluating*))
       (ignore-errors
        (sb-thread:interrupt-thread
         th #'interrupted)))))
 
+(defvar *reading* nil
+  "Whether this thread is waiting for its connection's next request — in a
+break, between requests — which an interrupt leaves alone.")
+
 (defun interrupted ()
-  (failed "interrupted" :host-stopped t))
+  ;; A break with the evaluation where it was: CONTINUE goes on with it.
+  (unless *reading*
+    (with-simple-restart (continue "Go on with the evaluation.")
+      (enter-break (make-condition 'simple-error :format-control "interrupted") t))))
 
 ;;; ---- eval ---------------------------------------------------------------
 
@@ -191,27 +203,97 @@ between a condition and its handler."
         (member name '(eval sb-int:simple-eval-in-lexenv sb-kernel::%signal signal
                        sb-debug::run-hook invoke-debugger sb-int:%break)))))
 
+(defun frame-locals (frame)
+  "FRAME's locals as ((name printed) …): those its code kept, which is
+more of them under (debug 2)."
+  (let ((fun (sb-di:frame-debug-fun frame))
+        (at (ignore-errors (sb-di:frame-code-location frame))))
+    (when (and at (sb-di:debug-var-info-available fun))
+      (let ((*print-length* 5) (*print-level* 3) (*print-pretty* nil))
+        (loop for v in (ignore-errors (sb-di:ambiguous-debug-vars fun ""))
+              for name = (symbol-name (sb-di:debug-var-symbol v))
+              when (and (plusp (length name))
+                        (eq (ignore-errors (sb-di:debug-var-validity v at)) :valid))
+                collect (list (string-downcase name)
+                              (let ((text (safely (lambda () (prin1-to-string (sb-di:debug-var-value v frame)))
+                                                  "#<unprintable>")))
+                                (if (> (length text) 200) (concatenate 'string (subseq text 0 200) "…") text))))))))
+
 (defun frames ()
-  "The calls from the one that signalled out to the send, as text — the
-debugger's frames, cut where the server's own begin."
+  "The calls from the one that signalled out to the request, as ((text
+locals) …) — the debugger's frames, cut where the server's own begin."
   (let ((out '()))
     (block walk
       (sb-debug:map-backtrace
        (lambda (frame)
          (let ((name (ignore-errors (sb-di:debug-fun-name (sb-di:frame-debug-fun frame)))))
-           (when (eq name 'eval-forms) (return-from walk))
+           (when (member name '(eval-forms take-restart)) (return-from walk))
            (unless (server-frame-p name)
-             (push (safely (lambda ()
-                             (let ((*print-length* 5) (*print-level* 3) (*print-pretty* nil))
-                               (if (equal name '(lambda ()))
-                                   ;; A top-level form, which EVAL compiled into a
-                                   ;; function with no name: show the form.
-                                   (prin1-to-string *form*)
-                                   (with-output-to-string (s) (sb-debug::print-frame-call frame s)))))
-                           "#<a frame>")
+             (push (list (safely (lambda ()
+                                   (let ((*print-length* 5) (*print-level* 3) (*print-pretty* nil))
+                                     (if (equal name '(lambda ()))
+                                         ;; A top-level form, which EVAL compiled into a
+                                         ;; function with no name: show the form.
+                                         (prin1-to-string *form*)
+                                         (with-output-to-string (s) (sb-debug::print-frame-call frame s)))))
+                                 "#<a frame>")
+                         (safely (lambda () (frame-locals frame)) '()))
                    out)
-             (when (>= (length out) *frames-limit*) (return-from walk)))))))
+             (when (>= (length out) *frames-limit*) (return-from walk)))))
+       ;; From the frame that signalled, named outright: by default the
+       ;; walk starts at the newest frame a trap interrupted, which inside
+       ;; a `(car 5)` break is that one's, whatever signalled since.
+       :from (or (ignore-errors (sb-debug::resolve-stack-top-hint)) :debugger-frame)))
     (nreverse out)))
+
+;;; ---- the connection's state ---------------------------------------------
+;;; Each bound per connection (serve-connection) or per break (enter-break).
+
+(defvar *stream* nil "The connection's stream: a break answers on it.")
+(defvar *owed* 0
+  "The id of the request last read on this connection — the one the next
+answer goes to. A restart that lets a send finish answers the restart's own
+request with the send's value.")
+(defvar *level* 0 "How many breaks deep the connection is.")
+(defvar *restarts* '() "The innermost break's restarts, as numbered.")
+(defvar *asking* nil "A restart of the innermost break waiting for its value's form.")
+(defvar *top-abort* nil "The ABORT that gives up the outermost send: :top.")
+(defvar *out* nil "Where the request being evaluated prints.")
+(defvar *warnings* '() "The compiler's warnings for it, newest first.")
+(defvar *break-on-error* t
+  "Whether an error is a break (the default) or answers and unwinds at once,
+as L1 did.")
+
+(defun reply (text)
+  (write-string text *stream*)
+  (terpri *stream*)
+  (finish-output *stream*))
+
+(defun shortest-name (pkg)
+  (reduce (lambda (a b) (if (< (length b) (length a)) b a))
+          (package-nicknames pkg) :initial-value (package-name pkg)))
+
+(defun eval-reply (status &key value message host-stopped frames restarts asking)
+  "An eval's answer, to the request owed one: what was printed and the
+compiler's warnings since the last answer, the break level and the package
+evaluation is in now, and the rest as STATUS has it."
+  (let ((output (get-output-stream-string *out*))
+        (warnings (reverse *warnings*)))
+    (setf *warnings* '())
+    (with-output-to-string (s)
+      (format s "(:id ~a :status ~(~a~)" *owed* status)
+      (if (eq status :ok)
+          (format s " :value ~a" (wire-string value))
+          (format s " :message ~a :host-stopped ~a :backtrace ~a :locals (~{~a~^ ~})"
+                  (wire-string message) (if host-stopped "#t" "#f")
+                  (wire-list (mapcar #'first frames))
+                  (mapcar (lambda (f) (format nil "(~{~a~^ ~})" (mapcar #'wire-list (second f)))) frames)))
+      (when restarts (format s " :restarts ~a" (wire-list restarts)))
+      (when asking (format s " :asking ~a" (wire-string asking)))
+      (format s " :output ~a :warnings ~a :level ~a :package ~a)"
+              (wire-string output) (wire-list warnings) *level* (wire-string (shortest-name *package*))))))
+
+;;; ---- errors and breaks --------------------------------------------------
 
 (defun failed (message &key host-stopped (backtrace (frames)))
   "Give the request up, answering MESSAGE; never returns."
@@ -219,6 +301,68 @@ debugger's frames, cut where the server's own begin."
 
 (defun fail-from-condition (c)
   (failed (message-of c)))
+
+(defun restart-text (r)
+  (format nil "[~a] ~a" (restart-name r) (message-of r)))
+
+(defun break-restarts (c)
+  "C's restarts, innermost first, as far as the one that gives up the
+outermost send: those past it are the server's own."
+  (let ((all (compute-restarts c)))
+    (subseq all 0 (min (length all) (1+ (or (position *top-abort* all) (1- (length all))))))))
+
+(defun enter-break (c &optional host-stopped)
+  "Answer the request with C — its message, calls, locals and restarts —
+and serve the connection's next requests from here, a level deeper, until
+one takes a restart. Never returns."
+  (unless *break-on-error*
+    (failed (message-of c) :host-stopped host-stopped))
+  (let* ((frames (frames))
+         (restarts (break-restarts c))
+         (*level* (1+ *level*))
+         (*restarts* restarts)
+         (*asking* nil))
+    (reply (eval-reply :error :message (message-of c) :host-stopped host-stopped
+                              :frames frames :restarts (mapcar #'restart-text restarts)))
+    (serve-requests)))
+
+(defun command-of (code)
+  "What CODE asks of a break: (N), (N . \"value form\"), :abort or :top —
+or NIL, for code to evaluate."
+  (let* ((text (string-trim '(#\Space #\Tab #\Newline #\Return) code))
+         (digits (position-if-not #'digit-char-p text)))
+    (cond ((member text '(":abort" ":a" ":q") :test #'string-equal) :abort)
+          ((string-equal text ":top") :top)
+          ((and (plusp (length text)) (null digits)) (list (parse-integer text)))
+          ((and digits (plusp digits) (member (char text digits) '(#\Space #\Tab)))
+           (cons (parse-integer text :end digits) (subseq text digits))))))
+
+(defun take-restart (r &optional value-text)
+  "Invoke R; one that wants a value reads its form from VALUE-TEXT."
+  (if value-text
+      (let ((*query-io* (make-two-way-stream (make-string-input-stream value-text) (make-broadcast-stream))))
+        (invoke-restart-interactively r))
+      (invoke-restart r)))
+
+(defun run (code)
+  "A request's code, in a break perhaps: a command takes a restart, and
+anything else evaluates inside the error. The values, or :asking."
+  (let ((cmd (and (plusp *level*) (command-of code))))
+    (flet ((our-abort () (or (find 'abort *restarts* :key #'restart-name) *top-abort*)))
+      (cond ((eq cmd :abort) (invoke-restart (our-abort)))
+            ((eq cmd :top) (invoke-restart *top-abort*))
+            (*asking* (let ((r *asking*)) (setf *asking* nil) (take-restart r code)))
+            (cmd
+             (let ((r (nth (car cmd) *restarts*)))
+               (cond ((null r) (failed (format nil "there is no restart ~a: 0 to ~a" (car cmd) (1- (length *restarts*)))
+                                       :backtrace '()))
+                     ((cdr cmd) (take-restart r (cdr cmd)))
+                     ((sb-kernel::restart-interactive-function r)
+                      ;; It wants a value: the next request is its form.
+                      (setf *asking* r)
+                      :asking)
+                     (t (take-restart r)))))
+            (t (eval-forms code))))))
 
 (defun eval-forms (code)
   "Every form of CODE, in order, in *PACKAGE*; the last one's values."
@@ -246,43 +390,58 @@ a buffer's symbols print as that buffer would write them.")
         (format nil "~{~a~^, ~}" (mapcar #'printed values))
         "; No values")))
 
-(defun answer-eval (id code)
-  (let* ((out (make-string-output-stream))
+(defun answer-eval (code)
+  (let* ((*out* (make-string-output-stream))
+         (*warnings* '())
          (no-input (make-string-input-stream ""))
-         (io (make-two-way-stream no-input out))
-         (warnings '())
+         (io (make-two-way-stream no-input *out*))
+         (level *level*)
          (result
            (catch 'request
-             (let ((*standard-output* out) (*error-output* out) (*trace-output* out) (*print-package* nil)
-                   (*standard-input* no-input) (*terminal-io* io) (*query-io* io) (*debug-io* io)
-                   ;; Whatever would open the debugger answers instead.
-                   (sb-ext:*invoke-debugger-hook* (lambda (c hook) (declare (ignore hook)) (fail-from-condition c)))
-                   (*debugger-hook* (lambda (c hook) (declare (ignore hook)) (fail-from-condition c))))
-               (sb-thread:with-mutex (*lock*) (push sb-thread:*current-thread* *evaluating*))
-               (unwind-protect
-                    (handler-bind ((warning
-                                     (lambda (w)
-                                       ;; The compiler's verdict on what was sent, kept
-                                       ;; with the output and said once.
-                                       (let ((line (format nil "; ~a: ~a"
-                                                           (if (typep w 'style-warning) "style-warning" "warning")
-                                                           (message-of w))))
-                                         (push line warnings)
-                                         (format out "~a~%" line))
-                                       (muffle-warning w)))
-                                   ((or error storage-condition)
-                                     #'fail-from-condition))
-                      (list :ok (values-text (eval-forms code))))
-                 (sb-thread:with-mutex (*lock*)
-                   (setf *evaluating* (remove sb-thread:*current-thread* *evaluating*))))))))
-    (let ((output (get-output-stream-string out)))
-      (destructuring-bind (status text &optional host-stopped backtrace) result
-        (if (eq status :ok)
-            (format nil "(:id ~a :status ok :value ~a :output ~a :warnings ~a)"
-                    id (wire-string text) (wire-string output) (wire-list (reverse warnings)))
-            (format nil "(:id ~a :status error :message ~a :output ~a :host-stopped ~a :backtrace ~a :warnings ~a)"
-                    id (wire-string text) (wire-string output)
-                    (if host-stopped "#t" "#f") (wire-list backtrace) (wire-list (reverse warnings))))))))
+             (restart-case
+                 (let ((*standard-output* *out*) (*error-output* *out*) (*trace-output* *out*) (*print-package* nil)
+                       (*standard-input* no-input) (*terminal-io* io) (*query-io* io) (*debug-io* io)
+                       (*top-abort* (if (zerop level) (find-restart 'abort) *top-abort*))
+                       ;; Where a backtrace starts (frames): an internal error
+                       ;; (`(car 5)`'s trap) leaves its frame here for as long as
+                       ;; its break lasts, and a request inside it has its own.
+                       (sb-debug:*stack-top-hint* nil)
+                       ;; Whatever would open the debugger is a break instead.
+                       (sb-ext:*invoke-debugger-hook* (lambda (c hook) (declare (ignore hook)) (enter-break c)))
+                       (*debugger-hook* (lambda (c hook) (declare (ignore hook)) (enter-break c))))
+                   (sb-thread:with-mutex (*lock*) (push sb-thread:*current-thread* *evaluating*))
+                   (unwind-protect
+                        (handler-bind ((warning
+                                         (lambda (w)
+                                           ;; The compiler's verdict on what was sent, kept
+                                           ;; with the output and said once.
+                                           (let ((line (format nil "; ~a: ~a"
+                                                               (if (typep w 'style-warning) "style-warning" "warning")
+                                                               (message-of w))))
+                                             (push line *warnings*)
+                                             (format *out* "~a~%" line))
+                                           (muffle-warning w)))
+                                       ;; Too deep to serve a break from: unwind.
+                                       (storage-condition #'fail-from-condition)
+                                       (error #'enter-break))
+                          (let ((values (run code)))
+                            (if (eq values :asking)
+                                (list :asking (restart-text *asking*))
+                                (list :ok (values-text values)))))
+                     (sb-thread:with-mutex (*lock*)
+                       (setf *evaluating* (remove sb-thread:*current-thread* *evaluating* :count 1)))))
+               (abort ()
+                 :report (lambda (s)
+                           (if (zerop level)
+                               (write-string "Give this send up." s)
+                               (format s "Return to break level ~a." level)))
+                 (list :ok "; Evaluation aborted"))))))
+    (destructuring-bind (status text &optional host-stopped backtrace) result
+      (case status
+        (:ok (eval-reply :ok :value text))
+        (:asking (eval-reply :ok :value (format nil "; ~a — its value's form next" text) :asking text))
+        (t (eval-reply :error :message text :host-stopped host-stopped
+                              :frames (mapcar (lambda (f) (if (consp f) f (list f '()))) backtrace)))))))
 
 ;;; ---- parse: is the text whole? ------------------------------------------
 
@@ -447,7 +606,7 @@ none — or NIL when it names nothing."
   (let ((id (or (field req "id") 0))
         (op (field req "op")))
     (cond
-      ((equal op "eval") (answer-eval id (or (field req "code") "")))
+      ((equal op "eval") (answer-eval (or (field req "code") "")))
       ((equal op "complete")
        (format nil "(:id ~a :status ok :candidates ~a)" id (wire-list (completions (or (field req "prefix") "")))))
       ((equal op "describe") (answer-describe id (or (field req "name") "")))
@@ -484,25 +643,32 @@ skipping brackets inside strings — or NIL at the end."
                                                 (write-char e out)))
                                ((char= d #\") (return))))))))))))
 
+(defun serve-requests ()
+  "Answer the connection's requests, one at a time, until it closes —
+from the top, or from inside a break."
+  (loop
+    (let ((text (let ((*reading* t)) (handler-case (read-datum *stream*) (error () nil)))))
+      (unless text (throw 'closed nil))
+      (reply (handler-case (let ((req (parse-request text)))
+                             (setf *owed* (or (field req "id") 0))
+                             (answer req))
+               ;; A bug here answers malformed rather than killing the
+               ;; connection — under the request's own :id if it has one.
+               (error (c)
+                 (format nil "(:id ~a :status malformed :message ~a)"
+                         (or (ignore-errors (field (parse-request text) "id")) 0)
+                         (wire-string (message-of c)))))))))
+
 (defun serve-connection (socket)
-  (let ((stream (sb-bsd-sockets:socket-make-stream socket :input t :output t
-                                                          :external-format :utf-8 :buffering :full))
+  (let ((*stream* (sb-bsd-sockets:socket-make-stream socket :input t :output t
+                                                             :external-format :utf-8 :buffering :full))
+        (*owed* 0)
+        (*level* 0)
         (*package* (find-package :cl-user)))
     (unwind-protect
-         (loop
-           (let ((text (handler-case (read-datum stream) (error () nil))))
-             (unless text (return))
-             (let ((reply (handler-case (answer (parse-request text))
-                            ;; A bug here answers malformed rather than killing the
-                            ;; connection — under the request's own :id if it has one.
-                            (error (c)
-                              (format nil "(:id ~a :status malformed :message ~a)"
-                                      (or (ignore-errors (field (parse-request text) "id")) 0)
-                                      (wire-string (message-of c)))))))
-               (write-string reply stream)
-               (terpri stream)
-               (finish-output stream))))
-      (ignore-errors (close stream))
+         ;; A connection that closes in a break leaves every level at once.
+         (catch 'closed (serve-requests))
+      (ignore-errors (close *stream*))
       (ignore-errors (sb-bsd-sockets:socket-close socket)))))
 
 (defun main (&optional (addr (car (last sb-ext:*posix-argv*))))

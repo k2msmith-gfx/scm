@@ -40,10 +40,10 @@ use super::{val_num, val_text, val_textv};
 struct Inbox {
     /// Requests a caller is blocked on, by id: their answer goes straight
     /// to the waiter.
-    waiting: Mutex<HashMap<u64, mpsc::Sender<Response>>>,
+    waiting: Mutex<HashMap<u64, mpsc::Sender<(Response, String)>>>,
     /// Async sends not yet answered, and the answers that have come.
     pending: Mutex<HashSet<u64>>,
-    done: Mutex<VecDeque<Response>>,
+    done: Mutex<VecDeque<(Response, String)>>,
     /// The server closed the connection (or the read failed): what it said.
     closed: Mutex<Option<String>>,
     /// ONE request in flight at a time; the rest wait here. A server that
@@ -170,10 +170,12 @@ fn read_loop(mut stream: TcpStream, inbox: Arc<Inbox>, addr: String) {
                     }
                     inbox.next();
                     let waiter = inbox.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&answer.id);
+                    // The text goes too: keys scm's Response does not know
+                    // (SBCL's break, below) are read from it.
                     if let Some(w) = waiter {
-                        let _ = w.send(answer);
+                        let _ = w.send((answer, text));
                     } else if inbox.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&answer.id) {
-                        inbox.done.lock().unwrap_or_else(|e| e.into_inner()).push_back(answer);
+                        inbox.done.lock().unwrap_or_else(|e| e.into_inner()).push_back((answer, text));
                         crate::wake::wake();
                     }
                 }
@@ -193,10 +195,13 @@ fn read_loop(mut stream: TcpStream, inbox: Arc<Inbox>, addr: String) {
     let ids: Vec<u64> = inbox.pending.lock().unwrap_or_else(|e| e.into_inner()).drain().collect();
     let mut done = inbox.done.lock().unwrap_or_else(|e| e.into_inner());
     for id in ids {
-        done.push_back(Response {
-            id,
-            outcome: Outcome::Failed { message: why.clone(), output: String::new(), host_stopped: true, backtrace: Vec::new() },
-        });
+        done.push_back((
+            Response {
+                id,
+                outcome: Outcome::Failed { message: why.clone(), output: String::new(), host_stopped: true, backtrace: Vec::new() },
+            },
+            String::new(),
+        ));
     }
     drop(done);
     crate::wake::wake();
@@ -279,6 +284,11 @@ fn send(conn: &mut Conn, op: Op) -> Result<u64, String> {
 /// is interrupted from a second connection, and the wait goes on for its
 /// (host-stopped) answer.
 fn ask(id: u32, op: Op, timeout: Duration) -> Result<Response, String> {
+    ask_text(id, op, timeout).map(|(answer, _)| answer)
+}
+
+/// [`ask`], with the answer's text as it came.
+fn ask_text(id: u32, op: Op, timeout: Duration) -> Result<(Response, String), String> {
     let (rx, addr) = CONNS.with(|c| -> Result<_, String> {
         let mut conns = c.borrow_mut();
         let conn = conns.get_mut(&id).ok_or("no such connection")?;
@@ -316,13 +326,13 @@ fn running(id: u32) -> usize {
 }
 
 /// Every async answer that has come, on every connection: (connection,
-/// request id, answer).
-fn drain() -> Vec<(u32, Response)> {
+/// answer, its text).
+fn drain() -> Vec<(u32, Response, String)> {
     CONNS.with(|c| {
         let conns = c.borrow();
         let mut out = Vec::new();
         for (&id, conn) in conns.iter() {
-            out.extend(conn.inbox.done.lock().unwrap_or_else(|e| e.into_inner()).drain(..).map(|r| (id, r)));
+            out.extend(conn.inbox.done.lock().unwrap_or_else(|e| e.into_inner()).drain(..).map(|(r, text)| (id, r, text)));
         }
         out
     })
@@ -359,8 +369,97 @@ fn entry(k: &str, v: Val) -> Val {
 
 /// An eval's answer as a backend RESULT: ((:status . ok) (:value .
 /// "printed") (:output . "…")) or ((:status . error) (:message . "…")
-/// (:output . "…") (:backtrace . ("form  at loc" …)) (:host-stopped . #t/#f)).
-fn eval_result(outcome: Outcome) -> Result<Val, String> {
+/// (:output . "…") (:backtrace . ("form  at loc" …)) (:host-stopped . #t/#f)),
+/// and after either the keys of TEXT, the answer as it came, that only a
+/// server of another language sends ([`EXTRA_KEYS`]).
+fn eval_result(outcome: Outcome, text: &str) -> Result<Val, String> {
+    let mut result = eval_outcome(outcome)?;
+    if let Val::List(entries) = &mut result {
+        entries.extend(extra_keys(text).into_iter().map(|(k, v)| entry(&k, v)));
+    }
+    Ok(result)
+}
+
+/// The keys an eval's answer may carry that scm's protocol does not have:
+/// SBCL's (edit/sbcl/serve.lisp, docs/sbcl-plan.md L7) — the break level
+/// the connection is in, its numbered restarts, each call's locals beside
+/// `:backtrace`, the restart waiting for a value, and the package the next
+/// line reads in.
+const EXTRA_KEYS: [&str; 5] = ["level", "restarts", "locals", "asking", "package"];
+
+/// TEXT's [`EXTRA_KEYS`], read as the wire writes them: strings with
+/// Scheme's escapes, integers, `#t`/`#f`, symbols and lists of them.
+fn extra_keys(text: &str) -> Vec<(String, Val)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    let Some(Val::List(items)) = wire_datum(&chars, &mut i) else { return Vec::new() };
+    items
+        .chunks(2)
+        .filter_map(|kv| match kv {
+            [Val::Keyword(k), v] if EXTRA_KEYS.contains(&k.as_str()) => Some((k.clone(), v.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn wire_datum(chars: &[char], i: &mut usize) -> Option<Val> {
+    while chars.get(*i).is_some_and(|c| c.is_whitespace()) {
+        *i += 1;
+    }
+    match *chars.get(*i)? {
+        '(' => {
+            *i += 1;
+            let mut items = Vec::new();
+            loop {
+                while chars.get(*i).is_some_and(|c| c.is_whitespace()) {
+                    *i += 1;
+                }
+                if *chars.get(*i)? == ')' {
+                    *i += 1;
+                    return Some(Val::List(items));
+                }
+                items.push(wire_datum(chars, i)?);
+            }
+        }
+        '"' => {
+            *i += 1;
+            let mut s = String::new();
+            loop {
+                let c = *chars.get(*i)?;
+                *i += 1;
+                match c {
+                    '"' => return Some(Val::Str(s)),
+                    '\\' => {
+                        let e = *chars.get(*i)?;
+                        *i += 1;
+                        s.push(match e {
+                            'n' => '\n',
+                            't' => '\t',
+                            'r' => '\r',
+                            e => e,
+                        });
+                    }
+                    c => s.push(c),
+                }
+            }
+        }
+        _ => {
+            let start = *i;
+            while chars.get(*i).is_some_and(|c| !c.is_whitespace() && *c != '(' && *c != ')' && *c != '"') {
+                *i += 1;
+            }
+            let atom: String = chars[start..*i].iter().collect();
+            Some(match atom.as_str() {
+                "#t" => Val::Bool(true),
+                "#f" => Val::Bool(false),
+                a if a.starts_with(':') => Val::Keyword(a[1..].into()),
+                a => a.parse().map_or_else(|_| Val::Sym(a.into()), Val::Int),
+            })
+        }
+    }
+}
+
+fn eval_outcome(outcome: Outcome) -> Result<Val, String> {
     Ok(match outcome {
         Outcome::Value { value, output } => Val::List(vec![
             entry("status", Val::Sym("ok".into())),
@@ -426,8 +525,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
             Some(Val::Float(x)) => *x,
             _ => 30.0,
         });
-        let answer = ask(conn_id(args), Op::Eval { code, source }, timeout)?;
-        eval_result(answer.outcome)
+        let (answer, text) = ask_text(conn_id(args), Op::Eval { code, source }, timeout)?;
+        eval_result(answer.outcome, &text)
     })?;
     // `(%remote-eval-async id code source)` — send an evaluation and answer
     // its request id at once; the result arrives through %remote-poll.
@@ -441,8 +540,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
     // connection: ((connection request-id result) …), oldest first.
     interp.define_fn("%remote-poll", |_| {
         let mut out = Vec::new();
-        for (conn, answer) in drain() {
-            out.push(Val::List(vec![Val::Int(conn as i64), Val::Int(answer.id as i64), eval_result(answer.outcome)?]));
+        for (conn, answer, text) in drain() {
+            out.push(Val::List(vec![Val::Int(conn as i64), Val::Int(answer.id as i64), eval_result(answer.outcome, &text)?]));
         }
         Ok(Val::List(out))
     })?;
@@ -994,9 +1093,10 @@ mod sbcl_tests {
         let pool = s.eval_to_string("(editor-candidates)").unwrap();
         assert!(pool.contains("\"sq\"") && pool.contains("\"mapcar\""), "the buffer's pool is SBCL's");
         // The REPL: SBCL's prompt in the REPL's own package, which an
-        // in-package typed there changes.
+        // in-package typed there changes — two breaks down, after the two
+        // errors (L7), until :top leaves them.
         s.call("(repl)");
-        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"CL-USER> \"");
+        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"CL-USER[2]> \"");
         let line = |s: &mut super::super::standalone::Session, text: &str| {
             for c in text.chars() {
                 s.text(&c.to_string());
@@ -1004,6 +1104,8 @@ mod sbcl_tests {
             s.key("return");
             assert!(s.settle(30.0));
         };
+        line(&mut s, ":top");
+        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"CL-USER> \"");
         line(&mut s, "(in-package :shapes)");
         let t0 = std::time::Instant::now();
         while s.eval_to_string("(repl-prompt)").unwrap() != "\"SHAPES> \"" {
@@ -1018,6 +1120,110 @@ mod sbcl_tests {
         line(&mut s, "(+ 1");
         line(&mut s, "2)");
         assert!(transcript().iter().any(|l| l == "=> 3"), "{:?}", transcript());
+        s.call("(sbcl-stop)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L7's exit criterion, through the editor: an error is a break, served
+    /// at the REPL panel. USE-VALUE finishes the original send with its
+    /// value; CONTINUE after a cerror; (break); an error inside a break and
+    /// out of both; a call's locals in the error pane; and an interrupt of a
+    /// runaway lands in a break, where it can be looked at and resumed.
+    #[test]
+    fn a_lisp_error_is_a_break() {
+        if !sbcl_on_path() {
+            eprintln!("sbcl is not on the PATH: skipped");
+            return;
+        }
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-lisp-break-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("break.lisp");
+        std::fs::write(
+            &file,
+            "(defun inner (x) (declare (optimize (debug 2))) (let ((y (* 2 x))) (error \"too big: ~a\" y)))\n(inner 4)\n(+ 1 nope)\n",
+        )
+        .unwrap();
+        s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
+        s.call("(set! *sbcl-init* #f)");
+        let prompt = |s: &mut super::super::standalone::Session| s.eval_to_string("(repl-prompt)").unwrap();
+        let line = |s: &mut super::super::standalone::Session, text: &str| {
+            s.call("(%pane-clear 2)");
+            for c in text.chars() {
+                s.text(&c.to_string());
+            }
+            s.key("return");
+            assert!(s.settle(30.0), "SBCL answers {text}");
+        };
+        let has = |want: &str| transcript().iter().any(|l| l == want);
+        // A call's locals reach the error pane.
+        s.call("(%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)");
+        assert!(s.settle(30.0));
+        assert!(has("error: too big: 8"), "{:?}", transcript());
+        assert!(has("  0: [ABORT] Give this send up."), "the restarts, numbered: {:?}", transcript());
+        let page = s.eval_to_string("(error-markdown *last-error*)").unwrap();
+        assert!(page.contains("(INNER 4)") && page.contains("`x` = `4`"), "{page}");
+        s.call("(repl)");
+        assert_eq!(prompt(&mut s), "\"CL-USER[1]> \"");
+        // Inside the error, an expression evaluates there; :abort leaves.
+        line(&mut s, "(+ 2 2)");
+        assert!(has("=> 4"), "{:?}", transcript());
+        line(&mut s, ":abort");
+        assert_eq!(prompt(&mut s), "\"CL-USER> \"");
+        // USE-VALUE: the restart asks for its value, and the send it broke
+        // finishes with it — answering the value's own line.
+        s.call("(focus-scene-editor) (%editor-goto-line 1 2) (eval-defun)");
+        assert!(s.settle(30.0));
+        assert!(has("error: The variable NOPE is unbound."), "{:?}", transcript());
+        assert!(has("  1: [USE-VALUE] Use specified value."), "{:?}", transcript());
+        s.call("(repl)");
+        line(&mut s, "1");
+        assert_eq!(prompt(&mut s), "\"USE-VALUE value> \"");
+        line(&mut s, "(* 6 7)");
+        assert!(has("=> 43"), "the original send's value: {:?}", transcript());
+        assert_eq!(prompt(&mut s), "\"CL-USER> \"");
+        // CONTINUE after a cerror; out of a (break).
+        line(&mut s, "(progn (cerror \"go on\" \"bad\") :went-on)");
+        assert!(has("  0: [CONTINUE] go on"), "{:?}", transcript());
+        line(&mut s, "0");
+        assert!(has("=> :WENT-ON"), "{:?}", transcript());
+        line(&mut s, "(progn (break \"look\") 7)");
+        assert!(has("error: look"), "{:?}", transcript());
+        line(&mut s, "0");
+        assert!(has("=> 7"), "{:?}", transcript());
+        // An error inside a break is a second break; out of both.
+        line(&mut s, "(car 5)");
+        line(&mut s, "(car 6)");
+        assert_eq!(prompt(&mut s), "\"CL-USER[2]> \"");
+        line(&mut s, ":abort");
+        assert_eq!(prompt(&mut s), "\"CL-USER[1]> \"");
+        line(&mut s, ":abort");
+        assert_eq!(prompt(&mut s), "\"CL-USER> \"");
+        // An interrupted runaway is a break, not lost work: look, go on,
+        // and give it up.
+        line(&mut s, "(defvar *n* 0)");
+        s.call("(%pane-clear 2)");
+        for c in "(loop (incf *n*))".chars() {
+            s.text(&c.to_string());
+        }
+        s.key("return");
+        std::thread::sleep(Duration::from_millis(300));
+        s.call("(remote-interrupt)");
+        assert!(s.settle(30.0));
+        assert!(has("error: interrupted  (stopped)"), "{:?}", transcript());
+        assert!(has("  0: [CONTINUE] Go on with the evaluation."), "{:?}", transcript());
+        line(&mut s, "(plusp *n*)");
+        assert!(has("=> T"), "the work so far is there: {:?}", transcript());
+        s.call("(%pane-clear 2)");
+        s.text("0");
+        s.key("return");
+        std::thread::sleep(Duration::from_millis(300));
+        s.call("(remote-interrupt)");
+        assert!(s.settle(30.0));
+        assert!(has("error: interrupted  (stopped)"), "it went on, and stopped again: {:?}", transcript());
+        line(&mut s, ":top");
+        assert_eq!(prompt(&mut s), "\"CL-USER> \"");
         s.call("(sbcl-stop)");
         let _ = std::fs::remove_dir_all(&dir);
     }

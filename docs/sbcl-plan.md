@@ -1,8 +1,9 @@
 # Common Lisp in `edit`, through SBCL — plan, 2026-11-17
 
 **IN PROGRESS.** L0 (the measurements), L1 (the server), L2 (the
-language) and L3 (the shell) are done; each is below. A `.lisp` file
-sends to SBCL. Kevin, 2026-11-17: *"I would probably switch to edit if it
+language), L3 (the shell) and L7 (the debugger) are done; each is below. A
+`.lisp` file sends to SBCL, and an error is a break at the REPL panel. L4–L6
+are next. Kevin, 2026-11-17: *"I would probably switch to edit if it
 supported all of the L features"* — so all of L1–L7, in D6's order (L1–L3,
 L7, L4–L6), with each decision as recommended.
 
@@ -134,7 +135,7 @@ Guile's do without Guile.
 | **L5** | **`M-.`.** Ask SBCL where a name is defined (`sb-introspect`), falling back on the editor's own index of `defun`/`defmacro`/`defvar` forms for a file never loaded. | `M-.` on a call jumps to its `defun` in another file, loaded or not; `M-,` comes back |
 | **L6** | **Warnings — past Guile's level.** What SBCL's compiler says of a form when it is sent (an undefined function, a wrong count of arguments, an unused variable) shown under the send, and marked in the buffer at the form. | sending a `defun` that calls a function that does not exist says so, and the form is marked until it is sent again clean |
 
-| **L7** | **The debugger.** An error does not unwind: the send is answered with the message, the restarts numbered and the frames, and the connection is in a BREAK — the REPL panel's prompt says so (`CL-USER[1]> `, SBCL's own `0]` counting levels). At it: a number takes that restart (one that wants a value asks for it), an expression evaluates inside the error, `:abort` gives the send up, `:top` gives up every level. The error pane (`C-h e`) shows the frames, with the locals of code compiled with `(debug 2)` or more. A send from a buffer while in a break evaluates in the break too. | the probe's six cases through the editor: `USE-VALUE` finishes the original send with its value; `CONTINUE` after a `cerror`; `(break)`; an error inside a break and out of both; a frame's locals in the error pane; and Escape/interrupt of a runaway lands in a break rather than losing the work |
+| **L7** ✔ | **The debugger.** An error does not unwind: the send is answered with the message, the restarts numbered and the frames, and the connection is in a BREAK — the REPL panel's prompt says so (`CL-USER[1]> `, SBCL's own `0]` counting levels). At it: a number takes that restart (one that wants a value asks for it), an expression evaluates inside the error, `:abort` gives the send up, `:top` gives up every level. The error pane (`C-h e`) shows the frames, with the locals of code compiled with `(debug 2)` or more. A send from a buffer while in a break evaluates in the break too. | the probe's six cases through the editor: `USE-VALUE` finishes the original send with its value; `CONTINUE` after a `cerror`; `(break)`; an error inside a break and out of both; a frame's locals in the error pane; and Escape/interrupt of a runaway lands in a break rather than losing the work |
 
 L1–L4 are "the same level as Guile". L5 is what Guile gets from the
 editor's Scheme index and Common Lisp does not. L6 and L7 are where SBCL
@@ -182,8 +183,8 @@ protocol has, as `edit/guile/serve.scm` does, a thread per connection.
   `*debugger-hook*` answer instead, so `(break "look here")` comes back
   as a failure with its message. Standard input is an empty stream, so
   `(read-line)` ends with an end-of-file error instead of waiting for a
-  terminal. (L7 replaces the first with a break served over the
-  connection.)
+  terminal. (L7 replaced the first with a break served over the
+  connection: below.)
 - **`interrupt`**, from a second connection, interrupts every thread
   evaluating a request: `host-stopped`, message `interrupted`, and the
   calls where it was. The server stays up.
@@ -301,6 +302,74 @@ Tests (`remote.rs`, `sbcl_tests`): `a_lisp_file_is_lisps_and_never_runs_as_scm`
 two-package file, an error, describe both ways, TAB, the REPL's prompt
 following its package, a line continued. `language::lisp`'s
 `what_a_send_reads` and `whole_text` hold the cutting.
+
+## L7 as built (2026-11-17)
+
+The server (`serve.lisp`, about 130 lines more), `27-lisp.scm`'s prompt and
+restart list, and three keys the Rust client passes through.
+
+- **An error is a break**, in the server, without SBCL's debugger: the
+  handler answers the request — the message, the calls, each call's locals
+  (`:locals`, beside `:backtrace`), the restarts (`:restarts`, innermost
+  first), the level (`:level`) — and then serves the connection's next
+  requests from inside the handler, a level deeper. Whatever finally
+  finishes answers the request read LAST (`*owed*`), so a USE-VALUE's line
+  is answered with the value of the send it broke. `cerror`, `break`,
+  `invoke-debugger` and `signal`ed errors all come the same way. Stack
+  exhaustion still unwinds: there is no room to serve a break from.
+- **At a break** a line that is a number takes that restart; one that
+  wants a value (`USE-VALUE`, `STORE-VALUE` — SBCL marks them with an
+  interactive function) answers `:asking` and reads the next line as the
+  value's form, or takes it on the same line, `1 (* 6 7)`. `:abort` (`:a`,
+  `:q`) invokes the innermost `ABORT`, `:top` the outermost. Each send,
+  and each line inside a break, has an `ABORT` of its own ("Give this send
+  up.", "Return to break level 1."), so SBCL's list reads as its own REPL's
+  does. Anything else evaluates inside the error, in its dynamic
+  environment — and a send from a buffer while in a break does too, as the
+  plan said, since it is the same connection.
+- **Every eval answer says the package** the connection reads in
+  (`:package`, its shortest name), and the shell's prompt is
+  `PACKAGE> `, `PACKAGE[N]> ` N breaks down, or `USE-VALUE value> ` while a
+  restart waits. L3's separate "which package now?" request after an
+  `in-package` is gone.
+- **The restarts are listed** under the error in the transcript, numbered,
+  with a line saying what a number, `:abort` and anything else do; the
+  echo line says the send is in a break. `C-h e` shows each call with its
+  locals — whatever SBCL kept, which `(debug 2)` makes more of (`x = 4`).
+  The error pane's "the send has already stopped" became "a snapshot,
+  taken when it raised": an SBCL send is still live, at the REPL.
+- **An interrupt is a break too** (`M-x remote-interrupt`; the ask
+  timeout's interrupt): `CONTINUE` ("Go on with the evaluation.") resumes
+  the runaway where it was, and anything evaluated first sees its work so
+  far. A thread waiting for its next request inside a break is not
+  interrupted.
+- **Backtraces inside a break.** SBCL's backtrace starts by default at the
+  newest frame a trap interrupted — inside a `(car 5)` break, that one,
+  whatever signalled since — so every later error showed `(CAR 5)`. Each
+  request binds `*stack-top-hint*` to nil and the walk starts at the hint
+  resolved, which is the signalling call's frame.
+- **The client** (`remote.rs`) keeps each answer's text beside the parsed
+  `Response` and reads the keys scm's protocol does not have from it
+  (`extra_keys`: `level`, `restarts`, `locals`, `asking`, `package`), so scm's
+  `Response` and its tests are untouched. `remote-result` (14-remote) passes
+  them on; Guile and scm send none.
+- `edit-serve:*break-on-error*`, nil, gives L1's behaviour back: an error
+  answers and unwinds.
+
+Not done: a sync question the editor asks itself (completion's
+`complete-in` through `%remote-eval`, 5 s) that times out would leave the
+connection in a break nobody listed — the next send's answer says the
+level, so the prompt catches up, but no restarts are shown for it. Stepping
+and the inspector stay out (D6).
+
+Tests (`remote.rs`, `sbcl_tests`): `a_lisp_error_is_a_break` — the six
+cases through the editor: a call's locals in the error pane, evaluating
+inside a break and `:abort`, USE-VALUE asking for its value and finishing
+the original send (`=> 43`), CONTINUE after `cerror`, out of `(break)`, two
+breaks deep and out of both, and an interrupted `(loop (incf *n*))` looked
+at (`*n*` > 0), resumed, interrupted again and given up with `:top`.
+`a_lisp_buffer_sends_to_sbcl` now finds itself two breaks down after its
+two errors, and leaves with `:top`.
 
 ## Risks
 

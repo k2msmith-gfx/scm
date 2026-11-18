@@ -47,19 +47,28 @@ a buffer sending to it is set to."
 (define (remote-result r)
   ; The wire's answer (%remote-eval / %remote-poll) as a backend RESULT.
   ; :value is the printed value — the live one is in the other process —
-  ; and truthy, so the transcript shows it.
-  (if (eq? (%alist-ref r :status #f) 'ok)
-    (list (cons :status 'ok)
-          (cons :value (%alist-ref r :value ""))
-          (cons :printed (%alist-ref r :value ""))
-          (cons :output (%alist-ref r :output ""))
-          (cons :secs 0))
-    (list (cons :status 'error)
-          (cons :message (string-append
-                           (%alist-ref r :message "")
-                           (if (%alist-ref r :host-stopped #f) "  (stopped)" "")))
-          (cons :output (%alist-ref r :output ""))
-          (cons :frames (map remote-frame (%alist-ref r :backtrace '()))))))
+  ; and truthy, so the transcript shows it. What only some servers say is
+  ; kept as it came: SBCL's break (27-lisp) — its level, its restarts, a
+  ; restart waiting for a value, the package the next line reads in.
+  (define said
+    (filter (lambda (kv) (memq (car kv) '(:level :restarts :asking :package))) r))
+  (append
+    (if (eq? (%alist-ref r :status #f) 'ok)
+      (list (cons :status 'ok)
+            (cons :value (%alist-ref r :value ""))
+            (cons :printed (%alist-ref r :value ""))
+            (cons :output (%alist-ref r :output ""))
+            (cons :secs 0))
+      (list (cons :status 'error)
+            (cons :message (string-append
+                             (%alist-ref r :message "")
+                             (if (%alist-ref r :host-stopped #f) "  (stopped)" "")))
+            (cons :output (%alist-ref r :output ""))
+            (cons :frames (let ((calls (%alist-ref r :backtrace '()))
+                                (locals (%alist-ref r :locals '())))
+                            (map remote-frame calls
+                                 (if (= (length locals) (length calls)) locals (map (lambda (c) '()) calls)))))))
+    said))
 
 (define (failed-result e)
   (list (cons :status 'error)
@@ -131,13 +140,14 @@ run somewhere it was not written for. E is what the start raised."
                               (cons :message (string-append label ": " why))
                               (cons :output "")))))))
 
-(define (remote-frame line)
+(define (remote-frame line (locals '()))
   ; "(form)  at src:line:col" as an error-pane frame: (call location locals).
-  ; A wire carries the calls, not the stack, so there are no locals.
+  ; scm's wire carries the calls, not their locals; SBCL's carries both
+  ; (:locals, ((name printed) …) a call).
   (let ((at (string-contains line "  at ")))
     (if at
-      (list (substring line 0 at) (substring line (+ at 5) (string-length line)) '())
-      (list line #f '()))))
+      (list (substring line 0 at) (substring line (+ at 5) (string-length line)) locals)
+      (list line #f locals))))
 
 (define (remote-attach)
   "Send this buffer's forms to the connected Scheme from now on — C-M-x,

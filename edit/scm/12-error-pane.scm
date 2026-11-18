@@ -53,7 +53,10 @@
         (emit "# " message "\n\n")
         (emit "From " (md-code (string-append label ": " (send-shown src))) ". ")
         (emit "Innermost call first; each with the locals it could see. "
-              "A snapshot: the send has already stopped.\n")
+              ; SBCL's send is still in its break (27-lisp) — at the REPL,
+              ; not here — and scm's has stopped: the page is the frames as
+              ; they were when it raised, either way.
+              "A snapshot, taken when it raised.\n")
         (let loop ((fs frames) (i 1))
           (match fs
             (() #f)
