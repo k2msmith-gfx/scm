@@ -3,7 +3,7 @@
 **Status, 2026-11-17: A0 measured; A1–A4 and A6 built** (below, "A1 and
 A2 as built", "A3 as built", "A4 as built", "A6 as built"): the standalone
 has the agent, its buffers follow the agent's edits, and the agent reads
-and edits the buffers themselves. **A5, the modeler, WAITS** (Kevin,
+and edits the buffers themselves. **A5, the modeler, WAITS** — its scm half is done (below, "A5, the scm half"); the ray half waits on the other session's commits (Kevin,
 2026-11-17: *"I'd like to try the agent pane here first before the modeler
 integration"*). Kevin accepted
 the recommendations on D1–D7 on 2026-11-16 and then changed two of them,
@@ -534,6 +534,77 @@ whenever the host has tools (the schemas ride in the cached prefix: about
 22k tokens more context here, with the account's own connectors in it,
 and no search turn), and a call with an argument the tool does not take is
 answered with the arguments it DOES take.
+
+## A5, the scm half (2026-11-17)
+
+Kevin, 2026-11-17: do the scm half now; the ray half waits until the session
+working in `~/devel/ray` has committed (its gate builds from the working tree,
+the index is shared, and `target/release/modeler` is one file).
+
+**What ray's suites and harnesses actually depend on** — read from the six
+scripts and `ai.rs`, not assumed. None of them read the pane's own text from a
+real turn (no `you> `, no "thinking…", no tool rows, no `:ai-session`); what
+they reach is ray's Scheme, which the ray half keeps as names over the new
+prims, and two files on disk:
+
+- **The stream log, a file per TURN** (`ai_ab.py`'s pane arm snapshots
+  `/tmp/modeler-ai/streams/*.jsonl` before a turn and copies the newest new
+  file). The bridge opened one per PROCESS, which here is the whole
+  conversation, so a second turn left no new file. **Changed**: a file per
+  turn, `<unix-secs>-<pid>-<n>.jsonl`, opened with the turn's first line —
+  opening it when the previous turn ended would put it before the harness's
+  snapshot. Lines are the CLI's, verbatim (`ai_census.py` reads `type`,
+  `timestamp`, `message.usage.*`, `tool_use`/`tool_result` blocks and
+  `result.total_cost_usd`).
+- **The transcripts' directory** (`ai_census.py`: the newest
+  `~/.claude/projects/-private-tmp-modeler-ai/*.jsonl`) follows from the
+  profile's `:cwd` being `/tmp/modeler-ai`. A profile setting, no code.
+- **The footer** is `ai.rs`'s format already (A1). `test_agent_pane.py`
+  feeds it through the modeler's `(on-ai-progress "metrics" …)` and wants
+  the row `· …`; the ray half keeps that name over `*agent-row*`.
+
+Already in the bridge, checked: the API-key variables kept from the child;
+the stale-resume retry ("the saved conversation is gone — starting fresh");
+`agent::busy()`/`cancel()` public for the kernel's Escape branch; a profile
+with `:system-prompt` (by file — the catalogue is past 128 KiB),
+`:setting-sources ""`, `:exclude-dynamic`, `:mcp-config` + `:strict-mcp`,
+`:allowed-tools`, `:denied-tools`, `:max-turns`, `:tool-prefix`, `:bin`; and
+the wake: the modeler's waker already runs `(remote-poll)`, whose
+`*wake-hooks*` hold `agent-poll`.
+
+**The ray half, then** (from the inventory, file:line in ray's `modeler/`):
+
+- `14-ai.scm` builds the profile: cwd `/tmp/modeler-ai`; `:setting-sources ""`,
+  `:exclude-dynamic`; `:mcp-config` running `tools/modeler_mcp.py` with
+  `MODELER_PORT`, `:strict-mcp`; the 19 `mcp__modeler__*` allowed, in
+  `test_agent_mcp.py`'s order; `AGENT_DENIED_TOOLS` denied unless
+  `MODELER_AI_UNFENCED`; `:max-turns` from `MODELER_AI_MAX_TURNS` (120);
+  `:model` from `MODELER_AI_MODEL` (opus); `:bin` from `MODELER_CLAUDE_BIN`;
+  `:system-prompt` the catalogue text by `MODELER_AI_CATALOG` (`ai.rs`'s
+  `agent_system_prompt_in` moves to Scheme); `:stream-log`
+  `/tmp/modeler-ai/streams`; `:tool-prefix "mcp__modeler__"`. No
+  `:permission-prompt-tool` — the maker is fenced, nobody is asked, and
+  `/auto` is moot there.
+- `*agent-prepare*` is `(ai prompt)`'s retrieval: scene summary, up to three
+  matching example files (16000 chars each, once a conversation), then
+  `Request: ` and the prompt.
+- `*agent-row*`: an `eval` tool row as `:code` with the form alone, others
+  `→ name arg`; results dim, cut at 400 chars.
+- `*agent-session-ref*`/`-set!`: the `:ai-session` session store, so a
+  restart resumes; `(ai-reset)` and C-l clear it.
+- Names kept over the new prims, for the suites: `(ai-busy?)`, `(ai-cancel)`
+  (`#f` idle; echo "agent: interrupting…"), `(ai-reset)`, `(ai-turns)`,
+  `(ai-backend)` (`#f` under `MODELER_AI_BACKEND=api` with no key — what
+  `test_agent_pane.py` uses to mean "no backend"), `(on-ai-progress kind
+  text "")`, `agent-eval`, the prompt `"agent> "`. `*escape-handlers*` must
+  still not hold `:agent-cancel`; the kernel's Escape branch calls
+  `edit::agent::cancel()` when the agent pane has focus and `busy()`.
+- Goes: `ai.rs`, the `%ai-*` prims, `Wake::Ai`, the pane half of
+  `08-editor.scm`; the Messages-API backend and the one-shot mode (D5 —
+  neither is exercised by any suite with a model).
+- Noticed on the way, in ray: `ai_ab.py:1939` waits while `(ai-busy?)` is
+  `"true"`, a spelling that went with Janet — the loop ends at once. Fix
+  it in the same commit (compare with `#t`).
 
 ## Risks
 

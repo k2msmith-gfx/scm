@@ -537,6 +537,12 @@ fn read_stream(from: &mut impl std::io::BufRead, profile: &Profile, log: &mut Op
         }
         let line = String::from_utf8_lossy(&bytes);
         let line = line.trim_end_matches(['\n', '\r']);
+        // The turn's file opens with its first line — not when the turn
+        // before it ended, which a harness's "files before this turn" would
+        // count as old.
+        if log.is_none() {
+            *log = stream_log(profile);
+        }
         if let Some(f) = log.as_mut() {
             let _ = writeln!(f, "{line}");
         }
@@ -545,14 +551,21 @@ fn read_stream(from: &mut impl std::io::BufRead, profile: &Profile, log: &mut Op
     turn
 }
 
+/// A new file for one TURN's raw stream, in the profile's `stream-log`
+/// directory: `<unix-secs>-<pid>-<n>.jsonl`. A turn each, as the modeler's
+/// `ai.rs` wrote them — `ai_ab.py` takes the newest file that appeared
+/// during a turn as that turn's stream — though here one process carries
+/// the whole conversation.
 fn stream_log(profile: &Profile) -> Option<std::fs::File> {
+    static N: AtomicU64 = AtomicU64::new(0);
     if std::env::var_os("EDIT_AI_NO_STREAM_LOG").is_some() {
         return None;
     }
     let dir = profile.stream_log.as_ref()?;
     std::fs::create_dir_all(dir).ok()?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    std::fs::File::create(dir.join(format!("{stamp}-{}.jsonl", std::process::id()))).ok()
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    std::fs::File::create(dir.join(format!("{stamp}-{}-{n}.jsonl", std::process::id()))).ok()
 }
 
 // ── The agent's state ───────────────────────────────────────────────────────
@@ -806,10 +819,11 @@ fn start(shared: &Arc<Shared>, key: Vec<String>, turn: InFlight) -> Result<(), S
 /// one's `result`, then what its end means.
 fn read_process(shared: &Arc<Shared>, generation: u64, stdout: std::process::ChildStdout, profile: &Profile) {
     let mut from = std::io::BufReader::new(stdout);
-    let mut log = stream_log(profile);
     // The CLI's cost is this PROCESS's total; a turn's is the difference.
     let mut cost_before = 0.0;
     loop {
+        // Each turn's raw stream in a file of its own.
+        let mut log = None;
         let turn = read_stream(&mut from, profile, &mut log, &mut |e| match e {
             Event::Mcp { id, message } => {
                 if let Some(call) = serve_tools(shared, profile, &id, &message) {
@@ -1535,7 +1549,11 @@ not json at all
         assert_eq!(asked[0]["message"]["content"], "say \"hello\"", "the prompt, quoted as JSON wants");
         assert_eq!((asked[1]["type"].as_str(), asked[1]["message"]["content"].as_str()), (Some("user"), Some("and again")));
         assert!(dir.join("proj").is_dir(), "it runs where the profile said");
-        assert_eq!(std::fs::read_dir(dir.join("streams")).unwrap().count(), 1, "the raw stream is kept, a file per process");
+        // The raw stream is kept, a file per TURN, each ending at its own
+        // result — what the modeler's harness copies as a turn's stream.
+        let logs: Vec<String> = std::fs::read_dir(dir.join("streams")).unwrap().map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap()).collect();
+        assert_eq!(logs.len(), 2, "a file per turn");
+        assert!(logs.iter().all(|l| l.lines().filter(|x| x.contains("\"type\":\"result\"")).count() == 1), "{logs:?}");
 
         // A setting a running process cannot change: another process, in
         // the same conversation.
