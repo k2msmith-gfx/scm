@@ -3,7 +3,7 @@
 **Status, 2026-11-17: A0 measured; A1–A4 and A6 built** (below, "A1 and
 A2 as built", "A3 as built", "A4 as built", "A6 as built"): the standalone
 has the agent, its buffers follow the agent's edits, and the agent reads
-and edits the buffers themselves. **A5, the modeler, WAITS** — its scm half is done (below, "A5, the scm half"); the ray half waits on the other session's commits (Kevin,
+and edits the buffers themselves. **A5, the modeler, is BUILT (2026-11-17)** — the scm half below ("A5, the scm half"), and ray's: the modeler's pane is this agent, unfenced (D7, decided). Before that it WAITED (Kevin,
 2026-11-17: *"I'd like to try the agent pane here first before the modeler
 integration"*). Kevin accepted
 the recommendations on D1–D7 on 2026-11-16 and then changed two of them,
@@ -164,7 +164,7 @@ Each leaves both hosts green. Sizes are guesses until A0.
 | **A2** ✔ | **Prims and pane.** `scm_binding/agent.rs` (`%agent-send`, `-poll`, `-cancel`, `-busy?`, `-session`, `-session-set`, `-reset`, `-auth`, `-auth-pending`, `-auth-input`); `25-agent.scm` in `SHELL` and `EMBEDDED`; the profile. | a bare-interpreter test drives `agent-submit` against a fake `claude` (a shell script that prints canned events, named by `EDIT_CLAUDE_BIN`) and asserts the transcript rows; `/status` against a fake `auth` |
 | **A3** ✔ | **The standalone hosts it.** A fifth pane id and a right dock in `app.rs` (D2), an icon, `M-a`, `%show-dock`; Escape in `Session::escape` cancels a busy turn when the agent holds typing; session id stored per project root. | `cargo run -p edit -- FILE`, `M-a`, `/login`, a real question about the open file answered, restart, the conversation resumes. Kevin's use is the gate |
 | **A4** ✔ | **It edits, and the editor notices.** (The permission posture is built: see "as built".) Auto-revert of an unmodified buffer whose file changed on disk, and a loud refusal to revert a modified one; the turn's changed files listed in the transcript. | the agent fixes a planted bug in an open buffer; the buffer shows the fix without `:e!`; a buffer with unsaved edits is not overwritten |
-| **A5** | **The modeler takes it.** `14-ai.scm` sets the profile; `ai.rs`, the `%ai-*` prims, `Wake::Ai` and the pane half of `08-editor.scm` go; `MODELER_AI_*` variables keep working through the profile; Escape's kernel branch calls `edit::agent`. | ray's `test_agent_pane.py`, `test_agent_mcp.py`, `test_agent_during_render.py` (19/19) and `test_ai_catalog_modes.py` pass unchanged; `ai_census.py` and `ai_ab.py` still read the stream log; one real turn resumes a pre-existing `:ai-session` |
+| **A5** ✔ | **The modeler takes it.** `14-ai.scm` sets the profile; `ai.rs`, the `%ai-*` prims, `Wake::Ai` and the pane half of `08-editor.scm` go; `MODELER_AI_*` variables keep working through the profile; Escape's kernel branch calls `edit::agent`. | ray's `test_agent_pane.py`, `test_agent_mcp.py`, `test_agent_during_render.py` (19/19) and `test_ai_catalog_modes.py` pass unchanged; `ai_census.py` and `ai_ab.py` still read the stream log; one real turn resumes a pre-existing `:ai-session` |
 | **A6** ✔ | **Editor tools for the agent** (D4). An MCP server the binary itself provides (`edit --mcp`, stdio, reaching the running editor as `14-remote` reaches `scm --serve`): open buffers and unsaved text, selection, cursor, diagnostics, open-file-at-line, eval in the attached backend; and the WRITE side the modeler's agent already has for the scene editor (`editor_write`, `editor_replace`, `editor_send`): replace a region or a whole buffer in place, each agent edit ONE undo step. | the agent answers "what is wrong with the form at point" from an UNSAVED buffer, fixes it in the buffer, and one `u` takes the fix back |
 | **A7** | **Reading comfort.** Replies are markdown: fenced code coloured through `Language`, `@` file mentions (the picker is already bound, `04-minibuffer.scm:546`), token streaming if A0 says partial messages are worth it, send-region-to-agent. | by eye |
 
@@ -574,17 +574,18 @@ the wake: the modeler's waker already runs `(remote-poll)`, whose
 
 **The ray half, then** (from the inventory, file:line in ray's `modeler/`):
 
-- `14-ai.scm` builds the profile: cwd `/tmp/modeler-ai`; `:setting-sources ""`,
-  `:exclude-dynamic`; `:mcp-config` running `tools/modeler_mcp.py` with
-  `MODELER_PORT`, `:strict-mcp`; the 19 `mcp__modeler__*` allowed, in
-  `test_agent_mcp.py`'s order; `AGENT_DENIED_TOOLS` denied unless
-  `MODELER_AI_UNFENCED`; `:max-turns` from `MODELER_AI_MAX_TURNS` (120);
-  `:model` from `MODELER_AI_MODEL` (opus); `:bin` from `MODELER_CLAUDE_BIN`;
-  `:system-prompt` the catalogue text by `MODELER_AI_CATALOG` (`ai.rs`'s
-  `agent_system_prompt_in` moves to Scheme); `:stream-log`
-  `/tmp/modeler-ai/streams`; `:tool-prefix "mcp__modeler__"`. No
-  `:permission-prompt-tool` — the maker is fenced, nobody is asked, and
-  `/auto` is moot there.
+- `14-ai.scm` builds the profile ON edit's code profile (D7, decided the
+  same day — at first this list said the fenced maker, unchanged): the
+  modeler's MCP server (`tools/modeler_mcp.py` on `MODELER_PORT`) and its 19
+  `mcp__modeler__*` tools allowed; the maker's contract and the catalogue
+  (`MODELER_AI_CATALOG`) appended to the system prompt after the editor's
+  note; `:max-turns` from `MODELER_AI_MAX_TURNS` (120); `:model` from
+  `MODELER_AI_MODEL` (opus); `:bin` from `MODELER_CLAUDE_BIN`;
+  `:stream-log` `/tmp/modeler-ai/streams`; `:tool-prefix
+  "mcp__modeler__"`. No fence, no `/tmp/modeler-ai` cwd: the project's, so
+  sessions are kept per directory, and `ai_census.py` reads the project's
+  transcripts (the pane's are `"entrypoint":"sdk-cli"`). `ai_ab.py`'s pane
+  arm runs `/auto` — nobody is there to answer.
 - `*agent-prepare*` is `(ai prompt)`'s retrieval: scene summary, up to three
   matching example files (16000 chars each, once a conversation), then
   `Request: ` and the prompt.
@@ -605,6 +606,28 @@ the wake: the modeler's waker already runs `(remote-poll)`, whose
 - Noticed on the way, in ray: `ai_ab.py:1939` waits while `(ai-busy?)` is
   `"true"`, a spelling that went with Janet — the loop ends at once. Fix
   it in the same commit (compare with `#t`).
+
+**The ray half as built** (ray's `docs/modeler-ai.md`, "Now"): `ai.rs` is
+what the modeler ADDS (`maker_profile`: the scene's MCP server and 19 tools,
+the maker's contract and the catalogue appended, model and turn cap — about
+260 lines of its 1,368); 14-ai.scm extends `agent-code-profile` with it, sets
+`*agent-prepare*` (the scene and matching examples), `*agent-row*` (an
+`eval` as its code), `*agent-shown*` (the right dock) and the session hooks
+(a table per project directory in the session store), and keeps `ai`,
+`ai-busy?`, `ai-cancel`, `ai-reset`, `%ai-reset`, `ai-turns`, `ai-backend`
+and `on-ai-progress` as names over this pane. Gone: the twelve `%ai-*`
+prims, `Wake::Ai`, the pane half of `08-editor.scm`, the API backend and the
+one-shot mode with `(ai-last)` and "Last form to the REPL". The kernel's
+Escape branch calls `edit::agent::busy()`/`cancel()`. `test_agent_pane.py`
+now names a `claude` that does not exist (the API backend it forced is
+gone); `test_menus_all_panes.py` checks Interrupt where it checked the
+one-shot item; `ai_ab.py`'s pane arm waits on `#t` and runs `/auto`;
+`ai_census.py` reads the project's pane transcripts (`sdk-cli`). Measured:
+the four agent suites, the 116-test UI harness, and two real turns — a
+sphere added through the scene's `eval`, the second turn in the same
+process (cache read, $0.12 against $2.76), a stream file each. The first
+turn's context was 336k tokens, nearly all the `full` catalogue (~491k
+characters, twice September's): `MODELER_AI_CATALOG=brief` is the lever.
 
 ## Risks
 
@@ -664,21 +687,23 @@ the wake: the modeler's waker already runs `(remote-poll)`, whose
   subscription path and neither is what the pane is for now.
   *Recommend retiring both at A5* rather than porting them; say if either
   is still used.
-- **D7 — the modeler's agent: one combined profile, or two it switches
-  between?** Combined is the simplest thing that matches the sentence
-  above, and it has three costs, all measured before: (1) the catalogue
-  rides on every turn, including "rename this function" (it outgrew
-  128 KiB in September); (2) with file tools and the examples directory in
-  reach the agent copies an existing model instead of building one — the
-  ASK 21 runs had to forbid it; (3) the fence exists because an unfenced
-  maker reached for `perl` and `sed` instead of the verbs. Two profiles
-  (`/code` and `/make`, one conversation each, the pane remembering which)
-  keep the maker fenced and the catalogue out of code turns, at the price
-  of the agent not being able to write a verb and use it in one turn.
-  *Recommend: A5 ports today's fenced maker unchanged, so the swap is
-  testable against the existing suites; then add `/code` beside it as a
-  second profile; then try the combined one as a third and let use decide
-  which is the default.* The bridge is the same for all three.
+- **D7 — DECIDED 2026-11-17: one combined agent, and it ASKS rather than
+  being fenced** (Kevin: *"I want to be able to write scheme code in the
+  modeler so the coding assistant part should not be removed"*, and *"having
+  the maker fenced was not a good idea. I like the code assist method where
+  it asks for permission or you can set /auto like in claude code"*). The
+  modeler's agent is edit's code profile — the project, its CLAUDE.md, files
+  edited unasked, a program run or a file outside the project asked for in
+  the pane, `/auto` to stop asking — with the scene added: the modeler's MCP
+  tools unasked, the maker's contract and the catalogue appended to the
+  system prompt. The three costs below were the case for fencing, and are
+  now watched rather than prevented: (1) the catalogue rides on every turn,
+  including "rename this function" (it outgrew 128 KiB in September);
+  (2) with file tools and the examples directory in reach the agent may copy
+  an existing model instead of building one — the ASK 21 runs had to forbid
+  it; (3) unasked, a maker reached for `perl` and `sed` instead of the verbs
+  — which asking now catches. As first put, the recommendation was to port
+  the fenced maker unchanged, add `/code` beside it, then try combined.
 - **D6 — environment variable names.** *Recommend `EDIT_AI_MODEL`,
   `EDIT_AI_MAX_TURNS`, `EDIT_CLAUDE_BIN`, `EDIT_AI_DEBUG`,
   `EDIT_AI_NO_STREAM_LOG` in the crate,* with the modeler's profile
