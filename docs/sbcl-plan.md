@@ -1,10 +1,12 @@
 # Common Lisp in `edit`, through SBCL — plan, 2026-11-17
 
-**IN PROGRESS.** L0 (the measurements), L1 (the server), L2 (the
-language), L3 (the shell), L7 (the debugger), L4 (the read marks) and L5
-(`M-.`) are done; each is below. A `.lisp` file sends to SBCL, an error is a
-break at the REPL panel, what SBCL cannot read is marked, and `M-.` finds a
-definition loaded or not. L6 is next. Kevin, 2026-11-17: *"I would probably switch to edit if it
+**DONE (2026-11-17).** Every stage — L0 (the measurements), L1 (the
+server), L2 (the language), L3 (the shell), L7 (the debugger), L4 (the read
+marks), L5 (`M-.`) and L6 (the compiler's warnings) — is built and below. A
+`.lisp` file sends to SBCL, an error is a break at the REPL panel, what
+SBCL cannot read is marked, `M-.` finds a definition loaded or not, and
+what the compiler says of a sent form is marked at it. Stepping and the
+inspector stay out (D6). Kevin, 2026-11-17: *"I would probably switch to edit if it
 supported all of the L features"* — so all of L1–L7, in D6's order (L1–L3,
 L7, L4–L6), with each decision as recommended.
 
@@ -134,7 +136,7 @@ Guile's do without Guile.
 | **L3** ✔ | **The shell.** `27-lisp.scm`: `sbcl-start`/`-stop`, `lisp-mode`, detection (`.lisp`, `.lsp`, `.cl`, `.asd`), the backend (the remote backend, with `:complete`, `:doc`, `:signature` asking in the buffer's package), the running-process hook so TAB asks SBCL, the buffer's package from its `in-package`, the REPL panel's prompt (`CL-USER> `, following the REPL's package) and its own "is this whole?" (brackets — scm's reader does not read `#'f`). | against a real SBCL: each send key, `=> 49`, `=> SQ` for a `defun` (which Common Lisp answers itself), an error's message, describe on a name and on an argument, TAB in the buffer and at the REPL offering a function just sent, a two-package file sending each form to its own package |
 | **L4** ✔ | **Read marks.** SBCL's reader on the buffer's text, through `readcheck.rs` as built: `edit-serve:read-check` reads in a throwaway package with the buffer's use-list and `*read-eval*` nil, and answers where it stopped. | `#\\notachar` and `(foo:bar)` are marked on their line in SBCL's words; `#.(…)` is not; mending clears the mark; reading leaves no symbol behind in the user's package |
 | **L5** ✔ | **`M-.`.** Ask SBCL where a name is defined (`sb-introspect`), falling back on the editor's own index of `defun`/`defmacro`/`defvar` forms for a file never loaded. | `M-.` on a call jumps to its `defun` in another file, loaded or not; `M-,` comes back |
-| **L6** | **Warnings — past Guile's level.** What SBCL's compiler says of a form when it is sent (an undefined function, a wrong count of arguments, an unused variable) shown under the send, and marked in the buffer at the form. | sending a `defun` that calls a function that does not exist says so, and the form is marked until it is sent again clean |
+| **L6** ✔ | **Warnings — past Guile's level.** What SBCL's compiler says of a form when it is sent (an undefined function, a wrong count of arguments, an unused variable) shown under the send, and marked in the buffer at the form. | sending a `defun` that calls a function that does not exist says so, and the form is marked until it is sent again clean |
 
 | **L7** ✔ | **The debugger.** An error does not unwind: the send is answered with the message, the restarts numbered and the frames, and the connection is in a BREAK — the REPL panel's prompt says so (`CL-USER[1]> `, SBCL's own `0]` counting levels). At it: a number takes that restart (one that wants a value asks for it), an expression evaluates inside the error, `:abort` gives the send up, `:top` gives up every level. The error pane (`C-h e`) shows the frames, with the locals of code compiled with `(debug 2)` or more. A send from a buffer while in a break evaluates in the break too. | the probe's six cases through the editor: `USE-VALUE` finishes the original send with its value; `CONTINUE` after a `cerror`; `(break)`; an error inside a break and out of both; a frame's locals in the error pane; and Escape/interrupt of a runaway lands in a break rather than losing the work |
 
@@ -303,6 +305,40 @@ Tests (`remote.rs`, `sbcl_tests`): `a_lisp_file_is_lisps_and_never_runs_as_scm`
 two-package file, an error, describe both ways, TAB, the REPL's prompt
 following its package, a line continued. `language::lisp`'s
 `what_a_send_reads` and `whole_text` hold the cutting.
+
+## L6 as built (2026-11-17)
+
+- **Each warning knows its form.** The server's `eval-forms` binds
+  `*form-start*` — where the form being evaluated begins in the text it was
+  given, past blank lines and comments — and the warning handler keeps it:
+  an eval answer's `:warnings` has `:warning-at` beside it, an offset each.
+  Inside `edit-serve:in` that is an offset into the buffer's own text as
+  sent, so a whole-buffer send says which `defun` each warning is of.
+- **Marked at the form** (`%lisp-warned`, `scm_binding/lisp.rs`, a watcher
+  beside the reader's): a warned form is kept by its KEY (`defun bad` — its
+  head and the name it defines, `language::lisp::form_key`; a form that
+  defines nothing by its text), not by its place, and its mark is placed in
+  the file's newest text at that form's first line, in the warning ink,
+  every warning of it on one mark (`warning: The function CAR is called
+  with two arguments … · style-warning: The variable Y is defined but never
+  used.`). So the mark follows its form as lines come and go above it, and
+  stays while the form is mended until it is sent again — then every form
+  the send held loses its old marks, and only what the compiler says now is
+  marked. M-g n goes to them as to any mark.
+- **Under the send**: the warnings were already in the transcript as
+  `; warning: …` lines (L1); unchanged.
+- **Which send it was**: the send wrap (L3's) queues (file . text) for each
+  buffer send, and the backend's `:eval-async` takes its entry when it
+  sends — dropping any older one that never got there.
+- **"redefining F in DEFUN" is muffled**, in the transcript and as a mark:
+  sending a `defun` again is how a file is worked on here.
+
+Test (`remote.rs`, `sbcl_tests`): `sbcl_warnings_mark_the_form_until_it_is_sent_clean`
+— C-c C-b of a file with an undefined function in one `defun` and a
+wrong count and an unused variable in another: the warning under the send,
+both forms marked in SBCL's words (the second's two on one mark); a line
+added above moves both marks; mending the first leaves its mark until C-M-x
+sends it, when it goes and the other stays.
 
 ## L5 as built (2026-11-17)
 

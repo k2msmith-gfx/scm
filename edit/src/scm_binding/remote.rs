@@ -384,8 +384,9 @@ fn eval_result(outcome: Outcome, text: &str) -> Result<Val, String> {
 /// SBCL's (edit/sbcl/serve.lisp, docs/sbcl-plan.md L7) — the break level
 /// the connection is in, its numbered restarts, each call's locals beside
 /// `:backtrace`, the restart waiting for a value, and the package the next
-/// line reads in.
-const EXTRA_KEYS: [&str; 5] = ["level", "restarts", "locals", "asking", "package"];
+/// line reads in; and the compiler's warnings with where each one's form
+/// began in the text sent (L6).
+const EXTRA_KEYS: [&str; 7] = ["level", "restarts", "locals", "asking", "package", "warnings", "warning-at"];
 
 /// TEXT's [`EXTRA_KEYS`], read as the wire writes them: strings with
 /// Scheme's escapes, integers, `#t`/`#f`, symbols and lists of them.
@@ -1350,6 +1351,50 @@ mod sbcl_tests {
         assert_eq!(echo, "no definition of no-such-fn found");
         s.call("(sbcl-stop)");
         let _ = std::fs::remove_dir_all(&top);
+    }
+
+    /// L6's exit criterion: what SBCL's compiler says of a sent form — a
+    /// function that does not exist, a wrong count of arguments, an unused
+    /// variable — is shown under the send and marked at the form, the mark
+    /// following it as the text moves, until it is sent again clean.
+    #[test]
+    fn sbcl_warnings_mark_the_form_until_it_is_sent_clean() {
+        if !sbcl_on_path() {
+            eprintln!("sbcl is not on the PATH: skipped");
+            return;
+        }
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        let dir = std::env::temp_dir().join(format!("edit-lisp-warn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("warn.lisp");
+        std::fs::write(&file, "(defun ok () 1)\n\n(defun bad (x)\n  (nope-zz x))\n(defun worse (y) (car 1 2))\n").unwrap();
+        s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
+        s.call("(set! *sbcl-init* #f) (set! *sbcl-read-check* #f)");
+        // (line message) of each mark.
+        let marks = |s: &mut super::super::standalone::Session| s.eval_to_string("(map (lambda (d) (list (car d) (caddr d))) (%editor-diagnostics 1))").unwrap();
+        assert_eq!(marks(&mut s), "()");
+        // The whole buffer: two forms warned of, each marked at its head.
+        s.call("(eval-buffer)");
+        assert!(s.settle(30.0));
+        assert!(transcript().iter().any(|l| l == "; style-warning: undefined function: COMMON-LISP-USER::NOPE-ZZ"), "under the send: {:?}", transcript());
+        let got = marks(&mut s);
+        assert!(got.starts_with("((2 \"style-warning: undefined function: COMMON-LISP-USER::NOPE-ZZ\") (4 \"warning: The function CAR is called with two arguments"), "{got}");
+        assert!(got.contains("· style-warning: The variable Y is defined but never used."), "both said of worse, on one mark: {got}");
+        // The marks follow their forms as the text moves.
+        s.call(r#"(%editor-edit 1 "(defun ok () 1)" ";; header\n(defun ok () 1)")"#);
+        let got = marks(&mut s);
+        assert!(got.starts_with("((3 ") && got.contains("(5 "), "{got}");
+        // Mended but not sent: still marked. Sent clean: the mark goes, the
+        // other stays.
+        s.call(r#"(%editor-edit 1 "(nope-zz x)" "(1+ x)")"#);
+        assert!(marks(&mut s).starts_with("((3 "), "{}", marks(&mut s));
+        s.call("(%editor-goto-line 1 3) (eval-defun)");
+        assert!(s.settle(30.0));
+        let got = marks(&mut s);
+        assert!(got.starts_with("((5 \"warning: The function CAR") && !got.contains("NOPE-ZZ"), "{got}");
+        s.call("(sbcl-stop)");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An interrupt from a second connection stops a runaway where it

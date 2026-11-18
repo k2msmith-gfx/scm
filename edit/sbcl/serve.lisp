@@ -259,7 +259,14 @@ request with the send's value.")
 (defvar *asking* nil "A restart of the innermost break waiting for its value's form.")
 (defvar *top-abort* nil "The ABORT that gives up the outermost send: :top.")
 (defvar *out* nil "Where the request being evaluated prints.")
-(defvar *warnings* '() "The compiler's warnings for it, newest first.")
+(defvar *warnings* '()
+  "The compiler's warnings for it, newest first, each (line . start): the
+line as the output has it, and where the form it was said of begins in the
+text it was sent in (*FORM-START*).")
+(defvar *form-start* 0
+  "Where the form being evaluated begins in the text eval-forms was given —
+the user's own, inside `in` — as a character offset, past blank lines and
+comments: a warning is marked at its form in the buffer (L6).")
 (defvar *break-on-error* t
   "Whether an error is a break (the default) or answers and unwinds at once,
 as L1 did.")
@@ -290,8 +297,9 @@ evaluation is in now, and the rest as STATUS has it."
                   (mapcar (lambda (f) (format nil "(~{~a~^ ~})" (mapcar #'wire-list (second f)))) frames)))
       (when restarts (format s " :restarts ~a" (wire-list restarts)))
       (when asking (format s " :asking ~a" (wire-string asking)))
-      (format s " :output ~a :warnings ~a :level ~a :package ~a)"
-              (wire-string output) (wire-list warnings) *level* (wire-string (shortest-name *package*))))))
+      (format s " :output ~a :warnings ~a :warning-at (~{~a~^ ~}) :level ~a :package ~a)"
+              (wire-string output) (wire-list (mapcar #'car warnings)) (mapcar #'cdr warnings)
+              *level* (wire-string (shortest-name *package*))))))
 
 ;;; ---- errors and breaks --------------------------------------------------
 
@@ -369,7 +377,8 @@ anything else evaluates inside the error. The values, or :asking."
   (let ((in (make-string-input-stream code))
         (values '()))
     (loop
-      (let ((form (handler-case (read in nil in)
+      (let* ((*form-start* (skip-blank code (file-position in)))
+             (form (handler-case (read in nil in)
                     ;; What the send's text is, not what it did: no calls.
                     (end-of-file () (failed "end of file: a form is not closed" :backtrace '()))
                     (reader-error (c) (failed (message-of c) :backtrace '())))))
@@ -411,14 +420,19 @@ a buffer's symbols print as that buffer would write them.")
                        (*debugger-hook* (lambda (c hook) (declare (ignore hook)) (enter-break c))))
                    (sb-thread:with-mutex (*lock*) (push sb-thread:*current-thread* *evaluating*))
                    (unwind-protect
-                        (handler-bind ((warning
+                        (handler-bind ((sb-kernel:redefinition-warning
+                                         ;; Sending a defun again is how a file is
+                                         ;; worked on here: "redefining F" says
+                                         ;; nothing that was not meant.
+                                         #'muffle-warning)
+                                       (warning
                                          (lambda (w)
                                            ;; The compiler's verdict on what was sent, kept
                                            ;; with the output and said once.
                                            (let ((line (format nil "; ~a: ~a"
                                                                (if (typep w 'style-warning) "style-warning" "warning")
                                                                (message-of w))))
-                                             (push line *warnings*)
+                                             (push (cons line *form-start*) *warnings*)
                                              (format *out* "~a~%" line))
                                            (muffle-warning w)))
                                        ;; Too deep to serve a break from: unwind.

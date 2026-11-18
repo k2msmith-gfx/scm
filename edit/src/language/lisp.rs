@@ -506,6 +506,42 @@ pub fn bare_name(word: &str) -> String {
     }
 }
 
+/// What a top-level form IS, to find it again after edits: `defun area`
+/// for a definition (its head and the name it defines, as [`bare_name`]
+/// has them), else its text with the white space folded.
+pub fn form_key(form: &str) -> String {
+    let toks = tokens(form);
+    let chars: Vec<char> = form.chars().collect();
+    let word = |t: &Token| -> String { chars[t.start..t.end].iter().collect() };
+    if let (Some(open), Some(head)) = (toks.first(), toks.get(1))
+        && open.kind == Kind::Open
+        && head.kind == Kind::Atom
+    {
+        let h = bare_name(&word(head));
+        if h.starts_with("def")
+            && let Some(name) = defined_name(&toks, 0, &word)
+        {
+            return format!("{h} {}", bare_name(&word(name)));
+        }
+    }
+    form.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The name a `(def… NAME …)` form whose `(` is `toks[open]` defines: the
+/// atom after the head, or the first of a list there — `(point
+/// (:conc-name p-))`, and `(setf x)`'s second.
+fn defined_name<'t>(toks: &'t [Token], open: usize, word: &dyn Fn(&Token) -> String) -> Option<&'t Token> {
+    match toks.get(open + 2) {
+        Some(n) if n.kind == Kind::Atom => Some(n),
+        Some(n) if n.kind == Kind::Open => match toks.get(open + 3) {
+            Some(s) if s.kind == Kind::Atom && bare_name(&word(s)) == "setf" => toks.get(open + 4),
+            other => other,
+        }
+        .filter(|n| n.kind == Kind::Atom),
+        _ => None,
+    }
+}
+
 /// Where TEXT defines NAME (as [`bare_name`] has it): each top-level form
 /// whose head begins `def` — `defun`, `defmacro`, `defvar`, `defclass`,
 /// `define-condition`, a `defsomething` of the program's own — naming it,
@@ -531,18 +567,7 @@ pub fn definitions(text: &str, name: &str) -> Vec<(usize, usize, String)> {
         if !form.starts_with("def") {
             continue;
         }
-        // The name: the atom after the head, or the first of a list there
-        // — `(point (:conc-name p-))`, and `(setf x)`'s second.
-        let named = match toks.get(i + 2) {
-            Some(n) if n.kind == Kind::Atom => Some(n),
-            Some(n) if n.kind == Kind::Open => match toks.get(i + 3) {
-                Some(s) if s.kind == Kind::Atom && bare_name(&word(s)) == "setf" => toks.get(i + 4),
-                other => other,
-            }
-            .filter(|n| n.kind == Kind::Atom),
-            _ => None,
-        };
-        if let Some(n) = named
+        if let Some(n) = defined_name(&toks, i, &word)
             && bare_name(&word(n)) == name
         {
             let (line, column) = at(n.start);
@@ -568,6 +593,9 @@ mod tests {
         assert!(definitions(src, &bare_name("|Area|")).is_empty(), "a |Mixed| name is another name");
         assert_eq!(bare_name("|Mixed Case|"), "Mixed Case");
         assert_eq!(bare_name("cl-user::Foo"), "foo");
+        assert_eq!(form_key("(defun Area (r)\n  (* r r))"), "defun area");
+        assert_eq!(form_key("(defmethod geo::area ((s sq)) 0)"), "defmethod area");
+        assert_eq!(form_key("(print\n   (area 2))"), "(print (area 2))");
     }
 
     fn words(src: &str) -> Vec<(Kind, String)> {

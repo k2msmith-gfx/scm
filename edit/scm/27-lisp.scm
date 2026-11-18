@@ -89,7 +89,23 @@ starting it before then."
 ; file starts where its text starts, in CL-USER, until its own in-package.
 (hash-table-set! *language-send-wrap* "lisp"
   (lambda (run label)
+    ; Which file's forms these are, for the warnings said of them (L6).
+    (let ((path (buffer-path (%editor-active-buffer (editor-pane-id)))))
+      (when path (set! *lisp-sends* (append *lisp-sends* (list (cons path run))))))
     (lisp-call "in" (if (member label '("buffer" "file")) "COMMON-LISP-USER" (lisp-buffer-package)) run)))
+
+; ── The compiler's warnings, marked at their forms (L6) ────────────────────
+; What SBCL's compiler says of a form as it is sent — an undefined
+; function, a wrong count of arguments, an unused variable — comes back
+; with the answer (the transcript shows it under the send), each warning
+; with where its form began in the text sent. %lisp-warned marks the
+; buffer at those forms' heads, in the warning ink, and every form sent
+; loses its old marks: a mark stays until its form is sent again clean,
+; following its defun as the text around it moves. M-g n goes to them.
+(define *lisp-sends* '())        ; ((path . run) …): sends not yet answered, oldest first
+
+(define (lisp-warned! sent r)
+  (%lisp-warned (car sent) (cdr sent) (%alist-ref r :warning-at '()) (%alist-ref r :warnings '())))
 
 (define (lisp-ask conn call)
   ; CALL's value, READ — the server's helpers answer lists of strings —
@@ -146,7 +162,18 @@ error, and a REPL line whole when its brackets close."
     (append
       (list (cons :eval-async
                   (lambda (src k)
-                    ((backend-op base :eval-async) src (lambda (r) (k r) (sbcl-heard! r)))))
+                    ; A buffer's send (wrapped above): its entry, and any older
+                    ; one that never reached here (a send that failed first).
+                    (let ((sent (and (string-prefix? "(edit-serve:in " src)
+                                     (let loop ()
+                                       (match *lisp-sends*
+                                         (() #f)
+                                         ((s . rest)
+                                           (set! *lisp-sends* rest)
+                                           (if (string-contains src (lisp-string (cdr s))) s (loop))))))))
+                      ((backend-op base :eval-async)
+                       src
+                       (lambda (r) (k r) (sbcl-heard! r) (when sent (lisp-warned! sent r)))))))
             (cons :complete
                   (lambda (prefix)
                     (let ((names (lisp-ask conn (lisp-call "complete-in" (lisp-buffer-package) prefix))))

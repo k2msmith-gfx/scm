@@ -49,9 +49,10 @@ a buffer sending to it is set to."
   ; :value is the printed value — the live one is in the other process —
   ; and truthy, so the transcript shows it. What only some servers say is
   ; kept as it came: SBCL's break (27-lisp) — its level, its restarts, a
-  ; restart waiting for a value, the package the next line reads in.
+  ; restart waiting for a value, the package the next line reads in — and
+  ; its compiler's warnings, with where each one's form began.
   (define said
-    (filter (lambda (kv) (memq (car kv) '(:level :restarts :asking :package))) r))
+    (filter (lambda (kv) (memq (car kv) '(:level :restarts :asking :package :warnings :warning-at))) r))
   (append
     (if (eq? (%alist-ref r :status #f) 'ok)
       (list (cons :status 'ok)
