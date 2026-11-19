@@ -316,7 +316,8 @@ EOF"#;
         // Escape's interrupt: the turn stops, the pane says so quietly, and
         // the process that was interrupted answers the next request.
         eval(&mut interp, r#"(set! ended '()) (agent-submit "a long job")"#);
-        settle(&mut interp, r#"(member "working" (rows))"#);
+        let rows = settle(&mut interp, r#"(member "working" (rows))"#);
+        assert_eq!(rows.last().unwrap(), "thinking…", "between steps the pane still says it is working: {rows:?}");
         eval(&mut interp, r#"(agent-submit "hurry")"#);
         assert_eq!(texts(eval(&mut interp, "(rows)")).last().unwrap(), "still answering — Escape interrupts it");
         assert_eq!(eval(&mut interp, "(agent-typing?)"), Val::Bool(true));

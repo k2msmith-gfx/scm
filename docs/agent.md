@@ -200,6 +200,7 @@ Anything else is a request to the agent.
 | row | is |
 |---|---|
 | `you> …` | what you asked |
+| `thinking…` (dim, last) | the agent is working: there from the request to the end of the turn, between every step, and replaced by the next one; not while a reply streams or a question waits |
 | plain text | the agent's words, drawn as they are written |
 | `→ Edit src/main.rs` | a tool it called, with the argument worth showing |
 | dim text under a tool | what the tool answered, its first lines |

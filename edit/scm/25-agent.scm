@@ -788,12 +788,21 @@ exactly as it is; when the agent changed that file, the pane says so —
           (allow (agent-append "→ allowed, this once" :dim))
           (else (agent-append "→ refused" :dim)))
     (unless (null? *agent-asks*)
-      (agent-append (string-append "? " (%agent-ask-shown (cadr (car *agent-asks*)) (caddr (car *agent-asks*)))) :accent))))
+      (agent-append (string-append "? " (%agent-ask-shown (cadr (car *agent-asks*)) (caddr (car *agent-asks*)))) :accent))
+    (agent-await)))
+
+(define (%agent-pending-last)
+  ; The pending row, when it is still the transcript's last; one a row has
+  ; been appended after ("still answering …") is dropped, and #f.
+  (let ((id (agent-id)))
+    (when (and *agent-pending* id (< *agent-pending* (- (%pane-row-count id) 1)))
+      (agent-drop-pending))
+    *agent-pending*))
 
 (define (agent-take-pending text style)
   ; Put TEXT where the pending row is, its first line on that row and the
   ; rest after it; #f when no row was pending.
-  (let ((pending *agent-pending*) (id (agent-id)))
+  (let ((pending (%agent-pending-last)) (id (agent-id)))
     (set! *agent-pending* #f)
     (and pending id
          (let ((lines (string-split text "\n")))
@@ -877,7 +886,7 @@ exactly as it is; when the agent changed that file, the pane says so —
   ; changed, and any line after that is new.
   (let* ((id (agent-id))
          (st (or *agent-stream*
-                 (let ((at (or *agent-pending*
+                 (let ((at (or (%agent-pending-last)
                                (begin (agent-append "" :normal) (- (%pane-row-count id) 1)))))
                    (set! *agent-pending* #f)
                    (vector at 1 ""))))
@@ -985,6 +994,19 @@ anywhere else. What a host hands set-pane-menu! for the pane."
   (let ((pending *agent-pending*) (id (agent-id)))
     (set! *agent-pending* #f)
     (when (and pending id) (%pane-remove-row id pending))))
+
+; THE PANE SAYS IT IS WORKING FOR THE WHOLE TURN, not only until the first
+; event (Kevin, 2026-11-19: the echo area's "thinking…" is easy to miss).
+; Between steps — after a tool's result, a message, an answered question —
+; the transcript ends with a dim "thinking…", which the next step lands on.
+; Not while a reply is streaming (its words are the sign) or a question
+; waits for an answer (the agent is not working, you are).
+(define (agent-await)
+  (let ((id (agent-id)))
+    (when (and id *agent-turn-dir* (null? *agent-asks*) (not *agent-stream*))
+      (unless (%agent-pending-last)
+        (agent-append "thinking…" :dim)
+        (set! *agent-pending* (- (%pane-row-count id) 1))))))
 
 (define (%agent-cut text n)
   (let ((t (string-trim-both text)))
@@ -1128,6 +1150,7 @@ anywhere else. What a host hands set-pane-menu! for the pane."
               (cond ((equal? kind "tool") (string-append a " " (%agent-cut (%agent-first-line b) 60)))
                     ((equal? kind "metrics") a)
                     (else "thinking…")))))
+    (agent-await)
     #f))
 
 (define (agent-poll)
