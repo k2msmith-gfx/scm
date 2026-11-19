@@ -150,6 +150,12 @@ fn install_host_prims(interp: &mut scm::Interp) -> Result<(), scm::EmbedError> {
         let Ok(entries) = std::fs::read_dir(&path) else { return Ok(Val::Bool(false)) };
         Ok(Val::List(entries.flatten().map(|e| Val::Str(e.file_name().to_string_lossy().into_owned())).collect()))
     })?;
+    // `(%os-mkdir path)` — make the directory PATH and any missing above it.
+    interp.define_fn("%os-mkdir", |args| {
+        let Some(path) = val_text(args, 0) else { return Err("%os-mkdir: a path".into()) };
+        std::fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))?;
+        Ok(Val::Bool(true))
+    })?;
     interp.define_fn("%os-realpath", |args| {
         Ok(val_text(args, 0)
             .and_then(|p| std::fs::canonicalize(p).ok())
@@ -1113,6 +1119,16 @@ mod tests {
         // Not a directory: the root stays.
         s.call("(files-set-root \"b.scm\")");
         assert_eq!(s.eval_to_string("*files-root*").unwrap(), format!("\"{root}/src\""));
+        // A directory that is not there: asked, n leaves it alone, y makes
+        // it and the ones above it.
+        s.call("(files-set-root \"new/deeper\")");
+        assert!(s.eval_to_string("(%edit :prompt)").unwrap().contains("create it? (y/n)"));
+        s.call("((%edit :on-submit) \"n\")");
+        assert!(!dir.join("src/new").exists());
+        assert_eq!(s.eval_to_string("*files-root*").unwrap(), format!("\"{root}/src\""));
+        s.call("(files-set-root \"new/deeper\") ((%edit :on-submit) \"y\")");
+        assert!(dir.join("src/new/deeper").is_dir());
+        assert_eq!(s.eval_to_string("*files-root*").unwrap(), format!("\"{root}/src/new/deeper\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -163,12 +163,26 @@
   "Change the tree's root to DIR — prompted for, starting at the root it
   has, when not given. Exactly that directory, not the checkout it is in,
   so the tree can show one corner of a big checkout or a folder outside
-  git. The root is also where a relative path at C-x C-f starts."
+  git. The root is also where a relative path at C-x C-f starts. A
+  directory that does not exist is made, with the ones above it, once you
+  answer y."
+  (define (root-at p)
+    (let ((rp (real-file p)))
+      (files-root-at! rp) (*files-shown* #t) (echo "files: " rp)))
   (define (go d)
-    (let ((rp (real-file (resolve-path (if (equal? d "") "." d)))))
-      (if (and rp (files-dir? rp))
-        (begin (files-root-at! rp) (*files-shown* #t) (echo "files: " rp))
-        (echo "not a directory: " d))))
+    (let* ((p (resolve-path (if (equal? d "") "." d)))
+           (mkdir (%env-ref '%os-mkdir #f)))
+      (cond ((files-dir? p) (root-at p))
+            ((or (%os-stat p) (not mkdir)) (echo "not a directory: " d))
+            (else
+              (read-minibuffer
+                (string-append p " does not exist; create it? (y/n) ")
+                (lambda (ans)
+                  (if (member (string-downcase (string-trim-both ans)) '("y" "yes"))
+                    (guard (e (#t (echo "can't create " p ": " (if (string? e) e (*show-value* e)))))
+                      (mkdir p)
+                      (root-at p))
+                    (echo "root unchanged"))))))))
   (if dir
     (go dir)
     (read-minibuffer "Root: " go :files (and *files-root* (string-append *files-root* "/")))))

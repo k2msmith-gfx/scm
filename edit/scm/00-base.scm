@@ -16,6 +16,7 @@
 ;##                        %release-typing (the keyboard); %set-pie-delay (the
 ;##                        marking menu's hold timer is the host's loop);
 ;##                        %os-clock, %os-dir, %os-stat, %os-realpath
+;##                        (and %os-mkdir, the standalone's only)
 ;## The standalone program (E4) supplies the first two as Scheme, in
 ;## host/prelude.scm (copies of ray's, held to ray's text by a test), and the
 ;## prims in Rust (scm_binding/standalone.rs).

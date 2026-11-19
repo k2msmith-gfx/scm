@@ -877,6 +877,8 @@ and collapse all.
 - **Its root moves** (2026-11-19). `files-set-root` (`r`, or M-x with a
   directory) roots the tree at exactly the directory named, not the
   checkout it is in; `.` roots it at the selected folder, `^` a level up.
+  A directory that is not there is made, with those above it, on a y at
+  `create it? (y/n)` (`%os-mkdir`, the standalone's; without it, refused).
   In the standalone the root is also the default directory: C-x C-f starts
   at it (or at the last path opened, while that is under it), and a
   relative path there, in its completion and at vi's `:e` is under it,
