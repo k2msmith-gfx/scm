@@ -16,6 +16,9 @@
 (define *files-pane* (lambda () (*pane-id* :files)))
 (define *files-shown* (lambda (on) #f))
 (define *files-shown?* (lambda () #f))
+;   *files-root-changed*  told the new root whenever it moves (the
+;                   standalone re-indexes M-. over it)
+(define *files-root-changed* (lambda (root) #f))
 
 (define (files-mark n) (string (integer->char n) (integer->char n)))
 (define folder-mark (files-mark #xE000))
@@ -143,14 +146,47 @@
 (define (files-open-root dir)
   "Root the tree at the git checkout DIR is in (DIR itself outside git),
   with the root open."
-  (let ((root (or (%git-root dir) (real-file dir))))
-    (set! *files-root* root)
-    (set! *files-open* (make-hash-table equal?))
-    (hash-table-set! *files-open* root #t)
-    (set! *files-sel* 0)
-    (files-load-ignored!)
-    (files-render)
-    root))
+  (files-root-at! (or (%git-root dir) (real-file dir))))
+
+(define (files-root-at! root)
+  ; Root the tree at exactly ROOT, a real path, with the root open.
+  (set! *files-root* root)
+  (set! *files-open* (make-hash-table equal?))
+  (hash-table-set! *files-open* root #t)
+  (set! *files-sel* 0)
+  (files-load-ignored!)
+  (files-render)
+  (*files-root-changed* root)
+  root)
+
+(define (files-set-root (dir #f))
+  "Change the tree's root to DIR — prompted for, starting at the root it
+  has, when not given. Exactly that directory, not the checkout it is in,
+  so the tree can show one corner of a big checkout or a folder outside
+  git. The root is also where a relative path at C-x C-f starts."
+  (define (go d)
+    (let ((rp (real-file (resolve-path (if (equal? d "") "." d)))))
+      (if (and rp (files-dir? rp))
+        (begin (files-root-at! rp) (*files-shown* #t) (echo "files: " rp))
+        (echo "not a directory: " d))))
+  (if dir
+    (go dir)
+    (read-minibuffer "Root: " go :files (and *files-root* (string-append *files-root* "/")))))
+
+(define (files-root-here)
+  "Root the tree at the selected folder (or the folder the selected file
+  is in)."
+  (match (and (positive? (vector-length *files-rows*)) (vector-ref *files-rows* *files-sel*))
+    ((path #t depth) (files-set-root path))
+    ((path #f depth) (files-set-root (substring path 0 (- (string-length path) (string-length (files-base path)) 1))))
+    (_ #f)))
+
+(define (files-root-up)
+  "Root the tree at the folder above its root."
+  (when (and *files-root* (not (equal? *files-root* "/")))
+    (let ((b (files-base *files-root*)))
+      (files-set-root (let ((up (substring *files-root* 0 (- (string-length *files-root*) (string-length b) 1))))
+                        (if (equal? up "") "/" up))))))
 
 (define (files-refresh)
   "Read the tree again from disk — what changed since, and what git now
@@ -255,7 +291,8 @@
   "(bind-files-keys)  ->  :files
 
 The tree's own keys: up/down (p/n) move, RET opens, right/left (+/-)
-expand and collapse, g reads the disk again, i shows what git ignores, q
+expand and collapse, g reads the disk again, i shows what git ignores, r
+changes the root, . roots it at the selected folder, ^ a level up, q
 gives the keyboard back. Call it once the host's tree pane exists."
   (for-each (lambda (row) (bind-key (car row) (cadr row) :files))
             (list (list "down" files-next)
@@ -269,6 +306,9 @@ gives the keyboard back. Call it once the host's tree pane exists."
                   (list "-" files-collapse)
                   (list "g" files-refresh)
                   (list "i" files-toggle-ignored)
+                  (list "r" files-set-root)
+                  (list "." files-root-here)
+                  (list "^" files-root-up)
                   (list "q" focus-scene-editor)))
   :files)
 
@@ -314,4 +354,7 @@ gives the keyboard back. Call it once the host's tree pane exists."
         (list "collapse all" files-collapse-all)
         (list "refresh" files-refresh "g")
         (list "show/hide ignored" files-toggle-ignored "i")
+        (list "root here" files-root-here ".")
+        (list "root up a level" files-root-up "^")
+        (list "change root…" files-set-root "r")
         (list "hide the tree" toggle-files)))

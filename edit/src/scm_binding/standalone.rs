@@ -1094,6 +1094,25 @@ mod tests {
         s.call("(toggle-files)");
         let mut fb = crate::framebuffer::Framebuffer::new(1000, 700);
         app::draw(&mut fb);
+
+        // The root moves: to exactly the folder named, not its checkout.
+        s.call("(files-set-root \"src\")");
+        assert_eq!(s.eval_to_string("*files-root*").unwrap(), format!("\"{root}/src\""), "relative to the old root");
+        assert_eq!(rows(&mut s), vec!["▾ src", "▸ deep", "b.scm"]);
+        // C-x C-f starts there, and a relative path is under it.
+        assert_eq!(s.eval_to_string("(resolve-path \"deep/c.scm\")").unwrap(), format!("\"{root}/src/deep/c.scm\""));
+        assert_eq!(s.eval_to_string("(file-entries \"\" \"\")").unwrap(), "(\"b.scm\" \"deep/\")");
+        s.call("(find-file)");
+        assert_eq!(s.eval_to_string("(%edit :text)").unwrap(), format!("\"{root}/src/\""));
+        s.call("(mini-dismiss)");
+        // Up a level, and back down at the selected folder.
+        s.call("(files-root-up)");
+        assert_eq!(s.eval_to_string("*files-root*").unwrap(), format!("\"{root}\""));
+        s.call("(files-select! 1) (files-root-here)");
+        assert_eq!(s.eval_to_string("*files-root*").unwrap(), format!("\"{root}/src\""));
+        // Not a directory: the root stays.
+        s.call("(files-set-root \"b.scm\")");
+        assert_eq!(s.eval_to_string("*files-root*").unwrap(), format!("\"{root}/src\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

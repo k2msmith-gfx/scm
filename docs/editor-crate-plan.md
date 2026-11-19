@@ -874,6 +874,16 @@ and collapse all.
   opens a file (`open-path`) or opens and closes a folder. `files-reveal`
   follows the buffer on screen, through `*buffers-changed*`, opening the
   folders above it. `g` reads the disk again.
+- **Its root moves** (2026-11-19). `files-set-root` (`r`, or M-x with a
+  directory) roots the tree at exactly the directory named, not the
+  checkout it is in; `.` roots it at the selected folder, `^` a level up.
+  In the standalone the root is also the default directory: C-x C-f starts
+  at it (or at the last path opened, while that is under it), and a
+  relative path there, in its completion and at vi's `:e` is under it,
+  through `*default-directory*` and `resolve-path` (04-minibuffer). The
+  modeler leaves that hook at #f, so its paths stay ray's own.
+  `*files-root-changed*` re-indexes M-. when the root enters another
+  checkout.
 - **Its keys and menu.** In its own keymap, because the tree takes the
   FOCUS, not typing, so a bare key is a command: up/down or p/n, right/left
   or +/-, RET, g, i, q. The menu offers open, expand, collapse, collapse

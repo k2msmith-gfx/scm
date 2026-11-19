@@ -194,17 +194,27 @@ Every ray file of the same checkout shares it, so they all start over."
           ((video-path? p) (viewer %editor-open-video))
           (else (visit-file-text p)))))
 
+; A relative path at a file prompt is under the file tree's root
+; (files-set-root moves it).
+(set! *default-directory* (lambda () *files-root*))
+
 (define (find-file)
   "Open a file in a buffer — C-x C-f. Runs nothing. Markdown opens in the
   reading view and a .png/.jpg as a picture; anything else is text. TAB
-  completes the path."
+  completes the path. The prompt starts at the last path opened while that
+  is under the file tree's root, else at the root; a relative path is
+  under the root."
   (read-minibuffer
     "Find file: "
     (lambda (p)
-      (set! *last-open-path* p)
-      (open-path p))
+      (let ((p (resolve-path p)))
+        (set! *last-open-path* p)
+        (open-path p)))
     :files
-    *last-open-path*))
+    (if (and *files-root*
+             (not (and *last-open-path* (string-prefix? (string-append *files-root* "/") *last-open-path*))))
+      (string-append *files-root* "/")
+      *last-open-path*)))
 
 ; ── Keys ───────────────────────────────────────────────────────────────────
 (bind-key "C-x C-f" 'find-file)
@@ -221,7 +231,7 @@ Every ray file of the same checkout shares it, so they all start over."
 (bind-key "C-x C-c" (labelled "quit" (lambda () (%quit))))
 ; vi's :q and :e (19-ex).
 (set! *ex-quit* (lambda () (%quit)))
-(set! *ex-open* (lambda (path) (open-path (collapse-path path))))
+(set! *ex-open* (lambda (path) (open-path (resolve-path (collapse-path path)))))
 
 ; ── The bottom panel: a terminal or the REPL ───────────────────────────────
 ; Kevin, 2026-11-13: two icons at the strip's right end (src/app.rs), one
@@ -566,16 +576,23 @@ Every ray file of the same checkout shares it, so they all start over."
 (define (edit-open-files files)
   "The file tree at startup: rooted at the git checkout the first FILE is
   in — or the one the editor was started in — showing that file."
-  (let ((root (files-open-root (if (pair? files) (let ((d (files-dir-of (car files)))) d) "."))))
+  (files-open-root (if (pair? files) (files-dir-of (car files)) "."))
+  (when (pair? files) (files-reveal (car files))))
+
+(define *xref-checkout* #f)   ; the checkout M-. indexed last
+(set! *files-root-changed*
+  (lambda (root)
     ; M-. and M-? search the checkout the tree shows — every Scheme file in
     ; it, not only the ones opened (E8): references over the files opened
     ; so far would be a fraction of them. The index skips target/ and .git.
     ; ONLY a checkout: outside git the root is the directory itself, and
     ; `edit` started in ~ walked the whole home directory before the window
     ; opened (2026-11-15). There the index is the files opened and saved.
-    (when (%git-root root)
-      (%xref-index (list root))))
-  (when (pair? files) (files-reveal (car files))))
+    ; A root moved within a checkout keeps the whole checkout's index.
+    (let ((git (%git-root root)))
+      (when (and git (not (equal? git *xref-checkout*)))
+        (set! *xref-checkout* git)
+        (%xref-index (list git))))))
 
 (define (files-dir-of p)
   ; The directory P names, or the one it is in.

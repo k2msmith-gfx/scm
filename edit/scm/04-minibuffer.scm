@@ -88,6 +88,18 @@
     (string-append (or (get-environment-variable "HOME") "~") (substring p 1 (string-length p)))
     p))
 
+; THE DIRECTORY A RELATIVE PATH MEANS, as a forward hook: #f is the
+; process's own. The standalone answers the file tree's root, so a path
+; typed at C-x C-f completes and opens under the root the tree shows.
+(define *default-directory* (lambda () #f))
+
+(define (resolve-path p)
+  "P with ~/ expanded and, if relative, under (*default-directory*)."
+  (let ((p (expand-home p)) (dir (*default-directory*)))
+    (if (or (not dir) (string-prefix? "/" p))
+      p
+      (string-append dir (if (string-suffix? "/" dir) "" "/") p))))
+
 (define (split-path-token tok)
   "\"assets/mo\" -> (\"assets/\" \"mo\") — the dir part keeps its slash."
   (let ((i (let loop ((i (string-length tok)))
@@ -99,7 +111,7 @@
 (define (file-entries dirpart stem)
   "One directory's entries: names only, directories wearing a trailing
   slash, dotfiles hidden unless the stem asks for them."
-  (define fs (expand-home (if (equal? dirpart "") "." dirpart)))
+  (define fs (resolve-path (if (equal? dirpart "") "." dirpart)))
   (append-map
     (lambda (n)
       (if (and (string-prefix? "." n) (not (string-prefix? "." stem)))
