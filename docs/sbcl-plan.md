@@ -485,6 +485,38 @@ at (`*n*` > 0), resumed, interrupted again and given up with `:top`.
 `a_lisp_buffer_sends_to_sbcl` now finds itself two breaks down after its
 two errors, and leaves with `:top`.
 
+## The main thread (2026-11-20)
+
+macOS lets only the process's main thread open a window or run an event
+loop — Cocoa, and SDL and GLFW over it — and a send runs on its
+connection's thread, so a program that opens a window worked from a
+terminal SBCL and not from the editor. SLIME's `:spawn` has the same
+problem (it is what the server already did); its users hand the work over
+with `trivial-main-thread`. The server now does that itself:
+
+- **The main thread evaluates no request.** `main` accepts on a thread of
+  its own ("edit-serve accept") and keeps the main thread for jobs.
+- **`(edit-serve:with-main-thread () body…)`**, or
+  `(edit-serve:on-main-thread fn)`, runs the body there in the send's
+  package and waits: its values are the send's, what it prints is the
+  send's output, and an error it raises is raised in the send — a break
+  like any other. Giving that break up, or an interrupted runaway, gives
+  the job up too (the waiter interrupts the main thread on its way out), so
+  the main thread is free for the next one. On the main thread already, it
+  just calls.
+- **`(:wait nil)`** returns at once and leaves the body running — for an
+  event loop that never returns. Its output goes to the process's own
+  streams, which nothing reads, and its last error is in
+  `edit-serve:*main-thread-error*`. Jobs run one at a time, so while such a
+  loop runs, a waited job queues behind it; the loop has to return (or
+  poll for work of its own) before another runs.
+
+Test (`remote.rs`, `sbcl_tests`): `a_send_reaches_the_main_thread` — a
+plain send is not on it and a `with-main-thread` one is; values, output
+and package come back; an error is a break; `:wait nil` returns before
+the job finishes; an interrupted `(loop)` there, given up with `:abort`,
+leaves the main thread free.
+
 ## Risks
 
 - **A break holds the connection.** While an error stands open the

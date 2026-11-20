@@ -1419,4 +1419,39 @@ mod sbcl_tests {
         assert_eq!(value(c, "(+ 1 1)").0, "2", "the server is still up");
         close(c);
     }
+
+    /// A send runs on its connection's thread; `with-main-thread` hands a
+    /// body to the process's main thread — the one macOS lets open a
+    /// window — and the send waits for it as for any call.
+    #[test]
+    fn a_send_reaches_the_main_thread() {
+        if !sbcl_on_path() {
+            eprintln!("sbcl is not on the PATH: skipped");
+            return;
+        }
+        let c = start_sbcl();
+        let on_main = "(eq sb-thread:*current-thread* (sb-thread:main-thread))";
+        assert_eq!(value(c, on_main).0, "NIL", "a send is not on the main thread");
+        assert_eq!(value(c, &format!("(edit-serve:with-main-thread () {on_main})")).0, "T");
+        // Its values, its output with the send's, the send's package.
+        let (v, out) = value(c, "(defpackage :mt (:use :cl)) (in-package :mt) (edit-serve:with-main-thread () (print :there) (values 1 (symbol-name (intern \"X\"))))");
+        assert_eq!(v, "1, \"X\"");
+        assert!(out.contains(":THERE"), "{out:?}");
+        assert_eq!(value(c, "(symbol-package (find-symbol \"X\")) ").0, "#<PACKAGE \"MT\">");
+        // Its error is the send's, a break like any other.
+        let (msg, ..) = failure(c, "(edit-serve:with-main-thread () (error \"on main\"))");
+        assert_eq!(msg, "on main");
+        assert_eq!(value(c, ":abort").0, "; Evaluation aborted");
+        // Not waited for: the send returns, the main thread goes on.
+        value(c, "(defvar *ran* nil) (edit-serve:with-main-thread (:wait nil) (sleep 0.2) (setf *ran* t))");
+        assert_eq!(value(c, "*ran*").0, "NIL");
+        assert_eq!(value(c, "(sleep 0.5) *ran*").0, "T");
+        // A runaway on the main thread: interrupted, then given up, gives
+        // the job up too — the main thread takes the next one.
+        let answer = ask(c, Op::Eval { code: "(edit-serve:with-main-thread () (loop))".into(), source: None }, Duration::from_millis(500)).expect("an answer");
+        assert!(matches!(answer.outcome, Outcome::Failed { ref message, .. } if message == "interrupted"), "{:?}", answer.outcome);
+        assert_eq!(value(c, ":abort").0, "; Evaluation aborted");
+        assert_eq!(value(c, &format!("(edit-serve:with-main-thread () {on_main})")).0, "T", "the main thread is free again");
+        close(c);
+    }
 }

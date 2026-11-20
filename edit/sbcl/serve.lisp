@@ -28,6 +28,12 @@
 ;;;; Whatever finishes answers the request last read, so a USE-VALUE's
 ;;;; request is answered with the original send's value. SBCL's own
 ;;;; debugger never opens: there is no terminal for it to read from.
+;;;;
+;;;; The process's MAIN thread evaluates no request: it waits for jobs that
+;;;; `on-main-thread` hands it, and the listener accepts on a thread of its
+;;;; own. macOS lets only the main thread open a window or run an event
+;;;; loop (Cocoa, and SDL and GLFW over it), which a send — on its
+;;;; connection's thread — cannot do itself; `(with-main-thread () …)` can.
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (require :sb-bsd-sockets)
@@ -35,7 +41,8 @@
 
 (defpackage :edit-serve
   (:use :cl)
-  (:export #:main #:in #:complete-in #:describe-in #:read-check #:definitions-in #:*break-on-error*))
+  (:export #:main #:in #:complete-in #:describe-in #:read-check #:definitions-in #:*break-on-error*
+           #:on-main-thread #:with-main-thread #:*main-thread-error*))
 
 (in-package :edit-serve)
 
@@ -186,6 +193,67 @@ break, between requests — which an interrupt leaves alone.")
   (unless *reading*
     (with-simple-restart (continue "Go on with the evaluation.")
       (enter-break (make-condition 'simple-error :format-control "interrupted") t))))
+
+;;; ---- the main thread ----------------------------------------------------
+
+(defvar *jobs* '() "Jobs for the main thread, oldest last.")
+(defvar *jobs-ready* (sb-thread:make-semaphore :name "edit-serve jobs"))
+(defvar *job* nil "The job the main thread is running, there.")
+(defvar *main-thread-error* nil
+  "The last error a job not waited for (`:wait nil`) raised on the main
+thread, which has no one to answer it to.")
+
+(defstruct job fn wait (done (sb-thread:make-semaphore)) values condition package out)
+
+(defun run-main-thread-jobs ()
+  (loop
+    (sb-thread:wait-on-semaphore *jobs-ready*)
+    (let ((job (sb-thread:with-mutex (*lock*)
+                 (prog1 (car (last *jobs*)) (setf *jobs* (butlast *jobs*))))))
+      (let ((*job* job)
+            (*package* (job-package job)))
+        (catch job
+          (handler-case
+              (if (job-out job)
+                  (let ((*standard-output* (job-out job)) (*error-output* (job-out job)) (*trace-output* (job-out job)))
+                    (setf (job-values job) (multiple-value-list (funcall (job-fn job)))))
+                  (setf (job-values job) (multiple-value-list (funcall (job-fn job)))))
+            (error (c)
+              (if (job-wait job)
+                  (setf (job-condition job) c)
+                  (setf *main-thread-error* c))))))
+      (sb-thread:signal-semaphore (job-done job)))))
+
+(defun on-main-thread (fn &key (wait t))
+  "Call FN on the process's main thread, in this package. WAIT (the
+default) returns its values here, prints what it prints with the send's
+output, and raises here what it raises; giving the send up gives FN up
+too. With WAIT nil, return at once and leave FN running — an event loop
+that never returns — its errors in `*main-thread-error*`."
+  (if (eq sb-thread:*current-thread* (sb-thread:main-thread))
+      (funcall fn)
+      (let ((job (make-job :fn fn :wait wait :package *package* :out (and wait *standard-output*))))
+        (sb-thread:with-mutex (*lock*) (push job *jobs*))
+        (sb-thread:signal-semaphore *jobs-ready*)
+        (when wait
+          (let ((finished nil))
+            (unwind-protect
+                 (progn (sb-thread:wait-on-semaphore (job-done job))
+                        (setf finished t))
+              ;; Unwound while waiting (`:abort`, `:top`): stop the job too,
+              ;; if the main thread is still in it -- and still owes the
+              ;; semaphore, which it signals on the way out.
+              (unless finished
+                (ignore-errors
+                 (sb-thread:interrupt-thread
+                  (sb-thread:main-thread)
+                  (lambda () (when (eq *job* job) (throw job nil))))))))
+          (when (job-condition job) (error (job-condition job)))
+          (values-list (job-values job))))))
+
+(defmacro with-main-thread ((&key (wait t)) &body body)
+  "BODY on the process's main thread: `on-main-thread`."
+  `(on-main-thread (lambda () ,@body) :wait ,wait))
 
 ;;; ---- eval ---------------------------------------------------------------
 
@@ -810,9 +878,14 @@ from the top, or from inside a break."
     (setf (sb-bsd-sockets:sockopt-reuse-address listener) t)
     (sb-bsd-sockets:socket-bind listener (sb-bsd-sockets:make-inet-address host) port)
     (sb-bsd-sockets:socket-listen listener 8)
-    (loop
-      (let ((conn (sb-bsd-sockets:socket-accept listener)))
-        (sb-thread:make-thread (lambda () (serve-connection conn)) :name "edit-serve connection")))))
+    (sb-thread:make-thread
+     (lambda ()
+       (loop
+         (let ((conn (sb-bsd-sockets:socket-accept listener)))
+           (sb-thread:make-thread (lambda () (serve-connection conn)) :name "edit-serve connection"))))
+     :name "edit-serve accept")
+    ;; Loaded with --load, this is the main thread: it is kept for jobs.
+    (run-main-thread-jobs)))
 
 ;; Serving is what loading this file is for -- but not when it is only
 ;; being compiled.
