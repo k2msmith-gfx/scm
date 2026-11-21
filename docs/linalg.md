@@ -105,6 +105,58 @@ picture that is wrong without erroring:
   one axis still inverts, and a genuinely singular one raises instead of
   returning infinities.
 
+## The hot procedures are native (M7, 2026-11-21)
+
+lux, a live-coding renderer written in scm, measured its per-frame work in
+its P0 and found the arithmetic was the cost: scm's VM spends ~37 ns on a
+floating-point operation, so `mat4*` took 12.7 µs, `mat4-translation`
+6.1 µs and `mat4-rotation-y` 3.2 µs, and flattening a scene of 1,000 shapes
+took 34 ms. Kevin, 2026-11-21, on ray: *"we use glam for matrices"* -- and
+this crate has no dependencies, so glam itself was not an option.
+
+**The representation did not change.** A flonum is an immediate `Value`,
+so a vector of sixteen is one allocation and reading one is a load; only
+the arithmetic needed moving. `src/prim/linalg.rs` holds `%mat4*`,
+`%mat4-transpose`, `%mat4-inverse`, `%mat4-translation`, `%mat4-scaling`,
+`%mat4-rotation-x/y/z`, `%mat4-transform-point`,
+`%mat4-transform-direction`, `%quat*` and `%quat->mat4`, and the library
+binds its names to them. What calls them -- `mat4-compose`,
+`mat4-rotation-axis-angle`, `mat4-from-quaternion`,
+`mat4-transform-normal`, `mat4-rotation-xyz` -- got faster with no change.
+
+**Bit-identical, not close.** Each is a port of the Scheme it replaced,
+operation for operation: `(+ a b c d)` folds left to right, so every sum
+does; `(- x)` inside a sum is IEEE negation, so `x + -y` is written as
+such; Rust does not contract `a * b + c` into a fused multiply-add. The
+Scheme originals are kept verbatim in `scm/tests/srfi/linalg-native.scm`,
+which checks every procedure against them on 300 pseudo-random inputs
+each -- integers, zeros and negative zeros among them -- on both tiers,
+with `equal?`, which tells -0.0 from 0.0.
+
+| | Scheme | native |
+|---|---|---|
+| `mat4*`, two | 12.7 µs | 0.20 µs |
+| `mat4-translation` | 6.1 µs | 0.29 µs |
+| `mat4-rotation-y` | 3.2 µs | 0.14 µs |
+| lux P0: flatten 1,000 shapes | 34.6 ms | 2.56 ms |
+| lux P0: the 1,000 draws to the GPU, finished | 38.2 ms | 4.57 ms |
+
+**Two deliberate differences.** Arithmetic results are always inexact,
+where the Scheme kept a hand-built all-exact matrix exact -- every
+constructor already made flonums. `mat4-transpose`, which only moves
+elements, keeps them as they are, as before (the test caught the first
+draft converting them). And a wrong shape is refused naming the
+procedure, where the Scheme failed inside `vector-ref`.
+
+**One addition, `mat4-store!`**: `(mat4-store! dst offset m)` writes M's
+sixteen values in storage order into an `f32vector` or `f64vector` from
+OFFSET -- the one copy a matrix makes on its way to a GPU buffer. Storage
+order is column-major, glam's, so it is a straight copy.
+
+**Still Scheme**, because nothing measured them hot: the vec3 and vec4
+layers, `mat4-determinant`, `mat4-decompose`, `mat4->quat`, the camera
+matrices, `quat-slerp`. Each can follow the same way when it is.
+
 ## Deliberate choices worth knowing
 
 - **`v3-normalize` raises on the zero vector**, because silently returning

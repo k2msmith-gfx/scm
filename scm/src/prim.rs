@@ -18,6 +18,8 @@ use std::rc::Rc;
 use crate::value::{ObjRef, SymId};
 use crate::writer::{Labels, display_str, write_str, write_with};
 
+mod linalg;
+
 type PResult = Result<Value, VmError>;
 
 fn err(msg: impl Into<String>) -> VmError {
@@ -5301,4 +5303,6 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("delete-file", p_delete_file);
     vm.define_prim("open-input-file", p_open_input_file);
     vm.define_prim("open-output-file", p_open_output_file);
+    // (scm linalg)'s hot procedures, native: prim/linalg.rs
+    linalg::install(vm);
 }

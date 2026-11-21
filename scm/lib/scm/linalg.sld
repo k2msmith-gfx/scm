@@ -89,7 +89,7 @@
     mat4-compose mat4-decompose
     mat4-transform-point mat4-transform-direction mat4-transform-normal
     mat4-look-at mat4-perspective mat4-orthographic
-    mat4-approximately=?
+    mat4-approximately=? mat4-store!
     ;; quaternions
     quat quat? quat-x quat-y quat-z quat-w quat-identity
     quat-from-axis-angle quat-from-euler-xyz quat-to-euler-xyz
@@ -346,7 +346,8 @@
     ;; ── mat4 ─────────────────────────────────────────────────────────
     ;; Sixteen elements, COLUMN-major: element (row r, column c) lives at
     ;; c*4+r, which is glam's layout. Only the three procedures below know
-    ;; that; everything else goes through them.
+    ;; that, and src/prim/linalg.rs, where the hot procedures are native:
+    ;; the same vectors, the same arithmetic in the same order (M7).
     (define (%ix r c) (+ (* c 4) r))
     (define (mat4-ref m r c) (vector-ref m (%ix r c)))
     (define (%set! m r c x) (vector-set! m (%ix r c) x))
@@ -384,37 +385,14 @@
 
     ;; Variadic and left to right, so `(mat4* t r s)` is the usual
     ;; translate-rotate-scale reading: S applies to the point first.
-    (define (mat4* a . rest)
-      (let loop ((acc a) (ms rest))
-        (if (null? ms) acc (loop (%mul acc (car ms)) (cdr ms)))))
+    (define mat4* %mat4*)   ; native: src/prim/linalg.rs
 
-    (define (%mul a b)
-      (let ((m (make-vector 16 0.0)))
-        (let rows ((r 0))
-          (if (= r 4)
-              m
-              (begin
-                (let cols ((c 0))
-                  (when (< c 4)
-                    (%set! m r c
-                           (+ (* (mat4-ref a r 0) (mat4-ref b 0 c))
-                              (* (mat4-ref a r 1) (mat4-ref b 1 c))
-                              (* (mat4-ref a r 2) (mat4-ref b 2 c))
-                              (* (mat4-ref a r 3) (mat4-ref b 3 c))))
-                    (cols (+ c 1))))
-                (rows (+ r 1)))))))
+    (define mat4-transpose %mat4-transpose)   ; native: src/prim/linalg.rs
 
-    (define (mat4-transpose m)
-      (let ((out (make-vector 16 0.0)))
-        (let rows ((r 0))
-          (if (= r 4)
-              out
-              (begin
-                (let cols ((c 0))
-                  (when (< c 4)
-                    (%set! out c r (mat4-ref m r c))
-                    (cols (+ c 1))))
-                (rows (+ r 1)))))))
+    ;; `(mat4-store! dst offset m)`: M's sixteen values in storage order
+    ;; (column-major) into the f32vector or f64vector DST from OFFSET --
+    ;; the one copy a matrix makes on its way to a GPU buffer.
+    (define mat4-store! %mat4-store!)   ; native: src/prim/linalg.rs
 
     ;; Cofactor expansion along the first row, with 3x3 minors. Longer
     ;; than a row reduction but exact in the same way the formula is.
@@ -437,107 +415,20 @@
     ;; pivoting is the point: a transform with a very small scale on one
     ;; axis inverts without the cancellation the closed form suffers, and
     ;; a singular matrix is reported rather than returning infinities.
-    (define (mat4-inverse m)
-      (let ((a (make-vector 32 0.0)))
-        ;; [ m | I ], row-major in a 4x8 scratch
-        (let fill ((r 0))
-          (when (< r 4)
-            (let cols ((c 0))
-              (when (< c 4)
-                (vector-set! a (+ (* r 8) c) (mat4-ref m r c))
-                (vector-set! a (+ (* r 8) 4 c) (if (= r c) 1.0 0.0))
-                (cols (+ c 1))))
-            (fill (+ r 1))))
-        (let elim ((col 0))
-          (if (= col 4)
-              (let ((out (make-vector 16 0.0)))
-                (let gather ((r 0))
-                  (if (= r 4)
-                      out
-                      (begin
-                        (let cols ((c 0))
-                          (when (< c 4)
-                            (%set! out r c (vector-ref a (+ (* r 8) 4 c)))
-                            (cols (+ c 1))))
-                        (gather (+ r 1))))))
-              (let ((pivot (%best-pivot a col)))
-                (when (< (abs (vector-ref a (+ (* pivot 8) col))) 1e-14)
-                  (error "mat4-inverse: the matrix is singular"))
-                (%swap-rows! a col pivot)
-                (%scale-row! a col (/ 1.0 (vector-ref a (+ (* col 8) col))))
-                (let others ((r 0))
-                  (when (< r 4)
-                    (unless (= r col)
-                      (%axpy! a r col (- (vector-ref a (+ (* r 8) col)))))
-                    (others (+ r 1))))
-                (elim (+ col 1)))))))
-
-    (define (%best-pivot a col)
-      (let loop ((r col) (best col) (bv (abs (vector-ref a (+ (* col 8) col)))))
-        (if (= r 4)
-            best
-            (let ((v (abs (vector-ref a (+ (* r 8) col)))))
-              (if (> v bv) (loop (+ r 1) r v) (loop (+ r 1) best bv))))))
-
-    (define (%swap-rows! a r1 r2)
-      (unless (= r1 r2)
-        (let loop ((c 0))
-          (when (< c 8)
-            (let ((t (vector-ref a (+ (* r1 8) c))))
-              (vector-set! a (+ (* r1 8) c) (vector-ref a (+ (* r2 8) c)))
-              (vector-set! a (+ (* r2 8) c) t))
-            (loop (+ c 1))))))
-
-    (define (%scale-row! a r k)
-      (let loop ((c 0))
-        (when (< c 8)
-          (vector-set! a (+ (* r 8) c) (* k (vector-ref a (+ (* r 8) c))))
-          (loop (+ c 1)))))
-
-    ;; row[r] += k * row[src]
-    (define (%axpy! a r src k)
-      (let loop ((c 0))
-        (when (< c 8)
-          (vector-set! a (+ (* r 8) c)
-                       (+ (vector-ref a (+ (* r 8) c))
-                          (* k (vector-ref a (+ (* src 8) c)))))
-          (loop (+ c 1)))))
+    (define mat4-inverse %mat4-inverse)   ; native: src/prim/linalg.rs
 
     ;; ── the constructors ─────────────────────────────────────────────
-    (define (mat4-translation t)
-      (mat4-from-rows 1.0 0.0 0.0 (v3-x t)
-                      0.0 1.0 0.0 (v3-y t)
-                      0.0 0.0 1.0 (v3-z t)
-                      0.0 0.0 0.0 1.0))
+    (define mat4-translation %mat4-translation)   ; native: src/prim/linalg.rs
 
-    (define (mat4-scaling s)
-      (mat4-from-rows (v3-x s) 0.0 0.0 0.0
-                      0.0 (v3-y s) 0.0 0.0
-                      0.0 0.0 (v3-z s) 0.0
-                      0.0 0.0 0.0 1.0))
+    (define mat4-scaling %mat4-scaling)   ; native: src/prim/linalg.rs
 
     (define (mat4-uniform-scaling k) (mat4-scaling (v3 k k k)))
 
-    (define (mat4-rotation-x a)
-      (let ((c (cos a)) (s (sin a)))
-        (mat4-from-rows 1.0 0.0 0.0 0.0
-                        0.0 c (- s) 0.0
-                        0.0 s c 0.0
-                        0.0 0.0 0.0 1.0)))
+    (define mat4-rotation-x %mat4-rotation-x)   ; native: src/prim/linalg.rs
 
-    (define (mat4-rotation-y a)
-      (let ((c (cos a)) (s (sin a)))
-        (mat4-from-rows c 0.0 s 0.0
-                        0.0 1.0 0.0 0.0
-                        (- s) 0.0 c 0.0
-                        0.0 0.0 0.0 1.0)))
+    (define mat4-rotation-y %mat4-rotation-y)   ; native: src/prim/linalg.rs
 
-    (define (mat4-rotation-z a)
-      (let ((c (cos a)) (s (sin a)))
-        (mat4-from-rows c (- s) 0.0 0.0
-                        s c 0.0 0.0
-                        0.0 0.0 1.0 0.0
-                        0.0 0.0 0.0 1.0)))
+    (define mat4-rotation-z %mat4-rotation-z)   ; native: src/prim/linalg.rs
 
     (define (mat4-rotation-axis-angle axis angle)
       (quat->mat4 (quat-from-axis-angle axis angle)))
@@ -583,22 +474,10 @@
     ;; A point carries w=1, so the translation applies, and the result is
     ;; divided through by w -- which only matters for a projection, and
     ;; silently gives the wrong point if skipped.
-    (define (mat4-transform-point m p)
-      (let* ((x (v3-x p)) (y (v3-y p)) (z (v3-z p))
-             (rx (+ (* (mat4-ref m 0 0) x) (* (mat4-ref m 0 1) y) (* (mat4-ref m 0 2) z) (mat4-ref m 0 3)))
-             (ry (+ (* (mat4-ref m 1 0) x) (* (mat4-ref m 1 1) y) (* (mat4-ref m 1 2) z) (mat4-ref m 1 3)))
-             (rz (+ (* (mat4-ref m 2 0) x) (* (mat4-ref m 2 1) y) (* (mat4-ref m 2 2) z) (mat4-ref m 2 3)))
-             (rw (+ (* (mat4-ref m 3 0) x) (* (mat4-ref m 3 1) y) (* (mat4-ref m 3 2) z) (mat4-ref m 3 3))))
-        (if (or (= rw 1.0) (= rw 0.0))
-            (v3 rx ry rz)
-            (v3 (/ rx rw) (/ ry rw) (/ rz rw)))))
+    (define mat4-transform-point %mat4-transform-point)   ; native: src/prim/linalg.rs
 
     ;; A direction carries w=0, so the translation does NOT apply.
-    (define (mat4-transform-direction m d)
-      (let ((x (v3-x d)) (y (v3-y d)) (z (v3-z d)))
-        (v3 (+ (* (mat4-ref m 0 0) x) (* (mat4-ref m 0 1) y) (* (mat4-ref m 0 2) z))
-            (+ (* (mat4-ref m 1 0) x) (* (mat4-ref m 1 1) y) (* (mat4-ref m 1 2) z))
-            (+ (* (mat4-ref m 2 0) x) (* (mat4-ref m 2 1) y) (* (mat4-ref m 2 2) z)))))
+    (define mat4-transform-direction %mat4-transform-direction)   ; native: src/prim/linalg.rs
 
     ;; A normal transforms by the INVERSE TRANSPOSE, not by the matrix. A
     ;; non-uniform scale shears a surface, and a normal carried by the
@@ -715,17 +594,7 @@
                   (quat (v3-x c) (v3-y c) (v3-z c) (+ 1.0 d))))))))
 
     ;; Composition: `(quat* a b)` applied to a vector is a applied after b.
-    (define (quat* a . rest)
-      (let loop ((acc a) (qs rest))
-        (if (null? qs) acc (loop (%qmul acc (car qs)) (cdr qs)))))
-
-    (define (%qmul a b)
-      (let ((ax (quat-x a)) (ay (quat-y a)) (az (quat-z a)) (aw (quat-w a))
-            (bx (quat-x b)) (by (quat-y b)) (bz (quat-z b)) (bw (quat-w b)))
-        (quat (+ (* aw bx) (* ax bw) (* ay bz) (- (* az by)))
-              (+ (* aw by) (- (* ax bz)) (* ay bw) (* az bx))
-              (+ (* aw bz) (* ax by) (- (* ay bx)) (* az bw))
-              (- (* aw bw) (* ax bx) (* ay by) (* az bz)))))
+    (define quat* %quat*)   ; native: src/prim/linalg.rs
 
     (define (quat-conjugate q)
       (quat (- (quat-x q)) (- (quat-y q)) (- (quat-z q)) (quat-w q)))
@@ -790,17 +659,7 @@
                     (+ (* wa (quat-z a)) (* wb (quat-z b)))
                     (+ (* wa (quat-w a)) (* wb (quat-w b))))))))
 
-    (define (quat->mat4 q)
-      (let* ((n (quat-normalize q))
-             (x (quat-x n)) (y (quat-y n)) (z (quat-z n)) (w (quat-w n))
-             (xx (* x x)) (yy (* y y)) (zz (* z z))
-             (xy (* x y)) (xz (* x z)) (yz (* y z))
-             (wx (* w x)) (wy (* w y)) (wz (* w z)))
-        (mat4-from-rows
-         (- 1.0 (* 2.0 (+ yy zz))) (* 2.0 (- xy wz)) (* 2.0 (+ xz wy)) 0.0
-         (* 2.0 (+ xy wz)) (- 1.0 (* 2.0 (+ xx zz))) (* 2.0 (- yz wx)) 0.0
-         (* 2.0 (- xz wy)) (* 2.0 (+ yz wx)) (- 1.0 (* 2.0 (+ xx yy))) 0.0
-         0.0 0.0 0.0 1.0)))
+    (define quat->mat4 %quat->mat4)   ; native: src/prim/linalg.rs
 
     ;; Shepperd's method: take the largest of the four candidate
     ;; denominators. Using one fixed formula loses all precision when its

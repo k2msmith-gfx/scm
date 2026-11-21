@@ -245,6 +245,16 @@ fn the_linear_algebra_library_passes_on_both_tiers() {
     }
 }
 
+/// M7 made `(scm linalg)`'s hot procedures native (`src/prim/linalg.rs`).
+/// Each is checked against the Scheme it replaced, kept verbatim in the
+/// test program, for bit-identical results on a fixed pseudo-random stream.
+#[test]
+fn the_native_linear_algebra_agrees_with_the_scheme_it_replaced() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "linalg-native.scm"), "()", "native (scm linalg) on {tier:?}");
+    }
+}
+
 /// `(scm noise)` has no right answer to compare against, so the gate is
 /// on properties: deterministic, continuous across lattice boundaries, in
 /// the range it claims, exactly zero on the lattice for gradient noise,
