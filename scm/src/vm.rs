@@ -2809,8 +2809,12 @@ impl Vm {
                         return Err(self.err("malformed parameter list"));
                     };
                     cur = cdr;
-                    // A marker?
+                    // A marker? Seen through a macro's renaming: a
+                    // `syntax-rules` template that writes `&named` hands us
+                    // a fresh alias of it, which is still the marker, as a
+                    // template's `else` is still `else` (lux P0, M8).
                     if let Value::Symbol(s) = car {
+                        let s = self.engine.resolve(s);
                         let next = if s == self.syms.amp_opt {
                             Some(Section::Opt)
                         } else if s == self.syms.amp_named {
@@ -2880,7 +2884,11 @@ impl Vm {
                         Section::Opt => f.opt.push(self.parse_param_spec(car)?),
                         Section::Named => {
                             let p = self.parse_param_spec(car)?;
-                            let name = self.engine.interner.sym_name(p.name).to_string();
+                            // The keyword is the name as written, not a
+                            // template's alias of it: `(x 1)` from a
+                            // template binds `x.37` but answers to `:x`.
+                            let written = self.engine.resolve(p.name);
+                            let name = self.engine.interner.sym_name(written).to_string();
                             let kw = self.engine.interner.keyword(&name);
                             f.named.push(NamedParam {
                                 name: p.name,

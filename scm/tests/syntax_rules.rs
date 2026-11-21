@@ -69,6 +69,41 @@ fn a_user_may_shadow_a_macro_name() {
     assert_eq!(eval("(let ((when (lambda (a b) (+ a b)))) (when 1 2))"), "3");
 }
 
+#[test]
+fn lambda_list_markers_survive_a_template() {
+    // A template's `&named` reaches the lambda list renamed, and it is still
+    // the marker -- found by lux's P0, where a `define-material` written with
+    // `syntax-rules` bound `:brightness 2.5` to its first parameter.
+    let src = "
+(define-syntax define-material
+  (syntax-rules ()
+    ((_ name (p d) ...) (define (name &named (p d) ...) (list p ...)))))
+(define-material nebula (drift 0.05) (brightness 1.0))";
+    assert_eq!(eval(&format!("{src} (nebula :brightness 2.5)")), "(0.05 2.5)");
+    assert_eq!(eval(&format!("{src} (nebula :brightness 2.5 :drift 9)")), "(9 2.5)");
+    assert_eq!(eval(&format!("{src} (nebula)")), "(0.05 1.0)");
+    // `&opt` and `&keys` from a template too.
+    assert_eq!(
+        eval("(define-syntax d (syntax-rules () ((_ f) (define (f a &opt (b 2) &keys ks) (list a b ks)))))
+              (d g) (g 1 5 :x 3)"),
+        "(1 5 ((:x . 3)))"
+    );
+}
+
+#[test]
+fn a_template_keyword_parameter_answers_to_its_written_name() {
+    // The template introduces the parameter, so its binding is renamed, but
+    // the keyword a caller writes is the name the macro's author wrote.
+    let src = "
+(define-syntax define-scaler
+  (syntax-rules () ((_ f) (define (f v &named (by 2)) (* v by)))))
+(define-scaler scale)";
+    assert_eq!(eval(&format!("{src} (scale 3 :by 10)")), "30");
+    assert_eq!(eval(&format!("{src} (scale 3)")), "6");
+    // And it still cannot capture a caller's variable of the same name.
+    assert_eq!(eval(&format!("{src} (let ((by 100)) (scale 3 :by 10))")), "30");
+}
+
 // ---- the matcher --------------------------------------------------------
 
 #[test]
