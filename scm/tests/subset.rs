@@ -219,6 +219,12 @@ fn the_documented_additions_hold() {
     // argument is an error -- both sentences in the document.
     assert!(eval(r#"(format "~b" 5)"#).contains("unknown directive ~b"));
     assert!(eval(r#"(format "~a" 1 2)"#).contains("left over"));
+
+    // 6. Host objects: a script alone cannot make one, so only the
+    // procedures' refusals are checkable here; tests/host_objects.rs has
+    // the rest, through a host.
+    assert_eq!(eval("(list (host-object? 5) (host-object? (vector)))"), "(#f #f)");
+    assert!(eval("(host-object-kind 5)").contains("not a host object"));
 }
 
 #[test]

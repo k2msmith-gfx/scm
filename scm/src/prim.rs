@@ -5305,4 +5305,27 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("open-output-file", p_open_output_file);
     // (scm linalg)'s hot procedures, native: prim/linalg.rs
     linalg::install(vm);
+    // host objects (lux's plan, M3)
+    vm.define_prim("host-object?", p_is_host_object);
+    vm.define_prim("host-object-kind", p_host_object_kind);
+}
+
+/// `(host-object? x)`: is X a value the host made -- a GPU buffer, a
+/// texture -- which Scheme can hold and pass but not look inside?
+fn p_is_host_object(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("host-object?", a)?;
+    Ok(Value::Bool(matches!(v, Value::Obj(r) if matches!(e.obj(r), Obj::Host(_)))))
+}
+
+/// `(host-object-kind x)`: the kind the host named it with, as a symbol --
+/// `buffer` for what prints as `#<buffer>`.
+fn p_host_object_kind(e: &mut Engine, a: &[Value]) -> PResult {
+    let v = one("host-object-kind", a)?;
+    if let Value::Obj(r) = v
+        && let Obj::Host(h) = e.obj(r)
+    {
+        let kind = h.kind().to_string();
+        return Ok(Value::Symbol(e.interner.symbol(&kind)));
+    }
+    Err(err(format!("host-object-kind: not a host object: {}", write_str(e, v))))
 }

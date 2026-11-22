@@ -33,6 +33,25 @@ fn every_rust_snippet_in_the_readme_holds() -> Result<(), scm::EmbedError> {
     ]))?;
     assert_eq!(scm.write(&v)?, "#(\"a\" :at)");
 
+    // ── host objects, and arguments read in place ────────────────────
+    {
+        use scm::HostObject;
+
+        struct Buffer { size: usize }
+
+        let mut scm = Interp::new()?;
+        scm.define_fn_args("make-buffer", |a| {
+            Ok(Val::Host(HostObject::new("buffer", Buffer { size: a.int(0)? as usize })))
+        })?;
+        scm.define_fn_args("buffer-write!", |a| {
+            let buffer = a.host_as::<Buffer>(0, "buffer")?;   // the Rc the object shares
+            let floats = a.f32s(1)?;                           // borrowed, for the call
+            Ok(Val::Bool(floats.len() * 4 <= buffer.size))
+        })?;
+        let r = scm.eval("(import (srfi 4)) (define b (make-buffer 64)) (list b (buffer-write! b (make-f32vector 16 0.0)))")?;
+        assert_eq!(scm.write(&r)?, "(#<buffer> #t)");
+    }
+
     // ── calling in both directions ───────────────────────────────────
     scm.define_fn("clamp", |args| match args {
         [Val::Float(x)] => Ok(Val::Float(x.clamp(0.0, 1.0))),

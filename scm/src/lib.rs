@@ -104,9 +104,9 @@ pub mod value;
 pub mod vm;
 pub mod writer;
 
-pub use embed::{Description, Error as EmbedError, Host, Interp, Proc, Rooted, Val};
+pub use embed::{Args, Description, Error as EmbedError, Host, Interp, Proc, Rooted, Val};
 pub use repl::{Framing, Op, Outcome, Request, Response, Session};
-pub use heap::{Engine, Interner, Obj, OutputCallback};
+pub use heap::{Engine, HostObject, Interner, Obj, OutputCallback};
 pub use reader::{ReadError, Reader, ReaderOptions, Span};
 pub use value::{KwId, ObjRef, SymId, Value};
 pub use value::PrimId;

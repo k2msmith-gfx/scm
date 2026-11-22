@@ -263,7 +263,7 @@ fails if this section goes stale. The prose claims next to the snippets are
 checked there too, since those are the sentences most likely to rot
 unnoticed.
 
-### The five types
+### The seven types
 
 | type | what it is |
 |---|---|
@@ -272,9 +272,12 @@ unnoticed.
 | `Val` | the host's view of a value, containing no internal references |
 | `Proc` | a Scheme procedure the host can hold and call later; clones share one root |
 | `Host` | what a re-entrant host function receives, so it can call back into Scheme |
+| `Args` | what a `define_fn_args` function receives: its arguments read in place, float vectors borrowed |
+| `HostObject` | a value of the host's own -- a GPU buffer -- that Scheme holds and the collector releases |
 
 `Val` covers `Null` `Unspecified` `Bool` `Int` `BigInt` `Float` `Char`
-`Str` `Sym` `Keyword` `List` `Pair` `Vector` `Bytes` `Proc`, plus `Opaque`
+`Str` `Sym` `Keyword` `List` `Pair` `Vector` `Bytes` `F32s` `F64s` `Host`
+`Proc`, plus `Opaque`
 for anything with no host representation — a port, a parameter, a cycle.
 
 A `BigInt` is decimal text: lossless in both directions, and it normalises,
@@ -336,6 +339,35 @@ if let Val::Proc(f) = scm.value(&r)? {
 An `Err(String)` returned by a host function becomes an ordinary Scheme
 error that `guard` can catch, because the host's *code* failing is not the
 same as the host saying stop. A panic inside one is caught too, and named.
+
+### Host objects, and arguments read in place
+
+A renderer's buffers are values a script keeps, and its uniforms are
+`f32vector`s written every frame. `HostObject` wraps any Rust value for
+Scheme to hold; `define_fn_args` reads arguments where they lie, so a float
+vector is a borrowed slice, not a copy:
+
+```rust
+use scm::HostObject;
+
+struct Buffer { size: usize }
+
+scm.define_fn_args("make-buffer", |a| {
+    Ok(Val::Host(HostObject::new("buffer", Buffer { size: a.int(0)? as usize })))
+})?;
+scm.define_fn_args("buffer-write!", |a| {
+    let buffer = a.host_as::<Buffer>(0, "buffer")?;   // the Rc the object shares
+    let floats = a.f32s(1)?;                           // borrowed, for the call
+    Ok(Val::Bool(floats.len() * 4 <= buffer.size))
+})?;
+let r = scm.eval("(import (srfi 4)) (define b (make-buffer 64)) (list b (buffer-write! b (make-f32vector 16 0.0)))")?;
+assert_eq!(scm.write(&r)?, "(#<buffer> #t)");
+```
+
+The same host value is always the same Scheme object, so `eq?` survives the
+round trip. When Scheme lets go of one, the collector drops the value -- at
+the next full collection for one that has lived a while, which
+`collect_garbage` asks for.
 
 ### Bounding a script
 

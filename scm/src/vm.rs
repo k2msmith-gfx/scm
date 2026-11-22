@@ -2120,6 +2120,7 @@ impl Vm {
                 | Obj::Array { .. }
                 | Obj::Parameter { .. }
                 | Obj::Rng(_)
+                | Obj::Host(_)
                 | Obj::Continuation { .. }
                 | Obj::Macro(_)
                 | Obj::ErrorObj { .. }

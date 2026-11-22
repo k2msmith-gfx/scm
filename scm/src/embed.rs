@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::heap::{Handle, Obj};
+use crate::heap::{Handle, HostObject, Obj};
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
 
@@ -212,6 +212,16 @@ pub enum Val {
     Pair(Box<Val>, Box<Val>),
     Vector(Vec<Val>),
     Bytes(Vec<u8>),
+    /// An `f32vector` (SRFI 4), its numbers copied out (lux's plan, M1). A
+    /// host that only reads one should use [`Interp::define_fn_args`] and
+    /// borrow it instead, which copies nothing.
+    F32s(Vec<f32>),
+    /// An `f64vector`, likewise.
+    F64s(Vec<f64>),
+    /// A value the host made and Scheme holds: a GPU buffer, a texture
+    /// (M3). Handing back the same one gives Scheme the same object, so
+    /// `eq?` holds across the round trip.
+    Host(HostObject),
     /// A procedure, rooted while any clone of this exists. Call it with
     /// [`Host::call`] from inside a host function, or [`Interp::call`]
     /// from outside; store it and call it later, since it stays rooted.
@@ -292,6 +302,145 @@ impl Host<'_> {
     }
 }
 
+/// A host function's arguments, read in place: what
+/// [`Interp::define_fn_args`] hands its function. Every accessor takes the
+/// argument's index and refuses a wrong type with a message naming it, which
+/// the function can return as its error with `?`.
+pub struct Args<'a> {
+    engine: &'a mut crate::heap::Engine,
+    args: &'a [Value],
+    who: &'a str,
+}
+
+impl Args<'_> {
+    pub fn len(&self) -> usize {
+        self.args.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.args.is_empty()
+    }
+
+    fn arg(&self, i: usize) -> Result<Value, String> {
+        self.args.get(i).copied().ok_or_else(|| format!("expects at least {} arguments, got {}", i + 1, self.args.len()))
+    }
+
+    fn refuse(&self, i: usize, what: &str) -> String {
+        let got = self.args.get(i).map(|&v| crate::writer::write_str(self.engine, v)).unwrap_or_default();
+        format!("argument {} must be {what}, got {got}", i + 1)
+    }
+
+    /// Argument I converted, as [`Interp::define_fn`] would have had it.
+    pub fn val(&self, i: usize) -> Result<Val, String> {
+        Ok(read_val(self.engine, self.arg(i)?, 0))
+    }
+
+    /// An exact integer.
+    pub fn int(&self, i: usize) -> Result<i64, String> {
+        match self.arg(i)? {
+            Value::Fixnum(n) => Ok(n),
+            _ => Err(self.refuse(i, "an exact integer")),
+        }
+    }
+
+    /// Any real, as an `f64`.
+    pub fn real(&self, i: usize) -> Result<f64, String> {
+        match self.arg(i)? {
+            Value::Fixnum(n) => Ok(n as f64),
+            Value::Flonum(x) => Ok(x),
+            _ => Err(self.refuse(i, "a real")),
+        }
+    }
+
+    /// An `f32vector`'s numbers, borrowed.
+    pub fn f32s(&self, i: usize) -> Result<&[f32], String> {
+        if let Value::Obj(r) = self.arg(i)?
+            && let Obj::NumVector(crate::heap::NumVec::F32(v)) = self.engine.obj(r)
+        {
+            return Ok(v);
+        }
+        Err(self.refuse(i, "an f32vector"))
+    }
+
+    /// An `f64vector`'s numbers, borrowed.
+    pub fn f64s(&self, i: usize) -> Result<&[f64], String> {
+        if let Value::Obj(r) = self.arg(i)?
+            && let Obj::NumVector(crate::heap::NumVec::F64(v)) = self.engine.obj(r)
+        {
+            return Ok(v);
+        }
+        Err(self.refuse(i, "an f64vector"))
+    }
+
+    /// A bytevector's octets, borrowed.
+    pub fn bytes(&self, i: usize) -> Result<&[u8], String> {
+        if let Value::Obj(r) = self.arg(i)?
+            && let Obj::Bytevector(b) = self.engine.obj(r)
+        {
+            return Ok(b);
+        }
+        Err(self.refuse(i, "a bytevector"))
+    }
+
+    /// An `f32vector`'s numbers, to write into. Floats hold no references,
+    /// so writing them needs no barrier beyond `obj_mut` itself.
+    pub fn f32s_mut(&mut self, i: usize) -> Result<&mut [f32], String> {
+        let v = self.arg(i)?;
+        let what = self.refuse(i, "an f32vector");
+        if let Value::Obj(r) = v
+            && let Obj::NumVector(crate::heap::NumVec::F32(v)) = self.engine.obj_mut(r)
+        {
+            return Ok(v);
+        }
+        Err(what)
+    }
+
+    /// An `f64vector`'s numbers, to write into.
+    pub fn f64s_mut(&mut self, i: usize) -> Result<&mut [f64], String> {
+        let v = self.arg(i)?;
+        let what = self.refuse(i, "an f64vector");
+        if let Value::Obj(r) = v
+            && let Obj::NumVector(crate::heap::NumVec::F64(v)) = self.engine.obj_mut(r)
+        {
+            return Ok(v);
+        }
+        Err(what)
+    }
+
+    /// A bytevector's octets, to write into.
+    pub fn bytes_mut(&mut self, i: usize) -> Result<&mut [u8], String> {
+        let v = self.arg(i)?;
+        let what = self.refuse(i, "a bytevector");
+        if let Value::Obj(r) = v
+            && let Obj::Bytevector(b) = self.engine.obj_mut(r)
+        {
+            return Ok(b);
+        }
+        Err(what)
+    }
+
+    /// A host object (M3).
+    pub fn host(&self, i: usize) -> Result<HostObject, String> {
+        if let Value::Obj(r) = self.arg(i)?
+            && let Obj::Host(h) = self.engine.obj(r)
+        {
+            return Ok(h.clone());
+        }
+        Err(self.refuse(i, "a host object"))
+    }
+
+    /// A host object holding a `T`, as the `Rc<T>` it shares. KIND names
+    /// what was expected in the refusal: `args.host_as::<Buffer>(0, "buffer")`.
+    pub fn host_as<T: 'static>(&self, i: usize, kind: &str) -> Result<Rc<T>, String> {
+        self.host(i)?.rc::<T>().ok_or_else(|| self.refuse(i, &format!("a {kind}")))
+    }
+
+    /// The name of the host function, for a message of its own.
+    pub fn who(&self) -> &str {
+        self.who
+    }
+}
+
 /// An embedded Scheme interpreter.
 pub struct Interp {
     vm: Vm,
@@ -353,6 +502,16 @@ impl Interp {
     /// Refuse to grow the heap past `n` objects.
     pub fn set_heap_cap(&mut self, n: Option<usize>) {
         self.vm.engine.set_heap_cap(n);
+    }
+
+    /// Collect now, fully. A host object that has lived through collections
+    /// is old, and only a full collection frees it, so a host holding large
+    /// resources behind host objects -- GPU buffers -- can ask for one
+    /// rather than wait for the old generation to double.
+    pub fn collect_garbage(&mut self) -> Result<(), Error> {
+        self.enter()?;
+        self.vm.collect_now();
+        Ok(())
     }
 
     /// Whether an earlier call panicked. A poisoned interpreter refuses
@@ -472,6 +631,44 @@ impl Interp {
         self.enter()?;
         let vm = &mut self.vm;
         match guard(|| vm.define_host_fn(name, f)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.poisoned = Some(format!("{e}"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Register a host function that reads its arguments IN PLACE (lux's
+    /// plan, M2): an [`Args`] instead of converted [`Val`]s, so an
+    /// `f32vector` of a hundred thousand floats is a `&[f32]`, borrowed for
+    /// the call, not a copy -- and `f32s_mut` writes into one, which is
+    /// how a GPU readback reaches Scheme.
+    ///
+    /// The safety property of [`define_fn`](Interp::define_fn) holds: the
+    /// borrow is of the arguments, for the length of the call, and nothing
+    /// in `Args` can outlive it or allocate while it is held. A refusal or
+    /// a panic is an ordinary Scheme error, as there.
+    pub fn define_fn_args(
+        &mut self,
+        name: &str,
+        f: impl FnMut(&mut Args) -> Result<Val, String> + 'static,
+    ) -> Result<(), Error> {
+        self.enter()?;
+        let who = name.to_string();
+        let f = std::cell::RefCell::new(f);
+        let closure: crate::vm::HostClosure = Rc::new(move |vm: &mut Vm, args: &[Value]| {
+            let Ok(mut f) = f.try_borrow_mut() else {
+                return Err(vm.err(format!("{who}: re-entered; use define_fn_with for a host function that calls back")));
+            };
+            let out = f(&mut Args { engine: &mut vm.engine, args, who: &who });
+            match out {
+                Err(msg) => Err(vm.err(format!("{who}: {msg}"))),
+                Ok(v) => build_val(&mut vm.engine, &v, 0).map_err(|e| vm.err(format!("{who}: {e}"))),
+            }
+        });
+        let vm = &mut self.vm;
+        match guard(|| vm.define_host_closure(name, closure)) {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.poisoned = Some(format!("{e}"));
@@ -921,6 +1118,9 @@ pub(crate) fn read_val(engine: &crate::heap::Engine, v: Value, depth: usize) -> 
             Value::Obj(r) => match engine.obj(r) {
                 Obj::Str(cs) => Val::Str(cs.iter().collect()),
                 Obj::Bytevector(b) => Val::Bytes(b.clone()),
+                Obj::NumVector(crate::heap::NumVec::F32(v)) => Val::F32s(v.clone()),
+                Obj::NumVector(crate::heap::NumVec::F64(v)) => Val::F64s(v.clone()),
+                Obj::Host(h) => Val::Host(h.clone()),
                 Obj::Bignum(n) => Val::BigInt(n.to_string_radix(10)),
                 Obj::Vector { items, .. } => {
                     Val::Vector(items.iter().map(|&i| read_val(engine, i, depth + 1)).collect())
@@ -992,6 +1192,9 @@ pub(crate) fn build_val(
             Val::Sym(s) => engine.sym(s),
             Val::Keyword(k) => engine.kw(k),
             Val::Bytes(b) => engine.alloc(Obj::Bytevector(b.clone())),
+            Val::F32s(v) => engine.numvector(crate::heap::NumVec::F32(v.clone())),
+            Val::F64s(v) => engine.numvector(crate::heap::NumVec::F64(v.clone())),
+            Val::Host(h) => engine.host_object(h.clone()),
             Val::BigInt(text) => match crate::bigint::BigInt::parse(text, 10) {
                 // Through `exact_integer`, so a value that fits comes back a
                 // fixnum: one integer, one representation, whichever side of

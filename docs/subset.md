@@ -184,7 +184,7 @@ simplification, which the differential fuzzer checks on every run. See
 
 ## The additions
 
-Five things this language has that R7RS-small does not. Each is here for a
+Six things this language has that R7RS-small does not. Each is here for a
 named consumer rather than for taste, each is listed so a host knows what it
 is relying on, and none of them changes the meaning of a standard program.
 
@@ -320,6 +320,18 @@ left-over argument is an error too. R7RS has no `format` at all, and a
 renderer's scripts print numbers constantly;
 the Steel port measured rebuilding it from `number->string` and manual padding
 as one of three stdlib holes that turned up everywhere.
+
+### 6. Host objects
+
+A host can hand Scheme a value of its own -- a GPU buffer, a texture -- which
+Scheme holds, passes, stores and compares but cannot look inside. It prints
+as `#<kind>` (`#<buffer>`), `(host-object? x)` asks whether X is one, and
+`(host-object-kind x)` answers its kind as a symbol. The same host value is
+always the same object, so `eq?` holds across a round trip through the host.
+When nothing in Scheme refers to one any longer, the collector frees it and
+the host's value is dropped -- at the next full collection, for one that has
+lived through others. The consumer is lux, whose renderer is Scheme over a
+GPU (its plan's M3); R7RS has no notion of a foreign value at all.
 
 ## The limits
 

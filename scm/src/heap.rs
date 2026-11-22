@@ -342,6 +342,60 @@ impl PortKind {
     }
 }
 
+
+/// A host value Scheme can hold: any `'static` Rust value behind an `Rc`,
+/// with a short kind name it prints as -- `#<buffer>`. Cloning shares the
+/// value. Two are equal when they are the same value, not when their
+/// contents are, because a host object's identity is the point of it.
+#[derive(Clone)]
+pub struct HostObject {
+    value: Rc<dyn std::any::Any>,
+    kind: Rc<str>,
+}
+
+impl HostObject {
+    /// Wrap VALUE, named KIND for printing and `host-object-kind`.
+    pub fn new<T: 'static>(kind: &str, value: T) -> HostObject {
+        HostObject { value: Rc::new(value), kind: Rc::from(kind) }
+    }
+
+    /// Wrap a value the host already shares.
+    pub fn from_rc<T: 'static>(kind: &str, value: Rc<T>) -> HostObject {
+        HostObject { value, kind: Rc::from(kind) }
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// The value, if it is a `T`.
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.value.downcast_ref::<T>()
+    }
+
+    /// The value as a shared `Rc<T>`, if it is a `T`.
+    pub fn rc<T: 'static>(&self) -> Option<Rc<T>> {
+        Rc::clone(&self.value).downcast::<T>().ok()
+    }
+
+    /// The identity [`Engine::host_object`] keys on: the value's address.
+    fn key(&self) -> *const () {
+        Rc::as_ptr(&self.value) as *const ()
+    }
+}
+
+impl PartialEq for HostObject {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.value, &other.value)
+    }
+}
+
+impl std::fmt::Debug for HostObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#<{}>", self.kind)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Obj {
     Pair(Value, Value),
@@ -422,6 +476,13 @@ pub enum Obj {
     /// a parameter, so `parameterize` can rebind it the way ray's `:ray-rng`
     /// does -- which is what makes a `:seed` replayable.
     Rng(u64),
+    /// A value the HOST made and Scheme holds -- a GPU buffer, a texture, a
+    /// scene store (lux's plan, M3). Scheme can pass it, keep it, print it
+    /// and compare it; only the host can look inside. It has nothing
+    /// collectable in it, and when the collector frees it the `Rc` drops,
+    /// so the host's resource goes when the last Scheme reference does.
+    /// One host value is one heap object: see [`Engine::host_object`].
+    Host(HostObject),
     /// A lexical frame. The chain of these is the environment; the chain of
     /// `Frame`s in the VM is the *control* stack. Keeping them separate is
     /// what lets a closure outlive the call that made it.
@@ -767,6 +828,11 @@ pub struct Engine {
     /// [`AliasEnv::Scope`] instead of a frame, so they root nothing: see
     /// that variant for why.
     aliases: HashMap<SymId, (SymId, AliasEnv)>,
+    /// M3: the heap object standing for each live host value, keyed by the
+    /// value's address, so handing Scheme the same buffer twice gives the
+    /// same object -- `eq?`, and a key an `eq?` table finds. The sweep
+    /// removes an entry with its object.
+    host_objects: HashMap<*const (), ObjRef>,
     pub interner: Interner,
     prim_names: Vec<String>,
 }
@@ -849,6 +915,7 @@ impl Engine {
             sink: None,
             stream_port: None,
             aliases: HashMap::default(),
+            host_objects: HashMap::default(),
             interner: Interner::default(),
             prim_names: Vec::new(),
         }
@@ -1167,6 +1234,7 @@ impl Engine {
                     | Obj::Bytevector(_)
                     | Obj::Bignum(_)
                     | Obj::Rng(_)
+                    | Obj::Host(_)
                     | Obj::Continuation { .. } => {}
                 },
             }
@@ -1207,6 +1275,9 @@ impl Engine {
                 let mut v = std::mem::take(slots);
                 v.clear();
                 self.env_pool.push(v);
+            }
+            if let Slot::Used(Obj::Host(h)) = &self.slots[i] {
+                self.host_objects.remove(&h.key());
             }
             self.slots[i] = Slot::Free {
                 next: self.free_head,
@@ -1406,6 +1477,21 @@ impl Engine {
 
     pub fn numvector(&mut self, v: NumVec) -> Value {
         self.alloc(Obj::NumVector(v))
+    }
+
+    /// The heap object for host value H: the one already standing for it if
+    /// it is live, a new one otherwise. So identity survives a round trip
+    /// through the host -- the same buffer handed back is `eq?` to itself.
+    pub fn host_object(&mut self, h: HostObject) -> Value {
+        if let Some(&r) = self.host_objects.get(&h.key()) {
+            return Value::Obj(r);
+        }
+        let key = h.key();
+        let v = self.alloc(Obj::Host(h));
+        if let Value::Obj(r) = v {
+            self.host_objects.insert(key, r);
+        }
+        v
     }
 
     /// An array view over `store`, row-major with no offset.
