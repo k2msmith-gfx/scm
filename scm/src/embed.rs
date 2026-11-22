@@ -432,7 +432,9 @@ impl Args<'_> {
     /// A host object holding a `T`, as the `Rc<T>` it shares. KIND names
     /// what was expected in the refusal: `args.host_as::<Buffer>(0, "buffer")`.
     pub fn host_as<T: 'static>(&self, i: usize, kind: &str) -> Result<Rc<T>, String> {
-        self.host(i)?.rc::<T>().ok_or_else(|| self.refuse(i, &format!("a {kind}")))
+        let wanted = || self.refuse(i, &format!("a {kind}"));
+        self.arg(i)?;
+        self.host(i).map_err(|_| wanted())?.rc::<T>().ok_or_else(wanted)
     }
 
     /// The name of the host function, for a message of its own.

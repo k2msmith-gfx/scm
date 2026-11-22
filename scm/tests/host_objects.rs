@@ -125,8 +125,9 @@ fn the_wrong_host_object_is_refused_by_name() {
     it.define_fn_args("make-texture", |_| Ok(Val::Host(HostObject::new("texture", "pixels")))).unwrap();
     let e = it.eval("(buffer-size (make-texture))").unwrap_err().to_string();
     assert!(e.contains("buffer-size: argument 1 must be a buffer, got #<texture>"), "{e}");
+    // Not a host object at all: still named for what was wanted.
     let e = it.eval("(buffer-size 5)").unwrap_err().to_string();
-    assert!(e.contains("argument 1 must be a host object, got 5"), "{e}");
+    assert!(e.contains("buffer-size: argument 1 must be a buffer, got 5"), "{e}");
     let e = it.eval("(host-object-kind 5)").unwrap_err().to_string();
     assert!(e.contains("not a host object"), "{e}");
 }
