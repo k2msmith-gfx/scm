@@ -19,12 +19,11 @@
 use std::cell::RefCell;
 use std::io::{self, BufRead, Read, Write};
 use std::rc::Rc;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::mpsc;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -975,150 +974,20 @@ impl Remote {
 /// therefore sets the interrupt flag *itself* -- it is an `Arc<AtomicBool>`,
 /// which is `Send` -- and never waits for the session.
 fn serve_forever(mut session: Session, addr: &str) -> ExitCode {
-    let listener = match TcpListener::bind(addr) {
-        Ok(l) => l,
+    // The server is the library's (scm::serve), shared with every host
+    // that embeds scm and serves from a loop of its own.
+    let server = match scm::Server::bind(addr, session.interrupt_handle()) {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("scm: cannot serve on {addr}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let local = listener
-        .local_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| addr.to_string());
     // Printed on one line and flushed, so a test or a client can wait for it.
-    println!("scm serving on {local}");
+    println!("scm serving on {}", server.local_addr());
     let _ = io::stdout().flush();
-
-    // The third element is where output goes *while* the request runs, and
-    // it is `Some` only for a connection that asked. The session is on one
-    // thread serving every connection, so the channel has to carry it: a
-    // sink installed per connection would stream one client's output to
-    // another.
-    let (tx, rx) = mpsc::channel::<Job>();
-    let flag = session.interrupt_handle();
-
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            let tx = tx.clone();
-            let flag = flag.clone();
-            std::thread::spawn(move || connection(stream, tx, flag));
-        }
-    });
-
-    // The session's own loop. Single-threaded on purpose (plan §3.3).
-    while let Ok(Job { req, reply, stream }) = rx.recv() {
-        match stream {
-            // S25: report output as it is produced, framed as its own
-            // datum, down the connection that asked for it. The sink is
-            // installed for this request only, so a chunk cannot be
-            // attributed to the wrong `:id`.
-            Some(mut socket) => {
-                let id = req.id;
-                session.interp_mut().set_output_sink(Some(Box::new(move |text: &str| {
-                    let chunk = Response { id, outcome: Outcome::Streamed(text.to_string()) };
-                    // A dead socket is not an error worth failing the
-                    // evaluation for: the answer will fail to send too, and
-                    // that is where it is noticed.
-                    let _ = socket.write_all(format!("{}\n", chunk.to_wire()).as_bytes());
-                    let _ = socket.flush();
-                })));
-                let answer = session.handle(req);
-                session.interp_mut().set_output_sink(None);
-                let _ = reply.send(answer);
-            }
-            None => {
-                let _ = reply.send(session.handle(req));
-            }
-        }
-    }
+    server.serve_forever(&mut session);
     ExitCode::SUCCESS
 }
 
-/// One request, plus where to send the answer, plus where to stream output
-/// if this connection asked for it.
-struct Job {
-    req: Request,
-    reply: mpsc::Sender<Response>,
-    stream: Option<TcpStream>,
-}
 
-fn connection(
-    mut stream: TcpStream,
-    tx: mpsc::Sender<Job>,
-    flag: std::sync::Arc<AtomicBool>,
-) {
-    let mut buf = String::new();
-    let mut chunk = [0u8; 4096];
-    // Per connection, not per session: two clients of one session may
-    // disagree about wanting this, and a client that never asks sees
-    // exactly the bytes it saw before S25.
-    let mut streaming = false;
-    loop {
-        // Framing IS the reader: read until what we have is a complete datum
-        // (plan §8 obligation 5, reused rather than reinvented).
-        while !matches!(scm::parse_status(&buf), scm::ParseStatus::Complete) || buf.trim().is_empty()
-        {
-            if matches!(scm::parse_status(&buf), scm::ParseStatus::Invalid(_)) {
-                break;
-            }
-            let n = match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => n,
-            };
-            buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
-        }
-        let text = std::mem::take(&mut buf);
-        let response = match Request::parse(&text) {
-            Err(why) => Response {
-                id: 0,
-                outcome: Outcome::Malformed(why),
-            },
-            Ok(req) => {
-                if let Op::Stream { on } = req.op {
-                    // Handled here rather than by the session, which keeps
-                    // no streaming state -- the connection owns the socket
-                    // the output would go down.
-                    streaming = on;
-                    Response {
-                        id: req.id,
-                        outcome: Outcome::Pong {
-                            version: env!("CARGO_PKG_VERSION").to_string(),
-                        },
-                    }
-                } else if matches!(req.op, Op::Interrupt) {
-                    // Out of band, which is the point: the session may be
-                    // busy with the very form this is stopping.
-                    flag.store(true, Ordering::Relaxed);
-                    Response {
-                        id: req.id,
-                        outcome: Outcome::Pong {
-                            version: env!("CARGO_PKG_VERSION").to_string(),
-                        },
-                    }
-                } else {
-                    let (rtx, rrx) = mpsc::channel();
-                    // Only an `eval` produces output worth streaming, and
-                    // only a connection that asked gets it.
-                    let to_stream = if streaming && matches!(req.op, Op::Eval { .. }) {
-                        stream.try_clone().ok()
-                    } else {
-                        None
-                    };
-                    if tx.send(Job { req, reply: rtx, stream: to_stream }).is_err() {
-                        return;
-                    }
-                    match rrx.recv() {
-                        Ok(r) => r,
-                        Err(_) => return,
-                    }
-                }
-            }
-        };
-        let line = format!("{}\n", response.to_wire());
-        if stream.write_all(line.as_bytes()).is_err() || stream.flush().is_err() {
-            return;
-        }
-    }
-}

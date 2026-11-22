@@ -358,6 +358,30 @@ the in-process `parse_status` rather than asking `:op parse` per keystroke.
 Same reader, same binary in practice; a round trip per character would not
 buy anything a differing version could not also break.
 
+## The server is a library (2026-11-21)
+
+`scm --serve`'s loop lived in scm-cli: the listener, a thread per
+connection reading datums, out-of-band `:interrupt` and `:stream`, and the
+session's thread answering. lux -- a renderer whose session must draw
+between requests -- needed the same server without that blocking loop, and
+§8's warning was the reason not to write a second one: an eval channel per
+consumer is how the Janet side went. So it moved into the crate as
+`scm::serve` (`scm/src/serve.rs`), and `scm --serve` is now its first user:
+
+```rust
+let server = scm::Server::bind("127.0.0.1:0", session.interrupt_handle())?;
+server.serve_forever(&mut session);              // scm --serve
+server.serve_pending(&mut session, |req, resp| …); // a frame loop, between frames
+```
+
+`serve_pending` answers what has arrived and returns at once; its callback
+sees each request and its response, which is how lux learns that a
+definition was sent and resumes what an error paused. `:interrupt` and
+`:stream` are still answered on the connection's thread, so a session busy
+with a runaway -- or a frame loop that has not served yet -- still hears an
+interrupt. `scm/tests/serve.rs` drives `serve_pending`; the CLI's tests and
+the Emacs check drive `serve_forever`.
+
 ## What is not here yet
 
 - ~~**A break REPL**~~ — done, above.

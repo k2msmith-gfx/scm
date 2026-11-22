@@ -99,6 +99,7 @@ pub mod heap;
 pub mod prim;
 pub mod reader;
 pub mod repl;
+pub mod serve;
 pub mod syntax;
 pub mod value;
 pub mod vm;
@@ -106,6 +107,7 @@ pub mod writer;
 
 pub use embed::{Args, Description, Error as EmbedError, Host, Interp, Proc, Rooted, Val};
 pub use repl::{Framing, Op, Outcome, Request, Response, Session};
+pub use serve::Server;
 pub use heap::{Engine, HostObject, Interner, Obj, OutputCallback};
 pub use reader::{ReadError, Reader, ReaderOptions, Span};
 pub use value::{KwId, ObjRef, SymId, Value};
