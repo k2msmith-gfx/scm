@@ -850,6 +850,56 @@ mod tests {
     }
 }
 
+/// lux started from the editor: `lux-start` (remote-start's "lux") runs
+/// `*lux-program* FILE --serve ADDR` on the buffer's file and connects; a
+/// file in a lux checkout offers lux first. The lux here is a stand-in
+/// script that notes its arguments and serves as `scm --serve`, so the
+/// test needs scm on PATH, not lux.
+#[cfg(test)]
+mod lux_tests {
+    fn transcript() -> Vec<String> {
+        crate::textpane::lines(crate::app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect()
+    }
+
+    #[test]
+    fn lux_start_runs_the_buffers_file_and_connects() {
+        if !std::process::Command::new("scm").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("skipped: no scm on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("edit-lux-{}", std::process::id()));
+        for d in ["src", "docs", "examples"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("src/live.rs"), "").unwrap();
+        std::fs::write(dir.join("docs/plan.md"), "").unwrap();
+        let file = dir.join("examples/hello.scm");
+        std::fs::write(&file, "(define (frame target time) #f)\n").unwrap();
+        let args = dir.join("args");
+        let lux = dir.join("lux");
+        std::fs::write(&lux, format!("#!/bin/sh\necho \"$@\" > {}\nexec scm --serve \"$3\"\n", args.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lux, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[file.to_string_lossy().into_owned()]).expect("boot");
+        assert_eq!(s.eval_to_string("(buffer-scheme)").unwrap(), "\"lux\"", "a lux checkout's file offers lux");
+        s.call(&format!("(set! *lux-program* \"{}\") (lux-start)", lux.display()));
+        let said = std::fs::read_to_string(&args).unwrap();
+        let addr = s.eval_to_string("(%remote-address *remote*)").unwrap();
+        assert_eq!(said.trim(), format!("{} --serve {}", file.display(), addr.trim_matches('"')));
+        s.call(r#"(%editor-set-text 1 "(* 6 7)") (%editor-goto-line 1 0) (eval-defun)"#);
+        assert!(s.settle(10.0));
+        assert!(transcript().iter().any(|l| l == "=> 42"), "the send went to the started program: {:?}", transcript());
+        s.call("(remote-stop)");
+        // A scratch buffer has no file for lux to run.
+        s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b))");
+        assert_eq!(s.eval_to_string("(buffer-scheme)").unwrap(), "\"scm\"");
+        assert!(s.eval_to_string("(guard (e (#t (error-object-message e))) (lux-args))").unwrap().contains("save this buffer"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
 /// E6: GNU Guile through the same backend — a Guile the editor starts, running
 /// edit/guile/serve.scm, which speaks scm's protocol.
 #[cfg(test)]

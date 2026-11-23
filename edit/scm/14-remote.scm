@@ -11,6 +11,7 @@
 (define *remote-kind* "scm")      ; which Scheme it is — a *schemes* name
 (define *remote-timeout* 30)      ; seconds a send waits before interrupting
 (define *remote-program* "scm")   ; what remote-start runs for scm, with --serve
+(define *lux-program* "lux")      ; what remote-start runs for lux: lux FILE --serve ADDR
 
 ; THE SCHEMES remote-start can start (Kevin, 2026-11-13: "you should be able
 ; to choose which scheme you want to start"): each a name, the program and
@@ -43,6 +44,29 @@ a buffer sending to it is set to."
   name)
 
 (define-scheme! "scm" (lambda () *remote-program*) (lambda () '()) "scheme")
+
+; lux (k2msmith-gfx/lux): live-coded 3D in scm. It runs the buffer's FILE,
+; as saved, in a window of its own, serves this protocol between frames,
+; and pushes its pauses (remote-event). An error loading the file pauses it
+; too, rather than ending it, so the fix can be sent (Kevin, 2026-11-22:
+; "i should be able to start lux from within edit and connect to it").
+; *lux-program* is lux's tools/lux, linked onto PATH: it runs lux with the
+; libraries lux's dev shell supplies.
+(define (lux-args)
+  (let ((path (buffer-path (%editor-active-buffer (editor-pane-id)))))
+    (unless (string? path) (error "lux runs a file: save this buffer first"))
+    (list path "--serve" "{addr}")))
+
+(define-scheme! "lux" (lambda () *lux-program*) lux-args "scheme")
+
+(define (lux-file? path)
+  "Is PATH inside a lux checkout -- below a directory holding lux's
+src/live.rs and docs/plan.md?"
+  (let loop ((dir (path-parent path)) (n 0))
+    (and dir (< n 32)
+         (or (and (file-exists? (string-append dir "/src/live.rs"))
+                  (file-exists? (string-append dir "/docs/plan.md")))
+             (loop (path-parent dir) (+ n 1))))))
 
 (define (remote-result r)
   ; The wire's answer (%remote-eval / %remote-poll) as a backend RESULT.
@@ -216,14 +240,19 @@ the error pane (C-h e) as a failed send does."
 
 (define (buffer-scheme)
   ; The *schemes* name for this buffer's language: what remote-start offers
-  ; first.
-  (let ((lang (%buffer-language (editor-pane-id) (%editor-active-buffer (editor-pane-id)))))
-    (or (any (lambda (s) (and (equal? (cadddr s) lang) (car s))) *schemes*) "scm")))
+  ; first. A file in a lux checkout is lux's.
+  (let* ((buf (%editor-active-buffer (editor-pane-id)))
+         (path (buffer-path buf))
+         (lang (%buffer-language (editor-pane-id) buf)))
+    (if (and (string? path) (lux-file? path))
+      "lux"
+      (or (any (lambda (s) (and (equal? (cadddr s) lang) (car s))) *schemes*) "scm"))))
 
 (define (remote-start (which #f))
   "Start a Scheme in a process of its own and point this buffer's sends at
-it — SLIME's M-x slime. Asks WHICH — scm or guile (*schemes*), the buffer's
-own first — and the buffer takes that Scheme's language. A loop that never
+it — SLIME's M-x slime. Asks WHICH — scm, lux or guile (*schemes*), the
+buffer's own first — and the buffer takes that Scheme's language. It asks
+the server for its events, as remote-connect does: lux's pauses. A loop that never
 ends is interrupted after *remote-timeout* seconds; a crash takes the
 server, not the editor. M-x remote-stop ends it; (remote-start \"guile\")
 asks nothing."
@@ -232,6 +261,7 @@ asks nothing."
       ((name program args language)
         (when *remote* (%remote-close *remote*))
         (set! *remote* (%remote-start (program) 0 (args)))
+        (%remote-subscribe *remote*)
         (set! *remote-kind* name)
         (remote-attach)
         (echo name " running at " (%remote-address *remote*) " — this buffer sends there")
@@ -246,6 +276,13 @@ asks nothing."
                        (map car *schemes*)
                        (buffer-scheme))
       #f)))
+
+(define (lux-start)
+  "Run this buffer's file, as saved, in lux — a window of its own — and
+point the buffer's sends at it: C-c C-c redefines in the running program.
+An error in the file pauses lux rather than ending it; send the fix.
+M-x remote-stop closes it. (remote-start \"lux\")."
+  (remote-start "lux"))
 
 (define (remote-stop)
   "Drop the connection, stopping the server if remote-start began it. The

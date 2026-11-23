@@ -869,7 +869,15 @@ asked for ([repl.md](repl.md), "Events").
 - **Asking.** `remote-connect` calls `(%remote-subscribe id)`, which sends
   `(:op ping :id N :events #t)` without waiting. A key on `ping`, so
   edit's SBCL and Guile servers, and any scm before S40, answer it as a
-  ping. `remote-start` does not ask: the Schemes it starts push nothing.
+  ping. `remote-start` asks too, since it can start lux (below).
+- **lux from the editor** (Kevin, 2026-11-22). `lux` is a third
+  `*schemes*` entry: `lux-start`, or remote-start's `lux`, runs
+  `*lux-program* FILE --serve ADDR` on the buffer's file as saved, and a
+  file in a lux checkout (a directory above it holding `src/live.rs` and
+  `docs/plan.md`) offers lux first. The program is lux's `tools/lux`,
+  linked onto PATH, which runs lux with its dev shell's libraries. lux,
+  serving, pauses on an error loading the file rather than exiting, so the
+  editor that started it can send the fix.
 - **Reading.** The reader thread tries `scm::Event::parse` on a datum
   starting `(:event` before reading it as an answer, and queues it as text
   (a `Val` cannot cross threads); an event lets no queued request go, since
