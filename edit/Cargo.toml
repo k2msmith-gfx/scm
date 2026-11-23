@@ -37,8 +37,12 @@ modit = "0.1.5"
 # view-only image buffers (C-x C-f on a .png/.jpg).
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # System clipboard for the shared input editor (REPL/minibuffer/agent):
-# paste, copy-line, cut-line. Pure-Rust face over the OS pasteboards.
-arboard = "3"
+# paste, copy-line, cut-line. Pure-Rust face over the OS pasteboards. On
+# Linux under Wayland, the Wayland clipboard (wayland-data-control), not
+# XWayland's: a Wayland window's copy -- a terminal's -- never reached the
+# X11 one edit read, so s-v pasted nothing (Kevin, 2026-11-23, KWin 6.6).
+# Falls back on X11 with no Wayland. A no-op off Linux.
+arboard = { version = "3", features = ["wayland-data-control"] }
 # The language-server client (src/lsp.rs, E7): LSP is JSON-RPC.
 serde_json = "1"
 # Scheme as an editor sees it: the token scan the Scheme `Language` highlights
