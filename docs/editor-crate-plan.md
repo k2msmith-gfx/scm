@@ -878,6 +878,18 @@ asked for ([repl.md](repl.md), "Events").
   linked onto PATH, which runs lux with its dev shell's libraries. lux,
   serving, pauses on an error loading the file rather than exiting, so the
   editor that started it can send the fix.
+- **A lux file starts its lux** (Kevin, 2026-11-22: "suppose we load an
+  .scm file that has some lux code in it, couldn't we autostart lux and
+  connect to it"). lux code is a dialect, as a ray scene is: a file saying
+  `(animate '`, `(app :`, `(simulate :`, `(define-model ` or `(define (frame
+  target` -- every lux example says one -- is "Scheme (lux)" (14-remote,
+  asked before ray's), and the standalone sends it to a lux of its own
+  (`lux-file-backend`): `*lux-program* FILE --serve`, from its checkout's
+  root, started on the first send, subscribed to its events. One lux per
+  file, each a program with its window. `%remote-address` now answers #f
+  once the server has closed the connection, so a closed window, or an
+  exited ray, scm or Guile, is started again by the next send;
+  `lux-restart` closes one by hand. Test: `a_lux_files_first_send_starts_lux`.
 - **Detected again** (Kevin, 2026-11-22). A file's language was decided
   once, on opening it: `#!guile` typed into an empty .scm still sent to
   scm. `redetect-language!` (07-backend) asks the detectors again on save

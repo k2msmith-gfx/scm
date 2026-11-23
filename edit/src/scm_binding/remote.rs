@@ -544,10 +544,17 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         let addr = val_text(args, 0).ok_or("expected \"host:port\"")?;
         Ok(Val::Int(connect(&addr, None)? as i64))
     })?;
-    // `(%remote-address id)` — what the connection is to, or #f.
+    // `(%remote-address id)` — what the connection is to, or #f: #f too once
+    // the server has closed it (a lux window closed, a Scheme that exited),
+    // so a backend that asks whether its server is up starts it again.
     interp.define_fn("%remote-address", |args| {
         let id = conn_id(args);
-        Ok(CONNS.with(|c| c.borrow().get(&id).map_or(Val::Bool(false), |c| Val::Str(c.addr.clone()))))
+        Ok(CONNS.with(|c| {
+            c.borrow()
+                .get(&id)
+                .filter(|c| c.inbox.closed.lock().unwrap_or_else(|e| e.into_inner()).is_none())
+                .map_or(Val::Bool(false), |c| Val::Str(c.addr.clone()))
+        }))
     })?;
     // `(%remote-close id)` — drop it, stopping the server if we started it.
     interp.define_fn("%remote-close", |args| {
@@ -897,6 +904,84 @@ mod lux_tests {
         assert_eq!(s.eval_to_string("(buffer-scheme)").unwrap(), "\"scm\"");
         assert!(s.eval_to_string("(guard (e (#t (error-object-message e))) (lux-args))").unwrap().contains("save this buffer"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A lux program needs no lux-start: its words make it "Scheme (lux)"
+    /// and its first send starts lux on it, from its checkout's root, and
+    /// connects -- an empty file too, once lux code is typed into it. The
+    /// window closed, the next send starts another.
+    #[test]
+    fn a_lux_files_first_send_starts_lux() {
+        if !std::process::Command::new("scm").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("skipped: no scm on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("edit-lux-auto-{}", std::process::id()));
+        for d in ["src", "docs", "examples"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("src/live.rs"), "").unwrap();
+        std::fs::write(dir.join("docs/plan.md"), "").unwrap();
+        let shown = dir.join("examples/shown.scm");
+        std::fs::write(&shown, "(define (show t) t)\n(animate 'show)\n").unwrap();
+        let empty = dir.join("examples/empty.scm");
+        std::fs::write(&empty, "").unwrap();
+        // The stand-in: notes where it ran and on what, and its pid, then
+        // serves as scm.
+        let log = dir.join("log");
+        let lux = dir.join("lux");
+        std::fs::write(
+            &lux,
+            format!("#!/bin/sh\necho \"$PWD $1 $$\" >> {}\nexec scm --serve \"$3\"\n", log.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lux, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = || -> Vec<String> {
+            std::fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_string).collect()
+        };
+
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        s.call(&format!("(set! *lux-program* \"{}\")", lux.display()));
+        // The form after the program's own (animate 'show), as in a file.
+        let send = |s: &mut super::super::standalone::Session, code: &str| {
+            s.call(&format!("(%editor-set-text 1 {:?}) (%editor-goto-line 1 1) (eval-defun)", format!("(animate 'show)\n{code}")));
+            assert!(s.settle(10.0));
+        };
+
+        s.call(&format!("(open-path \"{}\")", shown.display()));
+        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"lux\"");
+        assert!(started().is_empty(), "opening starts nothing");
+        send(&mut s, "(* 6 7)");
+        assert!(transcript().iter().any(|l| l == "=> 42"), "{:?}", transcript());
+        let first = started();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].starts_with(&format!("{} {} ", dir.display(), shown.display())), "from the checkout's root, on the file: {first:?}");
+        send(&mut s, "(* 6 8)");
+        assert!(transcript().iter().any(|l| l == "=> 48"));
+        assert_eq!(started().len(), 1, "one lux for the file");
+
+        // Its window closed: the next send starts another.
+        let pid = first[0].rsplit(' ').next().unwrap();
+        std::process::Command::new("kill").arg(pid).status().unwrap();
+        let t0 = std::time::Instant::now();
+        while s.eval_to_string(&format!("(%remote-address (hash-table-ref *lux-servers* \"{}\"))", shown.display())).unwrap() != "#f" {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "the closed connection reads as down");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        send(&mut s, "(* 6 9)");
+        assert!(transcript().iter().any(|l| l == "=> 54"), "{:?}", transcript());
+        assert_eq!(started().len(), 2, "started again");
+
+        // An empty file, lux code typed in: its first send starts lux.
+        s.call(&format!("(open-path \"{}\")", empty.display()));
+        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"\"");
+        send(&mut s, "(* 7 7)");
+        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"lux\"");
+        assert!(transcript().iter().any(|l| l == "=> 49"), "{:?}", transcript());
+        assert!(started().last().unwrap().contains(&format!(" {} ", empty.display())), "{:?}", started());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

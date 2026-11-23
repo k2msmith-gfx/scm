@@ -141,12 +141,50 @@ Every ray file of the same checkout shares it, so they all start over."
 (define (ray-buffer? buf)
   (equal? (%buffer-dialect (editor-pane-id) buf) "ray"))
 
+; A LUX file (14-remote: the modeline says "Scheme (lux)") runs in lux, in a
+; window of its own (Kevin, 2026-11-22: "suppose we load an .scm file that
+; has some lux code in it, couldn't we autostart lux and connect to it"):
+; `lux FILE --serve`, started on the file's first send -- one for each file,
+; since each is a program with its window -- from its checkout's root when
+; it is in one, else its own directory. lux loads the file as saved, then
+; the send runs; an error loading it pauses lux, and the send that fixes it
+; resumes it. Closing the window ends it, and the next send starts another.
+(define *lux-servers* (make-hash-table equal?))   ; file -> connection
+
+(define (lux-dir path)
+  ; Where PATH's lux runs: its checkout's root, else its own directory.
+  (or (lux-checkout-root path) (path-parent path) "."))
+
+(define (lux-file-backend path)
+  ; PATH's lux, started on first use, or again once its window has closed;
+  ; a send FAILS if it cannot start, saying why.
+  (guard (e (#t (unavailable-backend "lux" e)))
+    (let ((conn (hash-table-ref/default *lux-servers* path #f)))
+      (unless (and conn (%remote-address conn))
+        (when conn (%remote-close conn))
+        (set! conn (%remote-start *lux-program* 0 (list path "--serve" "{addr}") (lux-dir path)))
+        (%remote-subscribe conn)
+        (hash-table-set! *lux-servers* path conn)
+        (echo "lux running " path " at " (%remote-address conn)))
+      (remote-backend conn "lux"))))
+
+(define (lux-restart)
+  "Close the lux this buffer's file runs in -- M-x lux-restart -- so the
+next send starts it again, from the file as saved."
+  (let* ((path (buffer-path (%editor-active-buffer (editor-pane-id))))
+         (conn (and (string? path) (hash-table-ref/default *lux-servers* path #f))))
+    (if (not conn)
+      (echo "no lux running for this buffer -- the next send of a lux file starts one")
+      (begin (%remote-close conn)
+             (hash-table-delete! *lux-servers* path)
+             (echo "lux closed -- the next send starts it again")))))
+
 ; Which image the WARNINGS judge a buffer against (22-warnings) — where its
 ; sends go, without starting anything to find out: a ray file's ray and a
 ; Scheme file's scm once they run. Before its scm runs a Scheme file is
 ; judged against this image, which binds all that plain scm does and more,
-; so it can miss a warning but not invent one; a ray file before its ray
-; runs is not judged, since this image has none of ray's verbs.
+; so it can miss a warning but not invent one; a ray or lux file before
+; its program runs is not judged, since this image has none of their verbs.
 (set! *buffer-image*
   (lambda (buf)
     (let ((p (buffer-path buf))
@@ -156,6 +194,7 @@ Every ray file of the same checkout shares it, so they all start over."
               => (lambda (b) (or (%alist-ref b :conn #f) 'self)))
             ((or (string-prefix? "*" p) (editor-own-file? p)) 'self)
             ((ray-buffer? buf) (running (hash-table-ref/default *ray-servers* (ray-dir p) #f)))
+            ((lux-buffer? buf) (running (hash-table-ref/default *lux-servers* p #f)))
             ((scheme-path? p) (or (running *scm-files*) 'self))
             (else #f)))))
 
@@ -164,6 +203,7 @@ Every ray file of the same checkout shares it, so they all start over."
     (let ((p (buffer-path buf)))
       (cond ((or (not p) (string-prefix? "*" p) (editor-own-file? p)) (in-process-backend))
             ((ray-buffer? buf) (ray-file-backend p))
+            ((lux-buffer? buf) (lux-file-backend p))
             ((scheme-path? p) (scm-files-backend))
             (else #f)))))
 

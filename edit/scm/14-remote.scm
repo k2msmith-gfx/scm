@@ -59,14 +59,38 @@ a buffer sending to it is set to."
 
 (define-scheme! "lux" (lambda () *lux-program*) lux-args "scheme")
 
-(define (lux-file? path)
-  "Is PATH inside a lux checkout -- below a directory holding lux's
-src/live.rs and docs/plan.md?"
+; A file of lux code is a DIALECT of Scheme, as a ray scene is (21-ray): the
+; modeline says "Scheme (lux)", and the standalone sends it to a lux of its
+; own, started on its first send (host/standalone.scm, lux-file-backend).
+; Asked before ray's, which claims every file in a ray checkout.
+(define *lux-words*
+  ; What only a lux program says: how it runs -- every example has one.
+  '("(animate '" "(app :" "(simulate :" "(define-model " "(define (frame target"))
+
+(define (lux-text? path text)
+  "Is the Scheme file at PATH, holding TEXT, a lux program? By its words
+only: lux's own library (src/scheme/) is in its checkout but is no program
+to run."
+  (any (lambda (w) (string-contains text w)) *lux-words*))
+
+(add-dialect-detector! "lux" lux-text?)
+
+(define (lux-buffer? buf)
+  (equal? (%buffer-dialect (editor-pane-id) buf) "lux"))
+
+(define (lux-checkout-root path)
+  "The lux checkout PATH is inside -- the nearest directory above it holding
+lux's src/live.rs and docs/plan.md -- or #f."
   (let loop ((dir (path-parent path)) (n 0))
     (and dir (< n 32)
-         (or (and (file-exists? (string-append dir "/src/live.rs"))
+         (if (and (file-exists? (string-append dir "/src/live.rs"))
                   (file-exists? (string-append dir "/docs/plan.md")))
-             (loop (path-parent dir) (+ n 1))))))
+           dir
+           (loop (path-parent dir) (+ n 1))))))
+
+(define (lux-file? path)
+  "Is PATH inside a lux checkout?"
+  (and (lux-checkout-root path) #t))
 
 (define (remote-result r)
   ; The wire's answer (%remote-eval / %remote-poll) as a backend RESULT.
@@ -240,11 +264,11 @@ the error pane (C-h e) as a failed send does."
 
 (define (buffer-scheme)
   ; The *schemes* name for this buffer's language: what remote-start offers
-  ; first. A file in a lux checkout is lux's.
+  ; first. A lux program, or any file in a lux checkout, is lux's.
   (let* ((buf (%editor-active-buffer (editor-pane-id)))
          (path (buffer-path buf))
          (lang (%buffer-language (editor-pane-id) buf)))
-    (if (and (string? path) (lux-file? path))
+    (if (or (lux-buffer? buf) (and (string? path) (lux-file? path)))
       "lux"
       (or (any (lambda (s) (and (equal? (cadddr s) lang) (car s))) *schemes*) "scm"))))
 
