@@ -439,16 +439,24 @@ send starts another: its file as saved, for a program."
 (define (repl-guile?)
   (string-prefix? "guile" (%alist-ref (repl-backend) :name "")))
 
+(define (repl-in? label)
+  ; Is the REPL's backend LABEL's -- running ("scm at ADDR") or not yet
+  ; (on-first-send's "scm")?
+  (let ((name (%alist-ref (repl-backend) :name "")))
+    (or (equal? name label) (string-prefix? (string-append label " at ") name))))
+
 (define (repl-prompt)
   ; The prompt says where the REPL is: Guile's own (its language and
-  ; module), the separate scm's `scm λ > `, or the editor's image's
+  ; module), the separate scm's `scm λ > `, a lux's `lux λ > `, or the
+  ; editor's image's
   ; `scheme λ > ` — the λ kept for both scm images (Kevin, 2026-11-13). A
   ; continuation lines up under the form, as the prompt's width of spaces.
   (let ((p (cond ((backend-op (repl-backend) :prompt) => (lambda (prompt) (prompt)))   ; SBCL's CL-USER> (27-lisp)
                  ((repl-guile?) "scheme@(guile-user)> ")
                  ; A Rust buffer's REPL is evcxr, in evcxr's own prompt.
                  ((backend-op (repl-backend) :whole?) "rust >> ")
-                 ((string-prefix? "scm at " (%alist-ref (repl-backend) :name "")) "scm λ > ")
+                 ((repl-in? "scm") "scm λ > ")
+                 ((repl-in? "lux") "lux λ > ")
                  (else "scheme λ > "))))
     (if (string=? *repl-pending* "") p (make-string (string-length p) #\space))))
 

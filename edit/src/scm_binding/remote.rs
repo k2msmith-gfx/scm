@@ -1011,11 +1011,13 @@ mod lux_tests {
         // menu opened a lux example's window).
         s.call("(backend-of (%editor-active-buffer 1)) (repl-backend)");
         assert!(started().is_empty(), "opening, or asking where it sends, starts nothing");
+        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"lux λ > \"", "the REPL says it is lux's, before it runs");
         send(&mut s, "(* 6 7)");
         assert!(transcript().iter().any(|l| l == "=> 42"), "{:?}", transcript());
         let first = started();
         assert_eq!(first.len(), 1);
         assert!(first[0].starts_with(&format!("{} {} ", dir.display(), shown.display())), "from the checkout's root, on the file: {first:?}");
+        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"lux λ > \"", "and once it runs");
         send(&mut s, "(* 6 8)");
         assert!(transcript().iter().any(|l| l == "=> 48"));
         assert_eq!(started().len(), 1, "one lux for the file");

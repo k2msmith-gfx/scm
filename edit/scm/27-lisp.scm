@@ -198,7 +198,9 @@ error, and a REPL line whole when its brackets close."
     (define (started)
       (guard (e (#t (unavailable-backend "sbcl" e)))
         (lisp-backend (sbcl-start))))
-    (if (sbcl-running?) (started) (on-first-send "sbcl" started))))
+    (if (sbcl-running?)
+      (started)
+      (on-first-send "sbcl" started (list (cons :prompt sbcl-prompt) (cons :whole? %lisp-complete?))))))
 
 ; Completion, the argument hint and the REPL's TAB ask the SBCL that is
 ; running, and start none to ask. With none running a Lisp buffer offers
