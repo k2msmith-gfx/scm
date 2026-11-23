@@ -971,6 +971,9 @@ mod lux_tests {
         for d in ["src", "docs", "examples"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
+        // macOS's temp dir is under /var, a link to /private/var, and lux's
+        // $PWD is the resolved path.
+        let dir = dir.canonicalize().unwrap();
         std::fs::write(dir.join("src/live.rs"), "").unwrap();
         std::fs::write(dir.join("docs/plan.md"), "").unwrap();
         let shown = dir.join("examples/shown.scm");
