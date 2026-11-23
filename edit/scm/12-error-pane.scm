@@ -7,9 +7,15 @@
 ;## wait, so the frames are printed and the send aborts. Evaluating in a
 ;## frame or continuing with a value needs a break that resumes later, or the
 ;## VM off the UI thread — scm's question. The snapshot is the backend's
-;## (`:frames`, 07-backend); this file keeps the last one and shows it.
+;## (`:frames`, 07-backend); this file keeps the last one and shows it. A
+;## remote scm server keeps its break (scm S43), so for its errors
+;## M-x eval-in-frame (14-remote) evaluates in a call; continuing still not.
 
 (define *last-error* #f)        ; (label src message frames) of the last failed send
+; The connection whose server kept the last error's calls, to evaluate in
+; (scm S43, M-x eval-in-frame), or #f -- an error in this image, or from a
+; server that keeps none. Set by 14-remote.
+(define *break-conn* #f)
 
 ; Open the pane on every failed send, as SLIME pops sldb — off, because a
 ; send that fails while a scene is being shaped is ordinary, and the pane
@@ -59,6 +65,9 @@
               ; not here — and scm's has stopped: the page is the frames as
               ; they were when it raised, either way.
               "A snapshot, taken when it raised.\n")
+        (when *break-conn*
+          (emit "\nM-x eval-in-frame evaluates an expression in one of these calls, "
+                "its locals in scope, in the program it was raised in.\n"))
         (let loop ((fs frames) (i 1))
           (match fs
             (() #f)

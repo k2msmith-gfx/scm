@@ -505,6 +505,10 @@ pub struct Vm {
     native_units: u64,
     native_hot: u32,
     break_handler: Option<BreakHandler>,
+    /// S43: the last break kept, when breaks are kept, and the count of
+    /// host entries, which tells one entry's break from the next.
+    kept_break: Option<KeptBreak>,
+    enter_epoch: u64,
     /// Loaded libraries by canonical name, their frames collector roots.
     libraries: HashMap<String, library::Library>,
     /// Libraries whose bodies are running: a cycle is reported, not looped.
@@ -754,6 +758,38 @@ pub struct FrameView {
     pub env: Option<ObjRef>,
 }
 
+/// S43: a break kept after it unwound, for a client to look at later: what
+/// was raised, and each live frame's call, where it was written, its
+/// locals printed as they were at the raise, and its environment, rooted,
+/// to evaluate in. [`Vm::keep_breaks`] keeps one; `Interp::last_break`
+/// and `Interp::eval_in_break` read it; the REPL protocol carries it
+/// (`:locals`, and `eval` with `:frame`).
+pub struct KeptBreak {
+    /// The host entry it broke in ([`Vm::enter_epoch`]): the first break
+    /// of an entry is kept -- the innermost evaluation's, where the
+    /// failing code's locals still are -- and the same error breaking
+    /// again at an outer base is not.
+    pub(crate) epoch: u64,
+    pub message: String,
+    pub frames: Vec<KeptFrame>,
+}
+
+pub struct KeptFrame {
+    pub what: String,
+    pub loc: Option<String>,
+    /// Innermost binding first, each name once, the value printed.
+    pub locals: Vec<(String, String)>,
+    pub(crate) env: Option<crate::heap::Handle>,
+}
+
+/// What a kept break holds, at most: a runaway recursion is thousands of
+/// frames, and a client is showing them to a person.
+/// The frames as the backtrace has them -- 32, then "…" -- so a client
+/// reads a call's locals beside its line.
+const KEPT_FRAMES: usize = 32;
+const KEPT_LOCALS: usize = 24;
+const KEPT_VALUE: usize = 160;
+
 /// A form, short enough to read in a backtrace.
 ///
 /// A frame whose form is a whole 400-line `define` is noise; the head and
@@ -846,6 +882,8 @@ impl Vm {
             native_units: 0,
             native_hot: native::HOT,
             break_handler: None,
+            kept_break: None,
+            enter_epoch: 0,
             break_base: 0,
             segment_handlers: Value::Null,
             libraries: HashMap::default(),
@@ -1727,6 +1765,123 @@ impl Vm {
 
     pub fn set_break_handler(&mut self, h: Option<BreakHandler>) {
         self.break_handler = h;
+    }
+
+    /// S43: keep each break for a client to look at after it unwound -- the
+    /// break handler a server installs, where a terminal's waits in the
+    /// break instead. The first break of each host entry is kept and the
+    /// error then unwinds as it would have; the previous break is let go.
+    pub fn keep_breaks(&mut self) {
+        self.set_break_handler(Some(Box::new(|vm: &mut Vm, e: &VmError| {
+            if vm.kept_break.as_ref().is_some_and(|k| k.epoch == vm.enter_epoch) {
+                return BreakAction::Abort;
+            }
+            vm.forget_break();
+            let views = vm.live_frames();
+            let more = views.len() > KEPT_FRAMES;
+            let mut frames = Vec::new();
+            for f in views.into_iter().take(KEPT_FRAMES) {
+                let mut seen = std::collections::HashSet::new();
+                let bound: Vec<(String, Value)> =
+                    vm.bindings_of(f.env).into_iter().filter(|(n, _)| seen.insert(n.clone())).take(KEPT_LOCALS).collect();
+                let locals = bound.into_iter().map(|(n, v)| (n, cut(vm.print_viewed(v)))).collect();
+                let env = f.env.map(|r| vm.engine.root(Value::Obj(r)));
+                frames.push(KeptFrame { what: f.what, loc: f.loc, locals, env });
+            }
+            if more {
+                frames.push(KeptFrame { what: "…".into(), loc: None, locals: Vec::new(), env: None });
+            }
+            vm.kept_break = Some(KeptBreak { epoch: vm.enter_epoch, message: e.to_string(), frames });
+            BreakAction::Abort
+        })));
+    }
+
+    /// The last break kept, if any (S43).
+    pub fn kept_break(&self) -> Option<&KeptBreak> {
+        self.kept_break.as_ref()
+    }
+
+    /// Whether the last break kept was in the current host entry.
+    pub fn break_is_current(&self) -> bool {
+        self.kept_break.as_ref().is_some_and(|k| k.epoch == self.enter_epoch)
+    }
+
+    /// Let the kept break go, and the environments it held.
+    pub fn forget_break(&mut self) {
+        if let Some(k) = self.kept_break.take() {
+            for h in k.frames.into_iter().filter_map(|f| f.env) {
+                self.engine.unroot(h);
+            }
+        }
+    }
+
+    /// A host entry begins (`Interp`'s every entry point): a break from
+    /// here on is a new one.
+    pub fn enter_epoch(&mut self) {
+        self.enter_epoch += 1;
+    }
+
+    /// Evaluate SRC in frame FRAME of the kept break, innermost 0.
+    pub fn eval_in_break(&mut self, frame: usize, src: &str) -> VResult<Value> {
+        let Some(k) = &self.kept_break else {
+            return Err(VmError::Error("there is no break to evaluate in".into()));
+        };
+        let Some(f) = k.frames.get(frame) else {
+            return Err(VmError::Error(format!("the break has {} frames; there is no frame {frame}", k.frames.len())));
+        };
+        let env = match f.env {
+            Some(h) => match self.engine.handle_value(h) {
+                Some(Value::Obj(r)) => Some(r),
+                _ => None,
+            },
+            None => None,
+        };
+        // An error here is the client's, not the program's: the break
+        // being looked at stays.
+        let handler = self.break_handler.take();
+        let out = self.eval_in(src, env);
+        self.break_handler = handler;
+        out
+    }
+
+    /// V written as `write` writes it, record printers and all (S42): the
+    /// prelude's `%record-views` run first, which may evaluate. A printer
+    /// that fails leaves its records as `#<type>`.
+    pub(crate) fn print_viewed(&mut self, v: Value) -> String {
+        self.with_record_views(v, |e| crate::writer::write_str(e, v))
+    }
+
+    /// F, which prints V, with V's records printed by their printers.
+    pub(crate) fn with_record_views<T>(&mut self, v: Value, f: impl FnOnce(&crate::heap::Engine) -> T) -> T {
+        let printers = self.engine.interner.symbol("%record-printers");
+        let views = self.engine.interner.symbol("%record-views");
+        if matches!(self.global(printers), None | Some(Value::Null)) {
+            return f(&self.engine);
+        }
+        let Some(proc) = self.global(views) else { return f(&self.engine) };
+        // A printer that fails is not the program's break: the handler is
+        // set aside while the printers run, so a kept break stays the
+        // program's.
+        let handler = self.break_handler.take();
+        let alist = self.call_procedure(proc, vec![v]);
+        self.break_handler = handler;
+        let Ok(alist) = alist else { return f(&self.engine) };
+        let mut cur = alist;
+        let mut texts = Vec::new();
+        while let Value::Obj(p) = cur {
+            let Obj::Pair(entry, rest) = *self.engine.obj(p) else { break };
+            if let Value::Obj(e) = entry
+                && let Obj::Pair(Value::Obj(r), Value::Obj(t)) = *self.engine.obj(e)
+                && let Obj::Str(chars) = self.engine.obj(t)
+            {
+                texts.push((r, chars.iter().collect::<String>()));
+            }
+            cur = rest;
+        }
+        self.engine.record_views.extend(texts);
+        let out = f(&self.engine);
+        self.engine.record_views.clear();
+        out
     }
 
     /// The frames of the evaluation that broke, innermost first, each with
@@ -3948,5 +4103,15 @@ impl Vm {
 impl Default for Vm {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A printed value cut to what a line can show (S43's kept locals).
+fn cut(s: String) -> String {
+    let flat: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    if flat.chars().count() <= KEPT_VALUE {
+        flat
+    } else {
+        flat.chars().take(KEPT_VALUE - 1).chain(std::iter::once('…')).collect()
     }
 }

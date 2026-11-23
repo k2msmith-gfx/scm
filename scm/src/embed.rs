@@ -131,6 +131,30 @@ impl PartialEq for Rooted {
     }
 }
 
+/// A break kept after it unwound (S43, [`Interp::keep_breaks`]).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Break {
+    /// What was raised, as an answer's `:message` says it.
+    pub message: String,
+    /// Innermost first.
+    pub frames: Vec<BreakFrame>,
+    /// Whether it was raised in the latest evaluation, rather than kept
+    /// from an earlier one.
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct BreakFrame {
+    /// The pending call, short.
+    pub what: String,
+    /// Where it was written, `src:line:col`.
+    pub loc: Option<String>,
+    /// The locals it could see, innermost binding first, each printed.
+    pub locals: Vec<(String, String)>,
+}
+
 /// What a name is, for a REPL's `describe`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Description {
@@ -578,6 +602,50 @@ impl Interp {
         self.vm.backtrace().iter().map(|f| f.to_string()).collect()
     }
 
+    /// S43: keep each break -- an error nothing in the script catches --
+    /// for the host to look at after it unwound: [`Interp::last_break`]
+    /// and [`Interp::eval_in_break`]. What a server installs
+    /// ([`crate::Session`] does); a host with a break handler of its own
+    /// installs that instead, since there is one.
+    pub fn keep_breaks(&mut self) {
+        self.vm.keep_breaks();
+    }
+
+    /// The last break kept, innermost frame first; `current` says whether
+    /// it was raised in the latest evaluation. `None` before any, or when
+    /// breaks are not kept.
+    pub fn last_break(&self) -> Option<Break> {
+        self.vm.kept_break().map(|k| Break {
+            message: k.message.clone(),
+            frames: k
+                .frames
+                .iter()
+                .map(|f| BreakFrame { what: f.what.clone(), loc: f.loc.clone(), locals: f.locals.clone() })
+                .collect(),
+            current: self.vm.break_is_current(),
+        })
+    }
+
+    /// Evaluate SRC in frame FRAME of the last break kept, innermost 0:
+    /// its locals in scope, as they are now -- the frame unwound, but its
+    /// environment was kept. A `set!` to a local changes that environment,
+    /// not a running program.
+    pub fn eval_in_break(&mut self, frame: usize, src: &str) -> Result<Rooted, Error> {
+        self.enter()?;
+        let vm = &mut self.vm;
+        let r = match guard(|| vm.eval_in_break(frame, src)) {
+            Ok(r) => r,
+            Err(e) => {
+                self.poisoned = Some(format!("{e}"));
+                return Err(e);
+            }
+        };
+        match r {
+            Ok(v) => Ok(self.root(v)),
+            Err(e) => Err(self.convert(e)),
+        }
+    }
+
     /// Evaluate with a wall-clock limit.
     ///
     /// Implemented over [`Interp::interrupt_handle`] and a watchdog thread,
@@ -781,37 +849,9 @@ impl Interp {
     }
 
     /// F, which prints the raw value V, with the records in V whose types
-    /// have printers printed as theirs say (S42): the prelude's
-    /// `%record-views` run first, since the printer cannot call Scheme. A
-    /// printer that fails leaves its records as `#<type>`.
+    /// have printers printed as theirs say (S42).
     fn printing<T>(&mut self, v: Value, f: impl FnOnce(&crate::heap::Engine) -> T) -> T {
-        let printers = self.vm.engine.interner.symbol("%record-printers");
-        let views = self.vm.engine.interner.symbol("%record-views");
-        if matches!(self.vm.global(printers), None | Some(Value::Null)) {
-            return f(&self.vm.engine);
-        }
-        let Some(proc) = self.vm.global(views) else { return f(&self.vm.engine) };
-        let vm = &mut self.vm;
-        let alist = match guard(|| vm.call_procedure(proc, vec![v])) {
-            Ok(Ok(alist)) => alist,
-            _ => return f(&self.vm.engine),
-        };
-        let mut cur = alist;
-        let mut texts = Vec::new();
-        while let Value::Obj(p) = cur {
-            let Obj::Pair(entry, rest) = *self.vm.engine.obj(p) else { break };
-            if let Value::Obj(e) = entry
-                && let Obj::Pair(Value::Obj(r), Value::Obj(t)) = *self.vm.engine.obj(e)
-                && let Obj::Str(chars) = self.vm.engine.obj(t)
-            {
-                texts.push((r, chars.iter().collect::<String>()));
-            }
-            cur = rest;
-        }
-        self.vm.engine.record_views.extend(texts);
-        let out = f(&self.vm.engine);
-        self.vm.engine.record_views.clear();
-        out
+        self.vm.with_record_views(v, f)
     }
 
     /// `(write v)` as a string: the round-trippable spelling.
@@ -929,13 +969,23 @@ impl Interp {
         src: &str,
         source: Option<&str>,
     ) -> (Result<Rooted, Error>, String) {
+        self.capturing(|i| match source {
+            Some(name) => i.eval_named(src, name),
+            None => i.eval(src),
+        })
+    }
+
+    /// [`Interp::eval_in_break`], capturing what it prints (S43).
+    pub fn eval_in_break_capturing(&mut self, frame: usize, src: &str) -> (Result<Rooted, Error>, String) {
+        self.capturing(|i| i.eval_in_break(frame, src))
+    }
+
+    /// RUN, with what it prints captured.
+    fn capturing(&mut self, run: impl FnOnce(&mut Self) -> Result<Rooted, Error>) -> (Result<Rooted, Error>, String) {
         let Some(slot) = self.output_slot() else {
             // No `current-output-port` means a prelude older than ports;
             // evaluate without capturing rather than refuse.
-            return match source {
-                Some(name) => (self.eval_named(src, name), String::new()),
-                None => (self.eval(src), String::new()),
-            };
+            return (run(self), String::new());
         };
         let port = self.vm.engine.alloc(Obj::Port {
             kind: crate::heap::PortKind::StringOut(String::new()),
@@ -961,10 +1011,7 @@ impl Interp {
         if let Value::Obj(r) = port {
             self.vm.engine.stream_to(Some(r));
         }
-        let out = match source {
-            Some(name) => self.eval_named(src, name),
-            None => self.eval(src),
-        };
+        let out = run(self);
         self.vm.engine.stream_to(None);
         self.vm.set_param_value(slot, saved);
         self.vm.engine.unroot(keep_saved);
@@ -1027,6 +1074,7 @@ impl Interp {
         for h in dropped {
             self.vm.engine.unroot(h);
         }
+        self.vm.enter_epoch();
         Ok(())
     }
 

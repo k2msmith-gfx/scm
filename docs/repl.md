@@ -345,9 +345,11 @@ on the same session afterwards.
 
 ### What a remote prompt does not get
 
-- **The break REPL.** A break handler runs *inside* the failing evaluation
-  with the frames live, and a wire carries values, not a stack. A remote
-  client gets today's unwind-and-report, exactly as the socket client does.
+- **The break REPL, live.** A break handler runs *inside* the failing
+  evaluation with the frames live, and a wire carries values, not a stack.
+  A remote client gets the break *kept* instead (S43, below): each call's
+  locals with the answer, and `eval` with `:frame` in a call's
+  environment after it unwound -- but not `,return`.
 - **A script's stdin.** The server owns its own.
 - `C-d` leaves the prompt and **leaves the server running**, which is the
   one difference from `scm` that a user has to be told, so the banner says
@@ -467,9 +469,48 @@ is shown: in the transcript, in the echo area, and in the error pane
 (`C-h e`) with its backtrace; `resumed` is a transcript line.
 `scm-mode.el` does not ask, and needs no change.
 
+## Breaks kept, for a client over the wire (S43)
+
+A server cannot stop in a break and wait: a socket client's next request
+is an evaluation too, and lux serves between frames on its one thread,
+where waiting would freeze the window. So `Session` keeps the break
+instead (`Interp::keep_breaks`, a built-in break handler): on an error
+nothing in the script catches, it records each live call -- the same
+calls, and the same "…" past 32, as the backtrace -- with its locals
+printed as they were (record printers and all, S42), and **roots each
+call's environment**; then the error unwinds as it always did. Two things
+follow on the wire.
+
+A failed `eval`'s answer carries **`:locals`**, one list a call of
+`:backtrace`, each local `("name" "printed")`, innermost binding first:
+
+```
+(:id 3 :status error :message "car: not a pair: 0" :output "" :host-stopped #f
+ :backtrace ("(car y)  at t.scm:1:20" "(inner doubled)  at t.scm:2:48")
+ :locals ((("y" "0")) (("doubled" "0") ("x" "0"))))
+```
+
+And **`eval` with `:frame K`** evaluates in call K's environment, innermost
+0, its locals in scope, as `(:op eval :id 4 :frame 1 :code "(list x
+doubled)")`. Answered as an eval is, what it printed captured. The break
+stays until the next uncaught error replaces it; an error in a frame's
+evaluation is answered and does not replace it, and a record printer
+failing while an answer is printed does not either. A host whose errors
+happen outside a send -- lux's frame -- reads the same break from
+`Interp::last_break` and sends `:locals` with its own event, as lux's
+`paused` does.
+
+What keeping cannot do is **continue**: by the time a client asks, the
+calls have unwound, so there is no `,return`. A local's value is the one at
+the raise; for a frame that held its locals in slots the environment is a
+copy, so a `set!` from the client changes the copy. And a client that
+keeps only the first break of a host entry -- the innermost evaluation's,
+where the failing code's locals are -- keeps that one: the same error
+breaking again at an outer base is not kept over it.
+
 ## What is not here yet
 
-- ~~**A break REPL**~~ — done, above.
+- ~~**A break REPL**~~ — done, above; over the wire, a break kept (S43).
 - **Resume into the handler's choice of restart** beyond return-a-value: a
   retry, or a store-and-continue, are the next rungs.
   restart. §8's stretch goal, and now a good deal closer: the frames are

@@ -214,7 +214,7 @@ fn read_loop(mut stream: TcpStream, inbox: Arc<Inbox>, addr: String) {
         done.push_back((
             Response {
                 id,
-                outcome: Outcome::Failed { message: why.clone(), output: String::new(), host_stopped: true, backtrace: Vec::new() },
+                outcome: Outcome::Failed { message: why.clone(), output: String::new(), host_stopped: true, backtrace: Vec::new(), locals: Vec::new() },
             },
             String::new(),
         ));
@@ -507,12 +507,25 @@ fn eval_outcome(outcome: Outcome) -> Result<Val, String> {
             entry("value", Val::Str(value)),
             entry("output", Val::Str(output)),
         ]),
-        Outcome::Failed { message, output, host_stopped, backtrace } => Val::List(vec![
+        Outcome::Failed { message, output, host_stopped, backtrace, locals } => Val::List(vec![
             entry("status", Val::Sym("error".into())),
             entry("message", Val::Str(message)),
             entry("output", Val::Str(output)),
             entry("backtrace", Val::List(backtrace.into_iter().map(Val::Str).collect())),
             entry("host-stopped", Val::Bool(host_stopped)),
+            // scm S43: each call's locals, ((name printed) …) a call --
+            // the shape SBCL's server already sends, which 14-remote reads.
+            entry(
+                "locals",
+                Val::List(
+                    locals
+                        .into_iter()
+                        .map(|frame| {
+                            Val::List(frame.into_iter().map(|(n, v)| Val::List(vec![Val::Str(n), Val::Str(v)])).collect())
+                        })
+                        .collect(),
+                ),
+            ),
         ]),
         Outcome::Malformed(why) => Val::List(vec![
             entry("status", Val::Sym("error".into())),
@@ -574,6 +587,20 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
             _ => 30.0,
         });
         let (answer, text) = ask_text(conn_id(args), Op::Eval { code, source }, timeout)?;
+        eval_result(answer.outcome, &text)
+    })?;
+    // `(%remote-eval-in id code frame timeout)` — scm S43: evaluate in call
+    // FRAME (innermost 0) of the last error the server kept, its locals in
+    // scope; a backend RESULT, as %remote-eval's.
+    interp.define_fn("%remote-eval-in", |args| {
+        let code = val_text(args, 1).unwrap_or_default();
+        let frame = val_num(args, 2).max(0.0) as usize;
+        let timeout = Duration::from_secs_f64(match args.get(3) {
+            Some(Val::Int(n)) => *n as f64,
+            Some(Val::Float(x)) => *x,
+            _ => 30.0,
+        });
+        let (answer, text) = ask_text(conn_id(args), Op::EvalIn { code, frame }, timeout)?;
         eval_result(answer.outcome, &text)
     })?;
     // `(%remote-eval-async id code source)` — send an evaluation and answer
@@ -654,6 +681,7 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         "%remote-address",
         "%remote-close",
         "%remote-eval",
+        "%remote-eval-in",
         "%remote-complete",
         "%remote-describe",
         "%remote-interrupt",
@@ -743,6 +771,29 @@ mod tests {
         assert!(s.settle(10.0));
         assert_eq!(s.eval_to_string("(list-ref *last-error* 2)").unwrap(), "\"vector-ref: index 9 out of range\"");
         assert!(s.eval_to_string("(list-ref *last-error* 3)").unwrap().contains("(vector-ref (vector 1 2) 9)"));
+        s.call("(remote-stop)");
+    }
+
+    /// scm S43: a remote send that fails comes back with its calls' locals,
+    /// for the error pane, and eval-in-frame evaluates in one of them, its
+    /// locals in scope, in the program it failed in.
+    #[test]
+    fn a_remote_error_keeps_its_calls_locals_to_evaluate_in() {
+        let addr = serve();
+        crate::editorpane::set_vi(false);
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        s.call(&format!("(remote-connect \"{addr}\")"));
+        s.call(r#"(%editor-set-text 1 "(define (ninth v) (let ((n (vector-length v))) (vector-ref v 9)))\n(ninth (vector 1 2))")"#);
+        s.call("(%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)");
+        assert!(s.settle(10.0));
+        let frames = s.eval_to_string("(list-ref *last-error* 3)").unwrap();
+        assert!(frames.contains(r#"("n" "2")"#) && frames.contains(r##"("v" "#(1 2)")"##), "{frames}");
+        assert!(s.eval_to_string("(error-markdown *last-error*)").unwrap().contains("M-x eval-in-frame"));
+        s.call(r#"(eval-in-frame 1 "(list n (vector-ref v 1))")"#);
+        let transcript: Vec<String> =
+            crate::textpane::lines(crate::app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
+        assert!(transcript.iter().any(|l| l == "(2 2)"), "{transcript:?}");
         s.call("(remote-stop)");
     }
 
@@ -1243,7 +1294,7 @@ mod sbcl_tests {
 
     fn failure(id: u32, code: &str) -> (String, String, bool, Vec<String>) {
         match eval(id, code) {
-            Outcome::Failed { message, output, host_stopped, backtrace } => (message, output, host_stopped, backtrace),
+            Outcome::Failed { message, output, host_stopped, backtrace, .. } => (message, output, host_stopped, backtrace),
             other => panic!("{code}: {other:?}"),
         }
     }

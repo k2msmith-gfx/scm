@@ -92,7 +92,12 @@ lux's src/live.rs and docs/plan.md -- or #f."
   "Is PATH inside a lux checkout?"
   (and (lux-checkout-root path) #t))
 
-(define (remote-result r)
+(define (remote-frames calls locals)
+  ; The wire's calls, each with its locals when the server sent them (scm's
+  ; S43 and SBCL's both send one list a call), as error-pane frames.
+  (map remote-frame calls (if (= (length locals) (length calls)) locals (map (lambda (c) '()) calls))))
+
+(define (remote-result r (conn #f))
   ; The wire's answer (%remote-eval / %remote-poll) as a backend RESULT.
   ; :value is the printed value — the live one is in the other process —
   ; and truthy, so the transcript shows it. What only some servers say is
@@ -113,10 +118,13 @@ lux's src/live.rs and docs/plan.md -- or #f."
                              (%alist-ref r :message "")
                              (if (%alist-ref r :host-stopped #f) "  (stopped)" "")))
             (cons :output (%alist-ref r :output ""))
-            (cons :frames (let ((calls (%alist-ref r :backtrace '()))
-                                (locals (%alist-ref r :locals '())))
-                            (map remote-frame calls
-                                 (if (= (length locals) (length calls)) locals (map (lambda (c) '()) calls)))))))
+            (cons :frames (begin
+                            ; A scm server's calls with their locals can be
+                            ; evaluated in (eval-in-frame); SBCL's are in
+                            ; its own break, at the REPL.
+                            (when (and conn (pair? (%alist-ref r :locals '())) (not (assq :restarts r)))
+                              (set! *break-conn* conn))
+                            (remote-frames (%alist-ref r :backtrace '()) (%alist-ref r :locals '()))))))
     said))
 
 (define (failed-result e)
@@ -152,7 +160,8 @@ and the event's own keys."
         (let ((message (%alist-ref ev :message "")))
           (*transcript-append* (string-append "paused: " message) :error)
           (echo "paused: " message)
-          (note-send-error! at "" message (map remote-frame (%alist-ref ev :backtrace '())))))
+          (when (pair? (%alist-ref ev :locals '())) (set! *break-conn* conn))
+          (note-send-error! at "" message (remote-frames (%alist-ref ev :backtrace '()) (%alist-ref ev :locals '())))))
       ((resumed)
         (*transcript-append* "resumed" :dim)
         (echo "resumed"))
@@ -169,7 +178,7 @@ run *wake-hooks*. The host calls this when a connection wakes it."
         ((conn rid r)
           (let ((k (hash-table-ref/default *remote-callbacks* (cons conn rid) #f)))
             (hash-table-delete! *remote-callbacks* (cons conn rid))
-            (when k (k (remote-result r)))))))
+            (when k (k (remote-result r conn)))))))
     (%remote-poll))
   ; After the answers: a send's ok is shown before the pause it caused.
   (for-each (lambda (row) (remote-event (car row) (cadr row))) (%remote-events))
@@ -193,7 +202,7 @@ need a value now."
         (cons :eval
               (lambda (src)
                 (guard (e (#t (failed-result e)))
-                  (remote-result (%remote-eval conn src #f *remote-timeout*)))))
+                  (remote-result (%remote-eval conn src #f *remote-timeout*) conn))))
         (cons :eval-async
               (lambda (src k)
                 (guard (e (#t (k (failed-result e))))
@@ -222,6 +231,45 @@ run somewhere it was not written for. E is what the start raised."
     (if at
       (list (substring line 0 at) (substring line (+ at 5) (string-length line)) locals)
       (list line #f locals))))
+
+(define (eval-in-frame (frame #f) (src #f))
+  "Evaluate an expression in one of the calls the last error was raised in
+-- the error pane's (C-h e), numbered as it numbers them -- with that
+call's locals in scope, as they were when it raised, in the program it was
+raised in; the answer goes to the transcript. A scm server keeps the calls
+of its last error (scm S43): lux's paused frame, or a send that failed.
+Asks which call and what; (eval-in-frame 1 \"x\") asks nothing."
+  (define (go n text)
+    (let ((r (guard (e (#t (failed-result e)))
+               (remote-result (%remote-eval-in *break-conn* text (- n 1) *remote-timeout*)))))
+      (*transcript-append* (string-append "in call " (number->string n) ": " text) :dim)
+      (if (eq? (%alist-ref r :status #f) 'ok)
+        (begin
+          (let ((out (%alist-ref r :output "")))
+            (unless (string=? out "") (*transcript-append* out)))
+          (*transcript-append* (%alist-ref r :printed ""))
+          (echo (%alist-ref r :printed "")))
+        (begin
+          (*transcript-append* (%alist-ref r :message "") :error)
+          (echo (%alist-ref r :message ""))))))
+  (define (ask-what n)
+    (if src
+      (go n src)
+      (read-minibuffer (string-append "Evaluate in call " (number->string n) ": ")
+                       (lambda (s) (go n s)))))
+  (cond
+    ((not *break-conn*) (echo "no error kept to evaluate in -- only a scm server keeps one"))
+    (frame (ask-what frame))
+    (else
+      (read-minibuffer "Evaluate in which call (C-h e numbers them): "
+                       (lambda (s)
+                         (let ((n (string->number (string-trim-both s))))
+                           (if (and n (exact-integer? n) (>= n 1))
+                             (ask-what n)
+                             (echo "a call's number, 1 the innermost"))))
+                       :plain
+                       "1"))
+      #f))
 
 (define (remote-attach)
   "Send this buffer's forms to the connected Scheme from now on — C-M-x,

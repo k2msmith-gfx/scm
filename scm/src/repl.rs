@@ -33,6 +33,11 @@ pub enum Op {
     /// (§8 obligation 1). `source` names the input in a backtrace -- a file
     /// path, or whatever a client calls the buffer the form came from.
     Eval { code: String, source: Option<String> },
+    /// Evaluate source in frame `frame` of the last break kept, innermost
+    /// 0, its locals in scope (S43). On the wire it is `eval` with a
+    /// `:frame`; a client sends it after an answer or a host's event that
+    /// carried `:locals`, which only a server keeping breaks sends.
+    EvalIn { code: String, frame: usize },
     /// Global names beginning with a prefix.
     Complete { prefix: String },
     /// What a name is: signature, docstring, kind, current value.
@@ -131,6 +136,11 @@ pub enum Outcome {
         /// Empty when nothing was pending -- a read error, or a top-level
         /// atom.
         backtrace: Vec<String>,
+        /// Each of those calls' locals, `(name, printed)`, innermost
+        /// binding first, when the server keeps breaks (S43): one list a
+        /// call of `backtrace`, or none at all. `eval` with `:frame K` then
+        /// evaluates in call K's.
+        locals: Vec<Vec<(String, String)>>,
     },
     Candidates(Vec<String>),
     /// `None` when the name is unbound.
@@ -158,9 +168,11 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Result<Self, Error> {
-        Ok(Session {
-            interp: Interp::new()?,
-        })
+        let mut interp = Interp::new()?;
+        // A client cannot wait in a break over the wire, so the server
+        // keeps each one for it to look at after (S43).
+        interp.keep_breaks();
+        Ok(Session { interp })
     }
 
     /// The flag that stops a running evaluation.
@@ -210,32 +222,47 @@ impl Session {
                 }
             }
             Op::Eval { code, source } => {
-                let (result, output) = self
-                    .interp
-                    .eval_capturing_named(&code, source.as_deref());
-                match result {
-                    Ok(v) => {
-                        let value = self
-                            .interp
-                            .pretty(&v, 80)
-                            .unwrap_or_else(|e| format!("#<unprintable: {e}>"));
-                        Outcome::Value { value, output }
-                    }
-                    Err(e) => Outcome::Failed {
-                        message: format!("{e}"),
-                        output,
-                        host_stopped: matches!(
-                            e,
-                            Error::Interrupted | Error::OutOfFuel | Error::OutOfMemory
-                        ),
-                        backtrace: self.interp.backtrace(),
-                    },
-                }
+                let (result, output) = self.interp.eval_capturing_named(&code, source.as_deref());
+                self.answer(result, output)
+            }
+            Op::EvalIn { code, frame } => {
+                let (result, output) = self.interp.eval_in_break_capturing(frame, &code);
+                self.answer(result, output)
             }
         };
         Response {
             id: req.id,
             outcome,
+        }
+    }
+
+    /// An evaluation's answer: its value printed, or the failure -- with
+    /// the break's calls and their locals when one was kept from it (S43),
+    /// else the backtrace alone.
+    fn answer(&mut self, result: Result<crate::Rooted, Error>, output: String) -> Outcome {
+        match result {
+            Ok(v) => {
+                let value = self.interp.pretty(&v, 80).unwrap_or_else(|e| format!("#<unprintable: {e}>"));
+                Outcome::Value { value, output }
+            }
+            Err(e) => {
+                let host_stopped = matches!(e, Error::Interrupted | Error::OutOfFuel | Error::OutOfMemory);
+                let (backtrace, locals) = match self.interp.last_break() {
+                    Some(b) if b.current => b
+                        .frames
+                        .into_iter()
+                        .map(|f| {
+                            let call = match f.loc {
+                                Some(loc) => format!("{}  at {loc}", f.what),
+                                None => f.what,
+                            };
+                            (call, f.locals)
+                        })
+                        .unzip(),
+                    _ => (self.interp.backtrace(), Vec::new()),
+                };
+                Outcome::Failed { message: format!("{e}"), output, host_stopped, backtrace, locals }
+            }
         }
     }
 }
@@ -261,6 +288,7 @@ impl Request {
         let mut name: Option<String> = None;
         let mut on = false;
         let mut events: Option<bool> = None;
+        let mut frame: Option<usize> = None;
         let mut i = 0;
         while i < items.len() {
             let crate::Value::Keyword(k) = items[i] else {
@@ -282,6 +310,12 @@ impl Request {
                 "prefix" => prefix = Some(text_of(&e, val).unwrap_or_default()),
                 "on" => on = matches!(val, crate::Value::Bool(true)),
                 "events" => events = Some(matches!(val, crate::Value::Bool(true))),
+                "frame" => {
+                    let crate::Value::Fixnum(n) = val else {
+                        return Err(":frame must be an integer".into());
+                    };
+                    frame = Some(n.max(0) as usize);
+                }
                 "name" => name = Some(text_of(&e, val).ok_or(":name must be a symbol or string")?),
                 // Unknown keys are ignored rather than refused, so a newer
                 // client talking to an older server still works.
@@ -290,9 +324,9 @@ impl Request {
             i += 2;
         }
         let op = match op.as_deref() {
-            Some("eval") => Op::Eval {
-                code: code.ok_or("eval needs :code")?,
-                source: name,
+            Some("eval") => match frame {
+                Some(frame) => Op::EvalIn { code: code.ok_or("eval needs :code")?, frame },
+                None => Op::Eval { code: code.ok_or("eval needs :code")?, source: name },
             },
             Some("complete") => Op::Complete {
                 prefix: prefix.unwrap_or_default(),
@@ -335,6 +369,10 @@ impl Request {
                     out.push_str(" :name ");
                     push_string(&mut out, source);
                 }
+            }
+            Op::EvalIn { code, frame } => {
+                out.push_str(&format!("(:op eval :id {} :frame {frame} :code ", self.id));
+                push_string(&mut out, code);
             }
             Op::Complete { prefix } => {
                 out.push_str(&format!("(:op complete :id {} :prefix ", self.id));
@@ -382,6 +420,7 @@ impl Response {
                 output,
                 host_stopped,
                 backtrace,
+                locals,
             } => {
                 out.push_str(" :status error :message ");
                 push_string(&mut out, message);
@@ -400,6 +439,27 @@ impl Response {
                     push_string(&mut out, f);
                 }
                 out.push(')');
+                if !locals.is_empty() {
+                    out.push_str(" :locals (");
+                    for (i, frame) in locals.iter().enumerate() {
+                        if i > 0 {
+                            out.push(' ');
+                        }
+                        out.push('(');
+                        for (j, (name, value)) in frame.iter().enumerate() {
+                            if j > 0 {
+                                out.push(' ');
+                            }
+                            out.push('(');
+                            push_string(&mut out, name);
+                            out.push(' ');
+                            push_string(&mut out, value);
+                            out.push(')');
+                        }
+                        out.push(')');
+                    }
+                    out.push(')');
+                }
             }
             Outcome::Candidates(names) => {
                 out.push_str(" :status ok :candidates (");
@@ -481,6 +541,7 @@ impl Response {
         let (mut candidates, mut backtrace): (Option<Vec<String>>, Option<Vec<String>>) =
             (None, None);
         let (mut bound, mut host_stopped) = (None, None);
+        let mut locals: Vec<Vec<(String, String)>> = Vec::new();
         let mut i = 0;
         while i < items.len() {
             let crate::Value::Keyword(k) = items[i] else {
@@ -509,6 +570,19 @@ impl Response {
                 "framing" => framing = text_of(&e, val),
                 "candidates" => candidates = Some(strings(&e, val)?),
                 "backtrace" => backtrace = Some(strings(&e, val)?),
+                "locals" => {
+                    for frame in proper_list(&e, val).ok_or(":locals is a list of lists")? {
+                        let mut out = Vec::new();
+                        for pair in proper_list(&e, frame).ok_or(":locals is a list of lists")? {
+                            let two = strings(&e, pair)?;
+                            if two.len() != 2 {
+                                return Err("a local is (name value)".into());
+                            }
+                            out.push((two[0].clone(), two[1].clone()));
+                        }
+                        locals.push(out);
+                    }
+                }
                 "bound" => bound = as_bool(val),
                 "host-stopped" => host_stopped = as_bool(val),
                 _ => {}
@@ -523,6 +597,7 @@ impl Response {
                 output: output.unwrap_or_default(),
                 host_stopped: host_stopped.unwrap_or(false),
                 backtrace: backtrace.unwrap_or_default(),
+                locals,
             },
             Some("ok") => {
                 if let Some(version) = version {

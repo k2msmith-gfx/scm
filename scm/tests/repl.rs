@@ -699,6 +699,7 @@ fn a_request_round_trips_through_the_wire() {
         Request { id: 10, op: Op::Stream { on: false } },
         Request { id: 11, op: Op::Events { on: true } },
         Request { id: 12, op: Op::Events { on: false } },
+        Request { id: 13, op: Op::EvalIn { code: "(list x \"y\")".into(), frame: 2 } },
         // The payload that would break a naive formatter: a quote, a
         // backslash, a newline and unbalanced parens inside a string.
         Request {
@@ -740,6 +741,8 @@ fn a_response_round_trips_through_the_wire() {
                 output: "printed first".into(),
                 host_stopped: false,
                 backtrace: vec!["(car 5)  at s.scm:1:1".into()],
+                // S43: the call's locals, as a server keeping breaks sends.
+                locals: vec![vec![("x".into(), "5".into()), ("label".into(), "\"a \\\"b\\\"\"".into())]],
             },
         },
         // An interrupt, which a client must not offer to retry.
@@ -750,6 +753,7 @@ fn a_response_round_trips_through_the_wire() {
                 output: String::new(),
                 host_stopped: true,
                 backtrace: vec![],
+                locals: vec![],
             },
         },
         Response { id: 5, outcome: Outcome::Candidates(vec!["vector-ref".into()]) },
@@ -1056,4 +1060,66 @@ fn an_event_and_an_answer_cannot_be_taken_for_each_other() {
     // Anything without a written form goes as a string saying what it was.
     let ev = Event::new("odd", vec![("v", Val::Unspecified)]);
     assert_eq!(Event::parse(&ev.to_wire()).unwrap().get("v"), Some(&Val::Str("#<unspecified>".into())));
+}
+
+// ---- S43: a break kept, for a client to look at after ------------------
+
+fn eval_op(s: &mut Session, op: Op) -> Outcome {
+    // Through the wire both ways, as a client sees it.
+    let req = Request::parse(&Request { id: 1, op }.to_wire()).unwrap();
+    Response::parse(&s.handle(req).to_wire()).unwrap().outcome
+}
+
+#[test]
+fn a_failed_eval_carries_its_calls_locals_and_can_be_evaluated_in() {
+    let mut s = Session::new().unwrap();
+    let ev = |code: &str| Op::Eval { code: code.into(), source: Some("t.scm".into()) };
+    eval_op(&mut s, ev("(define (inner y) (car y))"));
+    eval_op(&mut s, ev("(define (outer x) (let ((doubled (* x 2))) (+ 1 (inner doubled))))"));
+    let Outcome::Failed { message, backtrace, locals, .. } = eval_op(&mut s, ev("(outer 5)")) else {
+        panic!("expected a failure")
+    };
+    assert!(message.contains("car"), "{message}");
+    assert_eq!(locals.len(), backtrace.len(), "one list of locals a call: {backtrace:?}");
+    let has = |k: usize, name: &str, value: &str| locals[k].iter().any(|(n, v)| n == name && v == value);
+    assert!(has(0, "y", "10"), "the innermost call sees y: {locals:?}");
+    let outer = (0..locals.len()).find(|&k| has(k, "doubled", "10")).expect("a frame of outer's with its let");
+    assert!(has(outer, "x", "5"), "{locals:?}");
+
+    // Evaluate in a frame: its locals in scope.
+    let in_frame = |s: &mut Session, frame: usize, code: &str| eval_op(s, Op::EvalIn { code: code.into(), frame });
+    assert_eq!(in_frame(&mut s, outer, "(list x doubled)"), Outcome::Value { value: "(5 10)".into(), output: String::new() });
+    // What it prints is captured, as an eval's is.
+    assert_eq!(in_frame(&mut s, 0, "(begin (display y) y)"), Outcome::Value { value: "10".into(), output: "10".into() });
+
+    // The break outlives other sends, until the next error replaces it.
+    eval_op(&mut s, ev("(define z 1)"));
+    assert!(matches!(in_frame(&mut s, 0, "y"), Outcome::Value { value, .. } if value == "10"));
+    // An error in a frame is answered, and does not replace the break.
+    assert!(matches!(in_frame(&mut s, 0, "(car '())"), Outcome::Failed { .. }));
+    assert!(matches!(in_frame(&mut s, 0, "y"), Outcome::Value { value, .. } if value == "10"));
+    let Outcome::Failed { locals, .. } = eval_op(&mut s, ev("((lambda (w) (vector-ref w 9)) (vector 1))")) else {
+        panic!()
+    };
+    assert!(locals[0].iter().any(|(n, v)| n == "w" && v == "#(1)"), "{locals:?}");
+    assert!(matches!(in_frame(&mut s, 0, "y"), Outcome::Failed { .. }), "the old break is gone");
+
+    // No frame there.
+    let Outcome::Failed { message, .. } = in_frame(&mut s, 99, "1") else { panic!() };
+    assert!(message.contains("no frame 99"), "{message}");
+}
+
+#[test]
+fn an_error_the_program_catches_keeps_no_break_and_records_print_as_themselves() {
+    let mut s = Session::new().unwrap();
+    let ev = |code: &str| Op::Eval { code: code.into(), source: None };
+    let Outcome::Failed { message, .. } = eval_op(&mut s, Op::EvalIn { code: "1".into(), frame: 0 }) else { panic!() };
+    assert!(message.contains("no break"), "{message}");
+    eval_op(&mut s, ev("(guard (e (#t 'caught)) (car 1))"));
+    assert!(matches!(eval_op(&mut s, Op::EvalIn { code: "1".into(), frame: 0 }), Outcome::Failed { .. }));
+    // A local that is a record prints by its printer (S42).
+    eval_op(&mut s, ev("(define-record-type pt (make-pt x) pt? (x pt-x))"));
+    eval_op(&mut s, ev("(set-record-type-printer! pt (lambda (r p) (display \"<pt \" p) (write (pt-x r) p) (display \">\" p)))"));
+    let Outcome::Failed { locals, .. } = eval_op(&mut s, ev("((lambda (p) (car p)) (make-pt 3))")) else { panic!() };
+    assert!(locals[0].iter().any(|(n, v)| n == "p" && v == "<pt 3>"), "{locals:?}");
 }

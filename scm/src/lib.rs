@@ -105,7 +105,7 @@ pub mod value;
 pub mod vm;
 pub mod writer;
 
-pub use embed::{Args, Description, Error as EmbedError, Host, Interp, Proc, Rooted, Val};
+pub use embed::{Args, Break, BreakFrame, Description, Error as EmbedError, Host, Interp, Proc, Rooted, Val};
 pub use repl::{Event, Framing, Op, Outcome, Request, Response, Session};
 pub use serve::{EventSender, Server};
 pub use heap::{Engine, HostObject, Interner, Obj, OutputCallback};
@@ -113,7 +113,7 @@ pub use reader::{ReadError, Reader, ReaderOptions, Span};
 pub use value::{KwId, ObjRef, SymId, Value};
 pub use value::PrimId;
 pub use code::Tier;
-pub use vm::{BreakAction, BreakHandler, FrameView, PRELUDE, Vm, VmError};
+pub use vm::{BreakAction, BreakHandler, FrameView, KeptBreak, KeptFrame, PRELUDE, Vm, VmError};
 pub use writer::{display_str, write_str};
 
 /// Whether a chunk of source is a complete set of datums, needs more input,

@@ -498,6 +498,16 @@ calls.
   transcript's `error:` line is unchanged. An error the sent code catches
   itself never breaks. The transcript says `C-h e` shows the calls;
   `view-last-error` opens them as a markdown page, `*error*`.
+- **A remote program's calls, with their locals** (scm S43, 2026-11-22).
+  A scm server keeps its last uncaught error's calls, their locals and
+  their environments; a failed send's answer and lux's `paused` event carry
+  the locals (`:locals`, the shape SBCL's server already sent, so
+  `14-remote`'s `remote-frames` reads both), and the error pane shows them.
+  `M-x eval-in-frame` asks for a call, as the pane numbers them, and an
+  expression, and evaluates it there -- `%remote-eval-in`, `eval` with
+  `:frame` -- in the program it was raised in; the pane says so when it
+  can (`*break-conn*`). Not for this image's own sends, whose snapshot
+  aborts with nothing kept.
   `*error-pane-pops*` (off) opens it on every failure, as SLIME's sldb does.
   It is off because a send that fails while a scene is being shaped is
   ordinary, and the pane takes the editor's place until `q`. Tail calls
