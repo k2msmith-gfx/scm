@@ -878,6 +878,16 @@ asked for ([repl.md](repl.md), "Events").
   linked onto PATH, which runs lux with its dev shell's libraries. lux,
   serving, pauses on an error loading the file rather than exiting, so the
   editor that started it can send the fix.
+- **Detected again** (Kevin, 2026-11-22). A file's language was decided
+  once, on opening it: `#!guile` typed into an empty .scm still sent to
+  scm. `redetect-language!` (07-backend) asks the detectors again on save
+  (a `*save-hooks*` entry) and before a send (`editor-send`,
+  `eval-owning`), and a language none claims any more goes back to Scheme
+  -- but only while the buffer is not CONNECTED (it has sent, or is
+  attached to a server; Kevin: "it should only detect if it's not already
+  connected") and its language is still what detection made it, not one
+  set by hand (`guile-mode`, `scheme-mode`). Test:
+  `a_file_that_comes_to_say_it_is_guile_is_guiles`.
 - **Reading.** The reader thread tries `scm::Event::parse` on a datum
   starting `(:event` before reading it as an answer, and queues it as text
   (a `Val` cannot cross threads); an event lets no queued request go, since

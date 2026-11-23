@@ -257,7 +257,10 @@ itself on the echo line."
   C-c C-r / C-c C-b). RUN, when given, is what is evaluated in SRC's place
   (the buffer send marks each top-level form); SRC is what the transcript
   shows."
-  (cond ((backend-of (%editor-active-buffer (editor-pane-id))) (editor-send-local src label run))
+  (redetect-language! (editor-pane-id))   ; then it has sent (07-backend)
+  (cond ((backend-of (%editor-active-buffer (editor-pane-id)))
+          (hash-table-set! *buffer-sent* (%editor-active-buffer (editor-pane-id)) #t)
+          (editor-send-local src label run))
     (else (echo "sends work on .scm buffers only"))))
 
 ; ── What a form owns (docs/modeler-scene-buffers-plan.md, E1) ──────────────
@@ -280,6 +283,7 @@ itself on the echo line."
   added to. A failed run sweeps nothing and keeps both."
   ;; What OWNING means is the host's (*around-send*): the modeler gives what
   ;; the run made to the text at START, replacing what it made last time.
+  (redetect-language! (editor-pane-id))
   (if (not (backend-of (%editor-active-buffer (editor-pane-id))))
     (editor-send src label)
     (*around-send* (lambda () (editor-send src label)) start (+ start (string-length src)))))

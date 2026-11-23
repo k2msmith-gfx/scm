@@ -123,12 +123,54 @@ and a Scheme file's dialect; then *buffer-opened-hooks*."
         (buf (%editor-active-buffer eid)))
     (when-let ((hit (find (lambda (d) ((cdr d) path text)) *language-detectors*)))
       (%editor-set-language eid (car hit)))
-    (%buffer-set-dialect
-      eid buf
-      (or (and (equal? (%buffer-language eid buf) "scheme")
-               (and-let* ((hit (find (lambda (d) ((cdr d) path text)) *dialect-detectors*))) (car hit)))
-          ""))
+    (hash-table-set! *detected-language* buf (%buffer-language eid buf))
+    (detect-dialect! eid buf path text)
     (for-each (lambda (h) (guard (e (#t #f)) (h buf))) *buffer-opened-hooks*)))
+
+(define (detect-dialect! eid buf path text)
+  (%buffer-set-dialect
+    eid buf
+    (or (and (equal? (%buffer-language eid buf) "scheme")
+             (and-let* ((hit (find (lambda (d) ((cdr d) path text)) *dialect-detectors*))) (car hit)))
+        "")))
+
+; DETECTED AGAIN on save and before a send (Kevin, 2026-11-22): a file that
+; comes to say what it is -- `#!guile` typed into an empty .scm -- takes
+; that language without being opened again, and its first send goes to
+; Guile. Only while nothing has made it otherwise: not a buffer CONNECTED
+; -- one that has sent (its forms are in an image now), or one attached
+; to a server (remote-start, remote-connect, lux-start) -- nor one whose
+; language was set by hand since (M-x guile-mode, scheme-mode, ...).
+(define *detected-language* (make-hash-table equal?))   ; buf -> what detection made it
+(define *buffer-sent* (make-hash-table equal?))         ; buf -> #t once it has sent
+
+(define (buffer-connected? buf)
+  "Has BUF sent to an image, or been attached to a server?"
+  (or (hash-table-ref/default *buffer-sent* buf #f)
+      (and (hash-table-ref/default *attached-backends* buf #f) #t)))
+
+(define (redetect-language! eid)
+  "Detect the language of EID's active buffer again from its text as it is
+now, as opening its file did -- unless it is connected, or its language was
+set by hand since. A language no detector claims any more goes back to
+Scheme. Runs *buffer-opened-hooks* when the language changes."
+  (let* ((buf (%editor-active-buffer eid))
+         (path (buffer-path buf))
+         (was (%buffer-language eid buf)))
+    (when (and (string? path)
+               (not (buffer-connected? buf))
+               (equal? was (hash-table-ref/default *detected-language* buf #f)))
+      (let* ((text (%text (%editor-text eid)))
+             (hit (find (lambda (d) ((cdr d) path text)) *language-detectors*))
+             (now (cond (hit (car hit))
+                        ((assoc was *language-detectors*) "scheme")
+                        (else was))))
+        (unless (equal? now was)
+          (%editor-set-language eid now)
+          (hash-table-set! *detected-language* buf now)
+          (echo (%text (buffer-name buf)) " is " now " now")
+          (for-each (lambda (h) (guard (e (#t #f)) (h buf))) *buffer-opened-hooks*))
+        (detect-dialect! eid buf path text)))))
 
 ; Languages that are not Scheme at all (20-rust): this image's names, docs
 ; and signatures mean nothing in them, so completion offers the buffer's own

@@ -932,6 +932,53 @@ mod guile_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Always: a file comes to say it is Guile -- `#!guile` typed into an
+    /// empty .scm -- and is Guile's from its next save or send, without
+    /// being opened again (Kevin, 2026-11-22). Not once it is connected --
+    /// it has sent, or is attached to a server -- nor once its language was
+    /// set by hand.
+    #[test]
+    fn a_file_that_comes_to_say_it_is_guile_is_guiles() {
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        s.call("(set! *guile-program* \"no-such-guile-here\")");
+        let dir = std::env::temp_dir().join(format!("edit-redetect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let open = |s: &mut super::super::standalone::Session, name: &str| {
+            let file = dir.join(name);
+            std::fs::write(&file, "").unwrap();
+            s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
+        };
+        let language = |s: &mut super::super::standalone::Session| s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap();
+
+        // On save, both ways; by hand, it stays.
+        open(&mut s, "saved.scm");
+        assert_eq!(language(&mut s), "\"scheme\"");
+        s.call(r##"(%editor-set-text 1 "#!guile\n(define (sq x) (* x x))") (save-buffer)"##);
+        assert_eq!(language(&mut s), "\"guile\"", "saved saying Guile");
+        s.call(r#"(%editor-set-text 1 "(define (sq x) (* x x))") (save-buffer)"#);
+        assert_eq!(language(&mut s), "\"scheme\"", "saved saying nothing, Scheme again");
+        s.call(r#"(guile-mode) (save-buffer)"#);
+        assert_eq!(language(&mut s), "\"guile\"", "set by hand, it stays");
+
+        // Before a send, unsaved: the send goes to Guile, never to scm's
+        // image; then the buffer is connected, and stays Guile.
+        open(&mut s, "sent.scm");
+        s.call(r##"(%editor-set-text 1 "#!guile\n(define (sq x) (* x x))") (%editor-goto-line 1 1) (eval-defun)"##);
+        assert_eq!(language(&mut s), "\"guile\"", "the send found it Guile");
+        assert_eq!(s.eval_to_string("(%env-ref 'sq #f)").unwrap(), "#f", "nothing ran in scm's image");
+        assert!(transcript().iter().any(|l| l.starts_with("error: guile:")), "{:?}", transcript());
+        s.call(r#"(%editor-set-text 1 "(define (sq x) (* x x))") (save-buffer)"#);
+        assert_eq!(language(&mut s), "\"guile\"", "connected, it stays");
+
+        // Attached to a server, it stays as it is.
+        open(&mut s, "attached.scm");
+        s.call("(hash-table-set! *attached-backends* (%editor-active-buffer 1) (list (cons :name \"a server\")))");
+        s.call(r##"(%editor-set-text 1 "#!guile\n1") (save-buffer)"##);
+        assert_eq!(language(&mut s), "\"scheme\"", "attached, it stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// With Guile on the PATH: a Guile FILE is read by Guile's own reader
     /// (Kevin, 2026-11-17) — what it cannot read is marked where it
     /// stopped, with its own words; its keywords are not marked; the mark
