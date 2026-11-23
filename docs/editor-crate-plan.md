@@ -900,6 +900,17 @@ asked for ([repl.md](repl.md), "Events").
   once the server has closed the connection, so a closed window, or an
   exited ray, scm or Guile, is started again by the next send;
   `lux-restart` closes one by hand. Test: `a_lux_files_first_send_starts_lux`.
+- **A file that calls lux** (Kevin: "sending any lux function from a new
+  .scm file should startup lux if not already started"). A second lux
+  detector, the standalone's (after ray's): the file calls a name lux
+  defines that it does not define itself. lux's names are read from its
+  checkout -- found through `*lux-program*` (tools/lux, followed to its
+  real path) or `*lux-checkout*` -- once: the top-level definitions of
+  `src/scheme/*.scm` and the primitives `src/*.rs` gives (`define_fn("…"`),
+  but `%` names and those this image binds; 160 today. Such a file is no
+  program to load, so its sends go to the lux last started while one runs,
+  else to one started with nothing loaded (`lux --serve`). A buffer keeps
+  the lux it found (`*lux-of-buffer*`) until that one closes.
 - **Detected again** (Kevin, 2026-11-22). A file's language was decided
   once, on opening it: `#!guile` typed into an empty .scm still sent to
   scm. `redetect-language!` (07-backend) asks the detectors again on save

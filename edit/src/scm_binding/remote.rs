@@ -986,7 +986,7 @@ mod lux_tests {
         let lux = dir.join("lux");
         std::fs::write(
             &lux,
-            format!("#!/bin/sh\necho \"$PWD $1 $$\" >> {}\nexec scm --serve \"$3\"\n", log.display()),
+            format!("#!/bin/sh\necho \"$PWD $1 $$\" >> {}\nfor a; do addr=$a; done\nexec scm --serve \"$addr\"\n", log.display()),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -1020,7 +1020,7 @@ mod lux_tests {
         let pid = first[0].rsplit(' ').next().unwrap();
         std::process::Command::new("kill").arg(pid).status().unwrap();
         let t0 = std::time::Instant::now();
-        while s.eval_to_string(&format!("(%remote-address (hash-table-ref *lux-servers* \"{}\"))", shown.display())).unwrap() != "#f" {
+        while s.eval_to_string("(%remote-address (hash-table-ref *lux-of-buffer* (%editor-active-buffer 1)))").unwrap() != "#f" {
             assert!(t0.elapsed() < std::time::Duration::from_secs(10), "the closed connection reads as down");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -1035,6 +1035,38 @@ mod lux_tests {
         assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"lux\"");
         assert!(transcript().iter().any(|l| l == "=> 49"), "{:?}", transcript());
         assert!(started().last().unwrap().contains(&format!(" {} ", empty.display())), "{:?}", started());
+
+        // A file that only CALLS lux -- a name lux's sources define, and
+        // the file does not -- sends to the lux running; with none, it
+        // starts one with nothing loaded.
+        std::fs::create_dir_all(dir.join("src/scheme")).unwrap();
+        std::fs::write(dir.join("src/scheme/scene.scm"), "(define (sphere r) r)\n(define (%hidden) 1)\n").unwrap();
+        std::fs::write(dir.join("src/gpu.rs"), "interp.define_fn(\"gpu-encoder\", |_| {});\n").unwrap();
+        s.call(&format!("(set! *lux-checkout* \"{}\")", dir.display()));
+        assert_eq!(s.eval_to_string("(hash-table-ref/default (lux-names) \"sphere\" #f)").unwrap(), "#t");
+        assert_eq!(s.eval_to_string("(hash-table-ref/default (lux-names) \"gpu-encoder\" #f)").unwrap(), "#t");
+        assert_eq!(s.eval_to_string("(hash-table-ref/default (lux-names) \"%hidden\" #f)").unwrap(), "#f");
+        let calls = |s: &mut super::super::standalone::Session, name: &str, code: &str| {
+            s.call(&format!("(open-path \"{}\")", dir.join(name).display()));
+            s.call(&format!("(%editor-set-text 1 {code:?}) (%editor-goto-line 1 0) (eval-defun)"));
+            assert!(s.settle(10.0));
+        };
+        let before = started().len();
+        calls(&mut s, "examples/calls.scm", "(if #f (sphere 1) (* 8 8))");
+        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"lux\"");
+        assert!(transcript().iter().any(|l| l == "=> 64"), "{:?}", transcript());
+        assert_eq!(started().len(), before, "it joined the lux running");
+        calls(&mut s, "examples/own.scm", "(define (sphere r) r)\n(* 3 3)");
+        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"\"", "its own sphere is no lux call");
+        s.call("(lux-restart)");   // (own.scm has none: says so)
+        for pid in started().iter().filter_map(|l| l.rsplit(' ').next()) {
+            let _ = std::process::Command::new("kill").arg(pid).status();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        calls(&mut s, "examples/fresh.scm", "(if #f (sphere 2) (* 9 9))");
+        assert!(transcript().iter().any(|l| l == "=> 81"), "{:?}", transcript());
+        assert_eq!(started().len(), before + 1);
+        assert!(started().last().unwrap().contains(" --serve "), "nothing loaded: {:?}", started());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
