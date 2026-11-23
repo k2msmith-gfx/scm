@@ -189,7 +189,11 @@ Every ray file of the same checkout shares it, so they all start over."
       (open eid p)
       (register-buffer (%editor-active-buffer eid) p)
       (visit-buffer (%editor-active-buffer eid)))
-    (cond ((string-suffix? ".md" low) (viewer %editor-open-markdown))
+    (cond ((string-suffix? ".md" low)
+           (viewer %editor-open-markdown)
+           ; A markdown buffer opens in source view; flip once into the
+           ; reading view, as show-markdown-doc does. C-c C-v flips back.
+           (%editor-toggle-markdown eid))
           ((any (lambda (e) (string-suffix? e low)) '(".png" ".jpg" ".jpeg")) (viewer %editor-open-image))
           ((video-path? p) (viewer %editor-open-video))
           (else (visit-file-text p)))))
