@@ -513,7 +513,34 @@ send starts another: its file as saved, for a program."
   "Give the REPL's prompt the keyboard."
   (%focus-pane 2)
   (set! *focus-held* #t)
-  (edit-start 2 (repl-prompt) repl-submit :history (lambda () *repl-history*)))
+  (set! *repl-prompt-shown* (repl-prompt))
+  (edit-start 2 *repl-prompt-shown* repl-submit :history (lambda () *repl-history*)))
+
+; THE PROMPT FOLLOWS THE BUFFER (Kevin, 2026-11-23: "when the buffer
+; language changes, the repl should refresh with the new prompt and it
+; doesn't until you return in it"). The prompt was made when the REPL took
+; the keyboard; now, after every key, click and release -- whoever handled
+; it: a send that found the file Guile, M-x guile-mode, C-x b, lux-start --
+; the line is redrawn when the prompt it should show has changed, its text
+; kept while it is being typed.
+(define *repl-prompt-shown* #f)   ; what pane 2's line shows, once the REPL has opened
+
+(define (repl-prompt-refresh . _)
+  (guard (e (#t #f))
+    (cond ((%editing-pane? 2)
+            (let ((p (repl-prompt)))
+              (unless (equal? p (%edit :prompt)) (%edit! :prompt p) (edit-sync))
+              (set! *repl-prompt-shown* p)))
+          (*repl-prompt-shown*
+            (let ((p (repl-prompt)))
+              (unless (equal? p *repl-prompt-shown*)
+                (%pane-set-input 2 p "" 0)
+                (set! *repl-prompt-shown* p))))))
+  #f)
+
+(add-handler *key-handlers* -50 :repl-prompt repl-prompt-refresh)
+(add-handler *click-handlers* -50 :repl-prompt repl-prompt-refresh)
+(add-handler *release-handlers* -50 :repl-prompt repl-prompt-refresh)
 
 (define (repl-print src r)
   ; What a REPL line printed, then its value or its error.

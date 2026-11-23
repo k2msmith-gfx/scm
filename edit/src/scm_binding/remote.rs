@@ -1138,6 +1138,25 @@ mod guile_tests {
         s.call(r#"(guile-mode) (save-buffer)"#);
         assert_eq!(language(&mut s), "\"guile\"", "set by hand, it stays");
 
+        // The REPL's prompt follows, at the next key -- not only once the
+        // REPL has the keyboard again (Kevin, 2026-11-23).
+        open(&mut s, "prompt.scm");
+        s.call("(repl-focus) (focus-scene-editor)");
+        let shown = |s: &mut super::super::standalone::Session| s.eval_to_string("*repl-prompt-shown*").unwrap();
+        assert_eq!(shown(&mut s), "\"scm λ > \"");
+        s.call(r##"(%editor-set-text 1 "#!guile\n1")"##);
+        s.key("C-x");
+        s.key("C-s");
+        assert_eq!(language(&mut s), "\"guile\"");
+        assert_eq!(shown(&mut s), "\"scheme@(guile-user)> \"", "saved as Guile, the prompt is Guile's");
+        s.call("(repl-focus)");
+        assert_eq!(s.eval_to_string("(%edit :prompt)").unwrap(), "\"scheme@(guile-user)> \"");
+        s.call(r#"(%edit! :text "(+ 1") (scheme-mode)"#);
+        s.key("right");
+        assert_eq!(s.eval_to_string("(%edit :prompt)").unwrap(), "\"scm λ > \"", "while it is typed in too");
+        assert_eq!(s.eval_to_string("(%edit :text)").unwrap(), "\"(+ 1\"", "its text kept");
+        s.call("(focus-scene-editor)");
+
         // Before a send, unsaved: the send goes to Guile, never to scm's
         // image; then the buffer is connected, and stays Guile.
         open(&mut s, "sent.scm");
