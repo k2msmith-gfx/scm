@@ -1,53 +1,35 @@
 ;## 15-guile.scm — GNU Guile, the editor's second language
 ;## (docs/editor-crate-plan.md, E6). A Guile buffer highlights and indents
-;## as Scheme (edit's language/guile.rs), and its sends go to a Guile the
-;## editor starts — not to this image, which is scm's. That Guile runs
-;## edit/guile/serve.scm, which speaks scm's REPL protocol, so the socket
-;## backend (14-remote) is its backend unchanged: C-M-x answers `=> value`,
-;## an error its message, and completion and describe read the live Guile.
+;## as Scheme (edit's language/guile.rs). M-x guile-start runs a Guile as
+;## THE backend (14-remote) — every Scheme file sends to it until M-x
+;## remote-stop — running edit/guile/serve.scm, which speaks scm's REPL
+;## protocol, so the socket backend is its backend unchanged: C-M-x answers
+;## `=> value`, an error its message, and completion and describe read the
+;## live Guile. Nothing starts it by itself: a Guile file sends where a
+;## Scheme file does (Kevin, 2026-11-23).
 
 (define *guile-program* "guile")   ; what guile-start runs
-(define *guile* #f)                ; the connection to it, once started
 
 (define (guile-args)
   ; serve.scm, uncompiled (no cache to go stale), on the address.
   (list "--no-auto-compile" "-s" (%edit-path "guile/serve.scm") "{addr}"))
 
-; remote-start can start one too (14-remote's *schemes*).
+; remote-start can start one (14-remote's *schemes*).
 (define-scheme! "guile" (lambda () *guile-program*) guile-args "guile")
 
+(define (guile-conn)
+  "The connection to the Guile running as the backend, else #f."
+  (and (equal? *remote-kind* "guile") (remote-running)))
+
 (define (guile-start)
-  "Start a Guile for the Guile buffers' sends, or answer the one running —
-M-x guile-start. The first send from a Guile buffer starts it; this is for
-starting it before then."
-  (unless (and *guile* (%remote-address *guile*))
-    (set! *guile* (%remote-start *guile-program* 0 (guile-args)))
-    (echo "guile running at " (%remote-address *guile*)))
-  *guile*)
+  "Start a Guile as the backend every Scheme file sends to, or answer the
+one running — M-x guile-start, (remote-start \"guile\"). The one running
+stops first; M-x remote-stop stops it."
+  (or (guile-conn) (remote-start "guile")))
 
 (define (guile-stop)
-  "Stop the Guile the editor started."
-  (when *guile*
-    (%remote-close *guile*)
-    (set! *guile* #f)
-    (echo "guile stopped")))
-
-; A Guile buffer's backend: the Guile, started on its first send. When
-; Guile cannot start, the send FAILS, saying why — it must not fall through
-; to this image, where Guile code would run as scm's.
-(hash-table-set! *language-backends* "guile"
-  (lambda ()
-    (define (started)
-      (guard (e (#t (unavailable-backend "guile" e)))
-        (remote-backend (guile-start) "guile")))
-    (if (and *guile* (%remote-address *guile*)) (started) (on-first-send "guile" started))))
-
-; Completion, the argument hint and the REPL's TAB ask the Guile that is
-; running, and start none to ask (07-backend's running-image-backend): a
-; Guile buffer's names are Guile's, not this image's (found 2026-11-17 —
-; they had been scm's, or the separate scm's for a Guile FILE).
-(hash-table-set! *language-running* "guile"
-  (lambda () (and *guile* (%remote-address *guile*) (remote-backend *guile* "guile"))))
+  "Stop the Guile running as the backend."
+  (when (guile-conn) (remote-stop)))
 
 ; ── Guile's reader reads Guile's buffers ───────────────────────────────────
 ; (Kevin, 2026-11-17.) scm's reader marks a Scheme buffer as you type; it
@@ -85,13 +67,13 @@ starting it before then."
 (define (guile-read-poll)
   ; Put the next changed Guile buffer to Guile, when Guile can take it.
   (when (and *guile-read-check* (not %guile-reading)
-             *guile* (%remote-address *guile*) (zero? (%remote-running *guile*)))
+             (guile-conn) (zero? (%remote-running (guile-conn))))
     (and-let* ((next (%read-pending "guile")))
       (let ((path (car next)) (version (cadr next)) (text (caddr next)))
         (guard (e (#t (set! %guile-reading #f)))
           (set! %guile-reading #t)
           (hash-table-set! *remote-callbacks*
-            (cons *guile* (%remote-eval-async *guile* (string-append %guile-read-form (*show-value* text) ")") #f))
+            (cons (guile-conn) (%remote-eval-async (guile-conn) (string-append %guile-read-form (*show-value* text) ")") #f))
             (lambda (r)
               (set! %guile-reading #f)
               (let ((said (and (eq? (%alist-ref r :status #f) 'ok)

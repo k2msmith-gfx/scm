@@ -123,7 +123,6 @@ and a Scheme file's dialect; then *buffer-opened-hooks*."
         (buf (%editor-active-buffer eid)))
     (when-let ((hit (find (lambda (d) ((cdr d) path text)) *language-detectors*)))
       (%editor-set-language eid (car hit)))
-    (hash-table-set! *detected-language* buf (%buffer-language eid buf))
     (detect-dialect! eid buf path text)
     (for-each (lambda (h) (guard (e (#t #f)) (h buf))) *buffer-opened-hooks*)))
 
@@ -133,44 +132,6 @@ and a Scheme file's dialect; then *buffer-opened-hooks*."
     (or (and (equal? (%buffer-language eid buf) "scheme")
              (and-let* ((hit (find (lambda (d) ((cdr d) path text)) *dialect-detectors*))) (car hit)))
         "")))
-
-; DETECTED AGAIN on save and before a send (Kevin, 2026-11-22): a file that
-; comes to say what it is -- `#!guile` typed into an empty .scm -- takes
-; that language without being opened again, and its first send goes to
-; Guile. Only while nothing has made it otherwise: not a buffer CONNECTED
-; -- one that has sent (its forms are in an image now), or one attached
-; to a server (remote-start, remote-connect, lux-start) -- nor one whose
-; language was set by hand since (M-x guile-mode, scheme-mode, ...).
-(define *detected-language* (make-hash-table equal?))   ; buf -> what detection made it
-(define *buffer-sent* (make-hash-table equal?))         ; buf -> #t once it has sent
-
-(define (buffer-connected? buf)
-  "Has BUF sent to an image, or been attached to a server?"
-  (or (hash-table-ref/default *buffer-sent* buf #f)
-      (and (hash-table-ref/default *attached-backends* buf #f) #t)))
-
-(define (redetect-language! eid)
-  "Detect the language of EID's active buffer again from its text as it is
-now, as opening its file did -- unless it is connected, or its language was
-set by hand since. A language no detector claims any more goes back to
-Scheme. Runs *buffer-opened-hooks* when the language changes."
-  (let* ((buf (%editor-active-buffer eid))
-         (path (buffer-path buf))
-         (was (%buffer-language eid buf)))
-    (when (and (string? path)
-               (not (buffer-connected? buf))
-               (equal? was (hash-table-ref/default *detected-language* buf #f)))
-      (let* ((text (%text (%editor-text eid)))
-             (hit (find (lambda (d) ((cdr d) path text)) *language-detectors*))
-             (now (cond (hit (car hit))
-                        ((assoc was *language-detectors*) "scheme")
-                        (else was))))
-        (unless (equal? now was)
-          (%editor-set-language eid now)
-          (hash-table-set! *detected-language* buf now)
-          (echo (%text (buffer-name buf)) " is " now " now")
-          (for-each (lambda (h) (guard (e (#t #f)) (h buf))) *buffer-opened-hooks*))
-        (detect-dialect! eid buf path text)))))
 
 ; Languages that are not Scheme at all (20-rust): this image's names, docs
 ; and signatures mean nothing in them, so completion offers the buffer's own
@@ -203,9 +164,9 @@ the host's choice."
 ; image), a remote connection, or #f for none — found without starting
 ; anything. The warnings judge against it (22-warnings), and completion
 ; and eldoc answer from it (09-complete). The standalone says
-; (host/standalone.scm): a ray file's ray, once it runs; a Scheme file's
-; scm, once it runs, else this image, which has everything plain scm has.
-; In the modeler every Scheme file runs here.
+; (host/standalone.scm): the Scheme running in a process of its own, while
+; one runs, else this image, which has everything plain scm has. In the
+; modeler every Scheme file runs here.
 (define *buffer-image* (lambda (buf) (and (buffer-path buf) 'self)))
 
 ; A language whose buffers send to a process of the language's own (Guile,
@@ -215,8 +176,8 @@ the host's choice."
 
 (define (running-image-backend buf)
   "The backend of the other process BUF's Scheme runs in, when that is
-running — a Scheme file's scm, a ray file's ray, a Guile buffer's Guile —
-else #f, and this image answers. Completion and eldoc ask it, so a name
+running — the Scheme started in a process of its own, a Lisp buffer's
+SBCL — else #f, and this image answers. Completion and eldoc ask it, so a name
 sent there completes and shows its signature; nothing is started to ask."
   (let ((running (hash-table-ref/default *language-running*
                                          (%buffer-language (*pane-id* :editor) buf) #f)))

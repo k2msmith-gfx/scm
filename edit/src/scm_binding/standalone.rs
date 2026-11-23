@@ -877,11 +877,13 @@ mod tests {
         assert!(md.contains("\\n## Mouse\\n\\n- `S-drag` — add to the selection\\n"), "{md}");
     }
 
-    /// Where a send goes by default: a Scheme FILE to a separate scm, the
-    /// scratch and the editor's own files to the editor's image — and with
-    /// scm on the PATH, the file's sends really run over there.
+    /// Where a send goes: a Scheme FILE to the editor's image, as the
+    /// scratch and the editor's own files do -- until M-x scm-start runs a
+    /// scm of its own (Kevin, 2026-11-23); with scm on the PATH, the file's
+    /// sends then really run over there, and completion and describe read
+    /// that scm.
     #[test]
-    fn files_default_to_a_separate_scm() {
+    fn files_send_to_the_editor_until_a_scheme_is_started() {
         app::resize(800, 600, 1.0);
         let mut s = Session::boot(None, &[]).expect("boot");
         let name = |s: &mut Session| {
@@ -898,15 +900,13 @@ mod tests {
         std::fs::write(&file, "(define (cube x) (* x x x))\n(cube 3)\n").unwrap();
         let file = file.to_string_lossy().replace('\\', "/");
         s.call(&format!("(open-path \"{file}\")"));
+        assert_eq!(name(&mut s), "\"this image\"", "a Scheme file is the editor's until a Scheme is started");
         let scm_on_path =
             std::process::Command::new("scm").arg("--version").output().is_ok_and(|o| o.status.success());
         if !scm_on_path {
-            // Without scm, a file's send fails and says so -- it does not run here.
-            s.call("(set! *remote-program* \"no-such-scm-here\") (%editor-goto-line 1 0) (eval-defun)");
-            assert_eq!(s.eval_to_string("(%env-ref 'cube #f)").unwrap(), "#f");
             eprintln!("scm is not on the PATH: the separate-process half skipped");
         } else {
-            s.call("(%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)");
+            s.call("(scm-start) (%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)");
             assert!(s.settle(10.0), "scm answers");
             let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
             assert!(t.iter().any(|l| l == "=> 27"), "{t:?}");
@@ -952,62 +952,13 @@ mod tests {
             s.call("(editor-eldoc)");
             let echoed = crate::textpane::lines(app::MINIBUFFER).into_iter().any(|(_, l)| l.contains("(cube x)"));
             assert!(echoed, "its signature is echoed: {:?}", crate::textpane::lines(app::MINIBUFFER));
+            s.call("(remote-stop)");
+            assert_eq!(name(&mut s), "\"this image\"", "stopped, the editor's again");
         }
         super::super::remote::close_all();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A ray file (the modeline's "Scheme (ray)") sends to a `ray --serve`
-    /// of its checkout's: ray's verbs are there, and an include resolves
-    /// beside the file, and M-x ray-restart starts it over. Needs a ray
-    /// binary:
-    /// `RAY_BIN=~/devel/ray/target/release/ray cargo test -p edit --lib a_ray_file_sends_to_ray -- --ignored`
-    #[test]
-    #[ignore]
-    fn a_ray_file_sends_to_ray() {
-        let ray = std::env::var("RAY_BIN").expect("RAY_BIN names a ray binary");
-        app::resize(800, 600, 1.0);
-        let mut s = Session::boot(None, &[]).expect("boot");
-        let dir = std::env::temp_dir().join(format!("edit-ray-files-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("scripts/scm")).unwrap();
-        std::fs::create_dir_all(dir.join("examples/parts")).unwrap();
-        std::fs::write(dir.join("scripts/scm/prelude.scm"), "").unwrap();
-        std::fs::write(dir.join("examples/parts/cube.scm"), "(define (cube x) (* x x x))\n").unwrap();
-        let file = dir.join("examples/scene.scm");
-        std::fs::write(&file, "(include \"parts/cube.scm\")\n(cube 2)\n(procedure? add-sphere)\n").unwrap();
-        let file = file.to_string_lossy().replace('\\', "/");
-        s.call(&format!("(set! *ray-program* \"{ray}\") (open-path \"{file}\")"));
-        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"ray\"");
-        for line in 0..3 {
-            s.call(&format!("(%editor-goto-line 1 {line}) (eval-defun)"));
-            assert!(s.settle(30.0), "ray answers line {line}");
-        }
-        let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
-        assert!(t.iter().any(|l| l == "=> 8"), "the include resolved beside the file: {t:?}");
-        assert!(t.iter().any(|l| l == "=> #t"), "ray's verbs are there: {t:?}");
-        let name = s.eval_to_string("(%alist-ref (backend-of (%editor-active-buffer 1)) :name #f)").unwrap();
-        assert!(name.starts_with("\"ray at "), "{name}");
-        // Judged against RAY's image now that it runs (E8): its verbs are
-        // bound, a typo of one is not, and what was sent counts.
-        s.call("(%editor-set-text 1 \"(add-shpere \\\"s\\\")\\n(add-sphere \\\"s\\\")\\n(cube 2 3)\\n\")");
-        let mut fb = crate::framebuffer::Framebuffer::new(800, 600);
-        app::draw(&mut fb);
-        let w = s.eval_to_string("(map caddr (%editor-diagnostics 1))").unwrap();
-        assert!(w.contains("add-shpere is not defined"), "{w}");
-        assert!(!w.contains("add-sphere is"), "ray's verb is bound: {w}");
-        assert!(w.contains("cube takes 1 argument, given 2"), "what was sent counts: {w}");
-        s.call("(%editor-set-text 1 \"(include \\\"parts/cube.scm\\\")\\n(cube 2)\\n\")");
-        // M-x ray-restart: the next send meets a fresh ray, without cube.
-        s.call("(ray-restart) (%editor-goto-line 1 1) (eval-defun)");
-        assert!(s.settle(30.0), "a fresh ray answers");
-        let t: Vec<String> = crate::textpane::lines(app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect();
-        assert!(
-            t.iter().rev().take(3).any(|l| l == "error: unbound variable: cube"),
-            "cube went with the old ray: {t:?}"
-        );
-        super::super::remote::close_all();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// The file tree: rooted at the git checkout, folders first, what git
     /// ignores hidden; expand, collapse, collapse all; RET opens a file;

@@ -48,16 +48,20 @@
   (lambda (text (style #f))
     (%pane-append 2 (%text (or style :normal)) (%describe-part text))))
 
-; WHERE A SEND GOES (Kevin, 2026-11-13: a loaded .scm file should run in an
-; scm process of its own). A Scheme FILE is the program being written, so it
-; runs in a separate scm — started on the first send, one for every such
-; file — where a runaway loop is interrupted, a crash takes only that
-; process, and its names never collide with the editor's. What configures
-; the EDITOR stays in the editor's own image, as Emacs's *scratch* does:
-; the scratch buffer, ~/.config/edit/init.scm, and the shell's own files.
-; M-x run-in-editor-image points one file there too; anything not Scheme
-; sends nowhere. (A Guile file's language sends it to Guile first, 15-guile.)
-(define *scm-files* #f)           ; the separate scm for Scheme files, once started
+; WHERE A SEND GOES (Kevin, 2026-11-23: "If you load .scm file, then just
+; the native editor scm repl starts. If you load a .lisp file, then sbcl
+; starts (if installed). then use remote-start to start guile, lux or scm
+; as a separate process ... if you can have multiple backends started, I
+; say no"). A Scheme file -- or a Guile one -- sends to the editor's own
+; image, unless THE backend runs: the one Scheme started in a process of
+; its own (14-remote's remote-start, scm-start, lux-start, guile-start, or
+; remote-connect), which every Scheme file then sends to until
+; remote-stop -- the scratch buffer too, so the REPL there talks to it. What
+; configures the EDITOR stays in the editor's image whatever runs:
+; ~/.config/edit/init.scm and the shell's own files. Nothing starts by itself but a Lisp file's SBCL
+; (27-lisp), which is the one backend too. (This replaces a separate scm
+; for every Scheme file, a ray for a ray file and a lux for a lux one, each
+; started on its first send.)
 
 (define (scheme-path? p)
   (any (lambda (ext) (string-suffix? ext p)) '(".scm" ".ss" ".sld" ".sls")))
@@ -69,246 +73,47 @@ the shell's own (edit/scm/)?"
     (or (equal? rp (real-file (expand-home "~/.config/edit/init.scm")))
         (string-prefix? (string-append (real-file (%edit-path "scm")) "/") rp))))
 
-(define (scm-files-backend)
-  ; The separate scm, started on the first send (14-remote's on-first-send);
-  ; a send FAILS if it cannot start.
-  (define (started)
-    (guard (e (#t (unavailable-backend "scm" e)))
-      (unless (and *scm-files* (%remote-address *scm-files*))
-        (set! *scm-files* (%remote-start *remote-program* 0 '()))
-        (echo "scm running at " (%remote-address *scm-files*) " for the Scheme files"))
-      (remote-backend *scm-files* "scm")))
-  (if (and *scm-files* (%remote-address *scm-files*)) (started) (on-first-send "scm" started)))
-
-; A RAY file (21-ray: the modeline says "Scheme (ray)") runs in ray, whose
-; image has the verbs it calls — `ray --serve`, the protocol scm's speaks
-; (Kevin, 2026-11-15). One ray for each checkout, run from its root so a
-; scene's (load "examples/…") finds what it does from a terminal there, and
-; that checkout's own build (target/release/ray) before the PATH's; a file
-; outside any checkout gets one run from its own directory. Each send names
-; its file first, (%including "/abs/file.scm"), so (include "frame.scm")
-; resolves beside the file as `ray FILE` would. M-x remote-connect attaches
-; a buffer to a `ray --tcp` already running instead — ray-view's.
-(define *ray-program* #f)       ; #f: the checkout's build, else "ray"
-(define *ray-servers* (make-hash-table equal?))   ; directory → connection
-
-(define (ray-program dir)
-  (or *ray-program*
-      (let ((built (string-append dir "/target/release/ray")))
-        (if (file-exists? built) built "ray"))))
-
-(define (ray-file-backend path)
-  ; The ray for PATH's checkout (or directory), started on the first send; a
-  ; send FAILS if it cannot start, saying why.
-  (define dir (ray-dir path))
-  (define (running) (let ((c (hash-table-ref/default *ray-servers* dir #f))) (and c (%remote-address c) c)))
-  (define (started)
-    (guard (e (#t (unavailable-backend "ray" e)))
-      (let ((conn (running)))
-        (unless conn
-          (set! conn (%remote-start (ray-program dir) 0 '("--serve" "{addr}") dir))
-          (hash-table-set! *ray-servers* dir conn)
-          (echo "ray running at " (%remote-address conn) " for " dir))
-        (ray-sends-from path (remote-backend conn "ray")))))
-  (if (running) (started) (on-first-send "ray" started)))
-
-(define (ray-sends-from path backend)
-  ; BACKEND with each send prefixed by (%including PATH), on the send's own
-  ; first line so a reported line number stays the buffer's.
-  (define (from src) (string-append "(%including " (*show-value* path) ") " src))
-  (map (lambda (op)
-         (match op
-           ((:eval . f) (cons :eval (lambda (src) (f (from src)))))
-           ((:eval-async . f) (cons :eval-async (lambda (src k) (f (from src) k))))
-           (_ op)))
-       backend))
-
-(define (ray-dir path)
-  ; Where PATH's ray runs: its checkout's root, else its own directory.
-  (or (ray-checkout-root path) (path-parent path) "."))
-
-(define (ray-restart)
-  "Stop the ray this buffer's sends go to — M-x ray-restart — so the next
-send starts a fresh one: no definitions, no scene, nothing left from before.
-Every ray file of the same checkout shares it, so they all start over."
-  (let* ((buf (%editor-active-buffer (editor-pane-id)))
-         (path (buffer-path buf)))
-    (if (not (and path (ray-buffer? buf)))
-      (echo "not a ray file — the modeline says Scheme (ray) of one")
-      (let* ((dir (ray-dir path))
-             (conn (hash-table-ref/default *ray-servers* dir #f)))
-        (if (not conn)
-          (echo "no ray running for " dir " — the next send starts one")
-          (begin
-            (%remote-close conn)
-            (hash-table-delete! *ray-servers* dir)
-            (echo "ray for " dir " stopped — the next send starts a fresh one")))))))
-
 (define (ray-buffer? buf)
   (equal? (%buffer-dialect (editor-pane-id) buf) "ray"))
 
-;; ── lux ───────────────────────────────────────────────────────────────────
-; A LUX file (the modeline says "Scheme (lux)") runs in lux, in a window of
-; its own (Kevin, 2026-11-22: "suppose we load an .scm file that has some
-; lux code in it, couldn't we autostart lux and connect to it"), started on
-; its first send. Two kinds:
-;   a PROGRAM -- it says how it runs, (animate ' and the rest (14-remote's
-;     *lux-words*) -- gets a lux of its own, `lux FILE --serve`, the file
-;     loaded as saved; an error loading it pauses lux, and the send that
-;     fixes it resumes it;
-;   a file that CALLS lux -- (sphere 1), (paint ...), any name lux defines
-;     that the file does not (Kevin: "sending any lux function from a new
-;     .scm file should startup lux if not already started") -- sends to the
-;     lux last started, when one runs, else starts one with nothing loaded,
-;     `lux --serve`, the background until something is sent to draw.
-; Each runs from the checkout's root when the file is in one. A buffer keeps
-; its lux; close the window, or M-x lux-restart, and its next send starts
-; another.
-(define *lux-of-buffer* (make-hash-table equal?))   ; buf -> connection
-(define *lux-last* #f)                              ; the lux last started
+(define (scheme-buffer? buf p)
+  ; Does BUF, visiting P, hold Scheme -- or Guile -- that sends?
+  (or (and p (scheme-path? p))
+      (member (%buffer-language (editor-pane-id) buf) '("scheme" "guile"))))
 
-(define (lux-running conn) (and conn (%remote-address conn) conn))
+(define (editor-buffer? buf p)
+  ; Is BUF one of the files that configure the editor -- init.scm, the
+  ; shell's own, a *generated* one -- which send to its image whatever runs?
+  (and p (or (string-prefix? "*" p) (editor-own-file? p))))
 
-(define (lux-dir path)
-  ; Where PATH's lux runs: its checkout's root, else its own directory.
-  (or (lux-checkout-root path) (path-parent path) "."))
-
-(define (buffer-text buf)
-  ; BUF's text when it is the one on screen (a send's), else "".
-  (let ((eid (editor-pane-id)))
-    (if (equal? buf (%editor-active-buffer eid)) (%text (%editor-text eid)) "")))
-
-(define (lux-file-backend buf path)
-  ; BUF's lux, started on its first send, or again once its window has
-  ; closed; a send FAILS if it cannot start, saying why.
-  (if (lux-running (hash-table-ref/default *lux-of-buffer* buf #f))
-    (lux-started buf path)
-    (on-first-send "lux" (lambda () (lux-started buf path)))))
-
-(define (lux-started buf path)
-  (guard (e (#t (unavailable-backend "lux" e)))
-    (let ((conn (or (lux-running (hash-table-ref/default *lux-of-buffer* buf #f))
-                    (and (not (lux-text? path (buffer-text buf))) (lux-running *lux-last*))
-                    (let* ((program? (lux-text? path (buffer-text buf)))
-                           (args (if program? (list path "--serve" "{addr}") '("--serve" "{addr}")))
-                           (conn (%remote-start *lux-program* 0 args (lux-dir path))))
-                      (%remote-subscribe conn)
-                      (set! *lux-last* conn)
-                      (echo "lux running " (if program? path "with nothing loaded") " at " (%remote-address conn))
-                      conn))))
-      (let ((old (hash-table-ref/default *lux-of-buffer* buf #f)))
-        (when (and old (not (eqv? old conn)) (not (lux-running old))) (%remote-close old)))
-      (hash-table-set! *lux-of-buffer* buf conn)
-      (remote-backend conn "lux"))))
-
-(define (lux-restart)
-  "Close the lux this buffer sends to -- M-x lux-restart -- so its next
-send starts another: its file as saved, for a program."
-  (let* ((buf (%editor-active-buffer (editor-pane-id)))
-         (conn (hash-table-ref/default *lux-of-buffer* buf #f)))
-    (if (not conn)
-      (echo "this buffer has no lux -- the next send of a lux file starts one")
-      (begin (%remote-close conn)
-             (hash-table-delete! *lux-of-buffer* buf)
-             (echo "lux closed -- the next send starts another")))))
-
-; WHAT LUX DEFINES, read from its checkout -- the one *lux-program* (its
-; tools/lux, on the PATH) is in, or *lux-checkout*: every name its Scheme
-; (src/scheme/*.scm) defines at top level and every primitive its Rust
-; (src/*.rs) gives, but those starting with % and those this image binds
-; too (scm's own, which say nothing of lux). Read once for each checkout.
-(define *lux-checkout* #f)
-(define *lux-names* '())   ; ((root . names) ...): names a hash table
-
-(define (lux-root)
-  (or *lux-checkout*
-      (and-let* ((program (%pipe-which *lux-program*))
-                 (real (%os-realpath program))
-                 (tools (path-parent real))
-                 (root (path-parent tools))
-                 ((file-exists? (string-append root "/src/live.rs"))))
-        root)))
-
-(define (names-after text opener)
-  ; Each name that follows OPENER in TEXT, up to a space, a bracket or a quote.
-  (let ((n (string-length text)) (k (string-length opener)))
-    (let loop ((from 0) (names '()))
-      (let ((at (string-contains text opener from)))
-        (if (not at)
-          names
-          (let scan ((i (+ at k)))
-            (if (or (= i n) (memv (string-ref text i) '(#\space #\( #\) #\newline #\tab #\")))
-              (loop i (if (> i (+ at k)) (cons (substring text (+ at k) i) names) names))
-              (scan (+ i 1)))))))))
-
-(define (lux-names)
-  (define root (lux-root))
-  (or (and-let* ((read (assoc root *lux-names*))) (cdr read))
-      (let ((names (make-hash-table equal?)))
-        (define (add! name)
-          (unless (or (string-prefix? "%" name) (%env-ref (string->symbol name) #f))
-            (hash-table-set! names name #t)))
-        (define (files dir ext)
-          (map (lambda (f) (string-append dir "/" f))
-               (filter (lambda (f) (string-suffix? ext f)) (or (%os-dir dir) '()))))
-        (when root
-          (for-each (lambda (f)
-                      (let ((text (string-append "\n" (slurp f))))
-                        (for-each add! (names-after text "\n(define ("))
-                        (for-each add! (names-after text "\n(define "))
-                        (for-each add! (names-after text "\n(define-syntax "))))
-                    (files (string-append root "/src/scheme") ".scm"))
-          (for-each (lambda (f)
-                      (let ((text (slurp f)))
-                        (for-each add! (names-after text "define_fn(\""))
-                        (for-each add! (names-after text "define_fn_args(\""))))
-                    (files (string-append root "/src") ".rs")))
-        (set! *lux-names* (cons (cons root names) *lux-names*))
-        names)))
-
-(define (lux-calls? path text)
-  "Does TEXT call a name lux defines that TEXT does not define itself?"
-  (let ((names (lux-names)))
-    (and (positive? (hash-table-size names))
-         (let ((own (append (names-after text "(define (") (names-after text "(define "))))
-           (any (lambda (name) (and (hash-table-ref/default names name #f) (not (member name own))))
-                (names-after text "("))))))
-
-; After ray's, which claims every file in a ray checkout.
-(add-dialect-detector! "lux" lux-calls?)
-
-; Which image the WARNINGS judge a buffer against (22-warnings) — where its
-; sends go, without starting anything to find out: a ray file's ray and a
-; Scheme file's scm once they run. Before its scm runs a Scheme file is
-; judged against this image, which binds all that plain scm does and more,
-; so it can miss a warning but not invent one; a ray or lux file before
-; its program runs is not judged, since this image has none of their verbs.
+; Which image a buffer's Scheme is judged against (22-warnings), and
+; completion and eldoc answer from: the backend while it runs, else this
+; image, which binds all that plain scm does and more -- so it can miss a
+; warning but not invent one. A ray scene is not judged here, where none
+; of ray's verbs are.
 (set! *buffer-image*
   (lambda (buf)
-    (let ((p (buffer-path buf))
-          (running (lambda (c) (and c (%remote-address c) c))))
-      (cond ((not p) #f)
-            ((hash-table-ref/default *attached-backends* buf #f)
+    (let ((p (buffer-path buf)))
+      (cond ((hash-table-ref/default *attached-backends* buf #f)
               => (lambda (b) (or (%alist-ref b :conn #f) 'self)))
-            ((or (string-prefix? "*" p) (editor-own-file? p)) 'self)
-            ((ray-buffer? buf) (running (hash-table-ref/default *ray-servers* (ray-dir p) #f)))
-            ((lux-buffer? buf) (lux-running (hash-table-ref/default *lux-of-buffer* buf #f)))
-            ((scheme-path? p) (or (running *scm-files*) 'self))
-            (else #f)))))
+            ((editor-buffer? buf p) 'self)
+            ((not (scheme-buffer? buf p)) #f)
+            ((remote-running) => (lambda (conn) conn))
+            ((or (not p) (ray-buffer? buf)) #f)
+            (else 'self)))))
 
 (set! *buffer-backend*
   (lambda (buf)
     (let ((p (buffer-path buf)))
-      (cond ((or (not p) (string-prefix? "*" p) (editor-own-file? p)) (in-process-backend))
-            ((ray-buffer? buf) (ray-file-backend p))
-            ((lux-buffer? buf) (lux-file-backend buf p))
-            ((scheme-path? p) (scm-files-backend))
-            (else #f)))))
+      (cond ((editor-buffer? buf p) (in-process-backend))
+            ((not (scheme-buffer? buf p)) #f)
+            ((remote-running) (remote-backend *remote* *remote-kind*))
+            (else (in-process-backend))))))
 
 (define (run-in-editor-image)
   "Send this buffer's forms to the EDITOR's own image — where the editor's
-  commands and keymaps live — rather than to the separate scm a Scheme file
-  goes to. For code that extends the editor. remote-detach undoes it."
+  commands and keymaps live — even while a Scheme runs in a process of its
+  own. For code that extends the editor."
   (let ((buf (%editor-active-buffer (editor-pane-id))))
     (hash-table-set! *attached-backends* buf (in-process-backend))
     (echo (%text (buffer-name buf)) " sends to the editor's image")))
@@ -440,8 +245,8 @@ send starts another: its file as saved, for a program."
   (string-prefix? "guile" (%alist-ref (repl-backend) :name "")))
 
 (define (repl-in? label)
-  ; Is the REPL's backend LABEL's -- running ("scm at ADDR") or not yet
-  ; (on-first-send's "scm")?
+  ; Is the REPL's backend LABEL's -- running ("scm at ADDR"), or not yet
+  ; (on-first-send's "sbcl")?
   (let ((name (%alist-ref (repl-backend) :name "")))
     (or (equal? name label) (string-prefix? (string-append label " at ") name))))
 
@@ -520,7 +325,7 @@ send starts another: its file as saved, for a program."
 ; language changes, the repl should refresh with the new prompt and it
 ; doesn't until you return in it"). The prompt was made when the REPL took
 ; the keyboard; now, after every key, click and release -- whoever handled
-; it: a send that found the file Guile, M-x guile-mode, C-x b, lux-start --
+; it: M-x guile-mode, C-x b, lux-start, remote-stop --
 ; the line is redrawn when the prompt it should show has changed, its text
 ; kept while it is being typed.
 (define *repl-prompt-shown* #f)   ; what pane 2's line shows, once the REPL has opened
@@ -869,8 +674,8 @@ send starts another: its file as saved, for a program."
 
 (define (edit-greeting)
   "What the transcript says when the editor opens."
-  (*transcript-append* "edit — C-x C-f opens a file, C-x C-s saves. A Scheme file runs in an scm of its own;" :dim)
-  (*transcript-append* "*scratch* and your init.scm run in the editor's image." :dim)
+  (*transcript-append* "edit — C-x C-f opens a file, C-x C-s saves. Scheme runs in the editor's image, or in" :dim)
+  (*transcript-append* "the one Scheme M-x remote-start (scm-start, lux-start, guile-start) runs; a .lisp file in SBCL." :dim)
   (*transcript-append* "C-M-x / C-x C-e / C-c C-b send, C-h b lists every key, C-x C-c quits." :dim)
   (*transcript-append* "This is the REPL (C-c C-z). The icons at the bottom right swap it for a terminal, or hide" :dim)
   (*transcript-append* "the panel; C-x o moves the keyboard. Right-click a pane for its menu, hold or drag for the pie." :dim)

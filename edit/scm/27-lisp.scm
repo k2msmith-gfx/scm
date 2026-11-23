@@ -43,8 +43,11 @@
 (define (sbcl-start)
   "Start an SBCL for the Lisp buffers' sends, or answer the one running —
 M-x sbcl-start. The first send from a Lisp buffer starts it; this is for
-starting it before then."
+starting it before then. It is the one backend: a Scheme running in a
+process of its own (14-remote's remote-start) stops."
   (unless (sbcl-running?)
+    ; One backend (14-remote): the Scheme running in a process of its own stops.
+    (when (remote-running) (remote-stop))
     (set! *sbcl* (%remote-start *sbcl-program* 0 (sbcl-args)))
     (set! *sbcl-repl-package* "CL-USER")
     (set! *sbcl-level* 0)

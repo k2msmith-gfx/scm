@@ -7,6 +7,12 @@
 ;## loop or a crash stays in that process. The client is edit's
 ;## scm_binding/remote.rs.
 
+; THE BACKEND (Kevin, 2026-11-23: "if you can have multiple backends
+; started, I say no"): ONE Scheme in a process of its own at a time,
+; started by remote-start -- or scm-start, lux-start, guile-start --
+; or attached by remote-connect. While it runs every Scheme file sends to
+; it (the host's *buffer-backend*); starting another, or a Lisp file's
+; SBCL (27-lisp), stops it.
 (define *remote* #f)              ; the current connection's id, or #f
 (define *remote-kind* "scm")      ; which Scheme it is — a *schemes* name
 (define *remote-timeout* 30)      ; seconds a send waits before interrupting
@@ -46,51 +52,20 @@ a buffer sending to it is set to."
 (define-scheme! "scm" (lambda () *remote-program*) (lambda () '()) "scheme")
 
 ; lux (k2msmith-gfx/lux): live-coded 3D in scm. It runs the buffer's FILE,
-; as saved, in a window of its own, serves this protocol between frames,
-; and pushes its pauses (remote-event). An error loading the file pauses it
-; too, rather than ending it, so the fix can be sent (Kevin, 2026-11-22:
-; "i should be able to start lux from within edit and connect to it").
-; *lux-program* is lux's tools/lux, linked onto PATH: it runs lux with the
-; libraries lux's dev shell supplies.
+; as saved, in a window of its own -- a buffer with no file, nothing, the
+; background until something is sent to draw -- serves this protocol
+; between frames, and pushes its pauses (remote-event). An error loading
+; the file pauses it too, rather than ending it, so the fix can be sent
+; (Kevin, 2026-11-22: "i should be able to start lux from within edit and
+; connect to it"). *lux-program* is lux's tools/lux, linked onto PATH: it
+; runs lux with the libraries lux's dev shell supplies.
 (define (lux-args)
   (let ((path (buffer-path (%editor-active-buffer (editor-pane-id)))))
-    (unless (string? path) (error "lux runs a file: save this buffer first"))
-    (list path "--serve" "{addr}")))
+    (if (and (string? path) (file-exists? path))
+      (list path "--serve" "{addr}")
+      '("--serve" "{addr}"))))
 
 (define-scheme! "lux" (lambda () *lux-program*) lux-args "scheme")
-
-; A file of lux code is a DIALECT of Scheme, as a ray scene is (21-ray): the
-; modeline says "Scheme (lux)", and the standalone sends it to a lux of its
-; own, started on its first send (host/standalone.scm, lux-file-backend).
-; Asked before ray's, which claims every file in a ray checkout.
-(define *lux-words*
-  ; What only a lux program says: how it runs -- every example has one.
-  '("(animate '" "(app :" "(simulate :" "(define-model " "(define (frame target"))
-
-(define (lux-text? path text)
-  "Is the Scheme file at PATH, holding TEXT, a lux program? By its words
-only: lux's own library (src/scheme/) is in its checkout but is no program
-to run."
-  (any (lambda (w) (string-contains text w)) *lux-words*))
-
-(add-dialect-detector! "lux" lux-text?)
-
-(define (lux-buffer? buf)
-  (equal? (%buffer-dialect (editor-pane-id) buf) "lux"))
-
-(define (lux-checkout-root path)
-  "The lux checkout PATH is inside -- the nearest directory above it holding
-lux's src/live.rs and docs/plan.md -- or #f."
-  (let loop ((dir (path-parent path)) (n 0))
-    (and dir (< n 32)
-         (if (and (file-exists? (string-append dir "/src/live.rs"))
-                  (file-exists? (string-append dir "/docs/plan.md")))
-           dir
-           (loop (path-parent dir) (+ n 1))))))
-
-(define (lux-file? path)
-  "Is PATH inside a lux checkout?"
-  (and (lux-checkout-root path) #t))
 
 (define (remote-frames calls locals)
   ; The wire's calls, each with its locals when the server sent them (scm's
@@ -168,12 +143,10 @@ and the event's own keys."
       (else #f))))
 
 (define (remote-poll)
-  "Run what waited for this wake (a program's start), then *wake-hooks*;
-deliver every answer an async send is owed, calling each send's callback
-with its RESULT; show each event a server pushed (remote-event); and say on
-the modeline where the buffer on screen runs. The host calls this when it
-is woken."
-  (run-deferred)
+  "Run *wake-hooks*; deliver every answer an async send is owed, calling
+each send's callback with its RESULT; show each event a server pushed
+(remote-event); and say on the modeline where the buffer on screen runs.
+The host calls this when it is woken."
   (for-each (lambda (h) (h)) *wake-hooks*)
   (for-each
     (lambda (row)
@@ -218,56 +191,29 @@ need a value now."
 
 (define (on-first-send label start (also '()))
   "A backend for a program that is not running yet: START, a thunk that
-starts it and answers its backend, runs on the first SEND, and not before.
-Until then this offers only the sends, and ALSO: what answers without the
-program (SBCL's REPL prompt). A menu, the REPL's prompt, completion and
-describe all ask a buffer for its backend, and asking must not start a
-program (Kevin, 2026-11-23: popping the editor's menu over a lux example
-opened its window and ran it).
-
-An async send says it is starting the program -- the echo, and the
-buffer's modeline, \"lux starting…\" -- and starts it at the next wake,
-once that is drawn: starting blocks until the program listens, seconds
-for lux (Kevin: \"there should also be a status message when starting or
-connecting to a language ... in the edit status bar\")."
+starts it and answers its backend, runs on the first SEND, and not before
+-- a menu, the REPL's prompt, completion and describe all ask a buffer for
+its backend, and asking must not start a program. Until then this offers
+only the sends, and ALSO: what answers without the program (SBCL's REPL
+prompt, 27-lisp: a Lisp file's SBCL is the one program that starts by
+itself)."
   (append
     (list (cons :name label)
           (cons :eval (lambda (src) ((backend-op (start) :eval) src)))
           (cons :eval-async
                 (lambda (src k)
-                  (let ((buf (%editor-active-buffer (editor-pane-id))))
-                    (hash-table-set! *starting* buf label)
-                    (status-refresh)
-                    (echo "starting " label "…")
-                    (set! *deferred*
-                          (append *deferred*
-                                  (list (lambda ()
-                                          (let ((b (guard (e (#t (unavailable-backend label e)))
-                                                     (dynamic-wind (lambda () #f) start
-                                                                   (lambda () (hash-table-delete! *starting* buf))))))
-                                            (let ((async (backend-op b :eval-async)))
-                                              (if async (async src k) (k ((backend-op b :eval) src)))))))))
-                    (%wake)))))
+                  (let* ((b (start)) (async (backend-op b :eval-async)))
+                    (if async (async src k) (k ((backend-op b :eval) src)))))))
     also))
 
-; What waits for the next wake (on-first-send's starts), and which buffers
-; are starting their program: buf -> its label.
-(define *deferred* '())
-(define *starting* (make-hash-table equal?))
-
-(define (run-deferred)
-  (let ((now *deferred*))
-    (set! *deferred* '())
-    (for-each (lambda (f) (f)) now)))
-
-; WHERE A BUFFER RUNS, on its modeline: "lux starting…", then "lux at
-; 127.0.0.1:4321" -- the other process its sends go to, once it runs -- and
-; nothing for this image's own. Refreshed after every key, click, release
-; and wake, for the buffer on screen.
+; WHERE A BUFFER RUNS, on its modeline: "lux at 127.0.0.1:4321" -- the
+; other process its sends go to -- and nothing for this image's own
+; (Kevin, 2026-11-23: "there should also be a status message when starting
+; or connecting to a language ... in the edit status bar"). Refreshed after
+; every key, click, release and wake, for the buffer on screen.
 (define (buffer-runs-in buf)
-  (cond ((hash-table-ref/default *starting* buf #f) => (lambda (label) (string-append label " starting…")))
-        ((guard (e (#t #f)) (running-image-backend buf)) => (lambda (b) (%alist-ref b :name "")))
-        (else "")))
+  (let ((b (guard (e (#t #f)) (running-image-backend buf))))
+    (if b (%alist-ref b :name "") "")))
 
 (define (status-refresh . _)
   (guard (e (#t #f))
@@ -338,72 +284,72 @@ Asks which call and what; (eval-in-frame 1 \"x\") asks nothing."
                        "1"))
       #f))
 
-(define (remote-attach)
-  "Send this buffer's forms to the connected Scheme from now on — C-M-x,
-  C-x C-e and C-c C-b evaluate there; completion and describe ask it, and
-  the buffer takes that Scheme's language. remote-detach sends them back."
-  (let ((buf (%editor-active-buffer (editor-pane-id))))
-    (if *remote*
-      (begin (hash-table-set! *attached-backends* buf (remote-backend *remote* *remote-kind*))
-             (match (assoc *remote-kind* *schemes*)
-               ((name program args language) (%editor-set-language (editor-pane-id) language))
-               (_ #f))
-             (echo (%text (buffer-name buf)) " sends to " *remote-kind* " at " (%remote-address *remote*)))
-      (echo "not connected — M-x remote-start, or remote-connect"))))
+(define (remote-running)
+  "The backend's connection while it runs, else #f."
+  (and *remote* (%remote-address *remote*) *remote*))
 
-(define (remote-detach)
-  "Send this buffer's forms to the host's backend again."
-  (let ((buf (%editor-active-buffer (editor-pane-id))))
-    (hash-table-delete! *attached-backends* buf)
-    (echo (%text (buffer-name buf)) " sends to this image")))
+(define (stop-backends)
+  ; The one-backend rule: before another starts, the one running stops --
+  ; this one, and a Lisp file's SBCL (27-lisp).
+  (when *remote*
+    (%remote-close *remote*)
+    (set! *remote* #f))
+  (guard (e (#t #f))
+    (when (sbcl-running?) (sbcl-stop))))
+
+(define (remote-took! kind)
+  ; The backend is KIND now: the buffer on screen takes its language (a
+  ; Guile file Guile's), and the modeline and the echo say where it runs.
+  (set! *remote-kind* kind)
+  (match (assoc kind *schemes*)
+    ((name program args language) (%editor-set-language (editor-pane-id) language))
+    (_ #f))
+  (status-refresh)
+  (echo kind " running at " (%remote-address *remote*) " — the Scheme files send there; M-x remote-stop stops it"))
 
 (define (remote-connect (addr "127.0.0.1:4007") (kind "scm"))
   "(remote-connect [\"HOST:PORT\" [KIND]])  ->  the connection
 
-Attach to a REPL server already running — SLIME's slime-connect — and
-point this buffer's sends at it. KIND names the Scheme it is (\"scm\", the
-default, or \"guile\" for a serve.scm). `ray --tcp` serves scm on 4007 (the
-default), `scm --serve HOST:PORT` anywhere, lux `--serve`. Its image is the
-one a send changes, and the one completion and describe read.
+Attach to a REPL server already running — SLIME's slime-connect — as THE
+backend, which every Scheme file sends to until M-x remote-stop; the one
+running stops. KIND names the Scheme it is (\"scm\", the default, or
+\"guile\" for a serve.scm). `ray --tcp` serves scm on 4007 (the default),
+`scm --serve HOST:PORT` anywhere, lux `--serve`. Its image is the one a
+send changes, and the one completion and describe read.
 
 It asks the server for its events: lux's errors in a frame, which come
 after the send that caused them was answered, show in the transcript and
 the error pane (C-h e) as a failed send does."
   (unless (%remote-refused)
-    (when *remote* (%remote-close *remote*))
+    (echo "connecting to " addr "…")
+    (stop-backends)
     (set! *remote* (%remote-connect addr))
     (%remote-subscribe *remote*)
-    (set! *remote-kind* kind)
-    (remote-attach)
+    (remote-took! kind)
     *remote*))
 
 (define (buffer-scheme)
   ; The *schemes* name for this buffer's language: what remote-start offers
-  ; first. A lux program, or any file in a lux checkout, is lux's.
-  (let* ((buf (%editor-active-buffer (editor-pane-id)))
-         (path (buffer-path buf))
-         (lang (%buffer-language (editor-pane-id) buf)))
-    (if (or (lux-buffer? buf) (and (string? path) (lux-file? path)))
-      "lux"
-      (or (any (lambda (s) (and (equal? (cadddr s) lang) (car s))) *schemes*) "scm"))))
+  ; first.
+  (let ((lang (%buffer-language (editor-pane-id) (%editor-active-buffer (editor-pane-id)))))
+    (or (any (lambda (s) (and (equal? (cadddr s) lang) (car s))) *schemes*) "scm")))
 
 (define (remote-start (which #f))
-  "Start a Scheme in a process of its own and point this buffer's sends at
-it — SLIME's M-x slime. Asks WHICH — scm, lux or guile (*schemes*), the
-buffer's own first — and the buffer takes that Scheme's language. It asks
-the server for its events, as remote-connect does: lux's pauses. A loop that never
-ends is interrupted after *remote-timeout* seconds; a crash takes the
-server, not the editor. M-x remote-stop ends it; (remote-start \"guile\")
-asks nothing."
+  "Start a Scheme in a process of its own as THE backend — SLIME's M-x
+slime — which every Scheme file sends to until M-x remote-stop; the one
+running stops first. Asks WHICH — scm, lux or guile (*schemes*), the
+buffer's own first — and the buffer on screen takes that Scheme's
+language. It asks the server for its events, as remote-connect does: lux's
+pauses. A loop that never ends is interrupted after *remote-timeout*
+seconds; a crash takes the server, not the editor. (remote-start
+\"guile\") asks nothing; scm-start, lux-start and guile-start are each one."
   (define (go name)
     (match (assoc name *schemes*)
       ((name program args language)
-        (when *remote* (%remote-close *remote*))
+        (stop-backends)
         (set! *remote* (%remote-start (program) 0 (args)))
         (%remote-subscribe *remote*)
-        (set! *remote-kind* name)
-        (remote-attach)
-        (echo name " running at " (%remote-address *remote*) " — this buffer sends there")
+        (remote-took! name)
         *remote*)
       (_ (echo "no Scheme called " name " — " (string-join (map car *schemes*) ", ")) #f)))
   (cond
@@ -416,24 +362,29 @@ asks nothing."
                        (buffer-scheme))
       #f)))
 
+(define (scm-start)
+  "Start scm in a process of its own — `scm --serve` — as the backend every
+Scheme file sends to (remote-start \"scm\"). M-x remote-stop stops it."
+  (remote-start "scm"))
+
 (define (lux-start)
-  "Run this buffer's file, as saved, in lux — a window of its own — and
-point the buffer's sends at it: C-c C-c redefines in the running program.
-An error in the file pauses lux rather than ending it; send the fix.
-M-x remote-stop closes it. (remote-start \"lux\")."
+  "Run this buffer's file, as saved, in lux — a window of its own; with no
+file, nothing, until something is sent to draw — as the backend every
+Scheme file sends to: C-c C-c redefines in the running program. An error
+in the file pauses lux rather than ending it; send the fix. M-x
+remote-stop closes it. (remote-start \"lux\")."
   (remote-start "lux"))
 
 (define (remote-stop)
-  "Drop the connection, stopping the server if remote-start began it. The
-  buffers that sent to it send where their language does again."
-  (when *remote*
-    (for-each (lambda (buf)
-                (when (equal? (%alist-ref (hash-table-ref *attached-backends* buf) :conn #f) *remote*)
-                  (hash-table-delete! *attached-backends* buf)))
-              (hash-table-keys *attached-backends*))
-    (%remote-close *remote*)
-    (set! *remote* #f)
-    (echo "disconnected")))
+  "Stop the backend — the Scheme remote-start began, or drop the one
+remote-connect attached. The Scheme files send to the editor's image again."
+  (if (not *remote*)
+    (echo "no Scheme running in a process of its own")
+    (begin
+      (%remote-close *remote*)
+      (set! *remote* #f)
+      (status-refresh)
+      (echo *remote-kind* " stopped — the Scheme files send to the editor's image"))))
 
 (define (remote-interrupt)
   "Stop what the buffer's other process is evaluating — a send that runs

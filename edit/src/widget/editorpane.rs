@@ -90,8 +90,8 @@ struct Doc {
     /// none; Scheme policy writes it (the dialect detectors, 07-backend).
     dialect: String,
     /// Where the buffer's sends run, which the modeline gives after its
-    /// language: "lux starting…", "lux at 127.0.0.1:4321". Empty for this
-    /// image's own; Scheme policy writes it (14-remote).
+    /// language: "lux at 127.0.0.1:4321". Empty for this image's own;
+    /// Scheme policy writes it (14-remote).
     status: String,
     /// Some when this is an IMAGE buffer (view-only): draw blits it instead
     /// of the text editor, and edits are refused.

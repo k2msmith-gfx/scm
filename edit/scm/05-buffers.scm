@@ -184,9 +184,6 @@
 ; What runs after a buffer is written to PATH (20-rust: its language
 ; server checks the file).
 (define *save-hooks* '())
-; The file may say another language now (07-backend). The hooks run with
-; the written buffer active.
-(set! *save-hooks* (cons (lambda (path) (redetect-language! (editor-pane-id))) *save-hooks*))
 
 (define (save-buffer (path #f))
   "Write this buffer to its own file — C-x C-s. Runs nothing, unless

@@ -808,7 +808,9 @@ reader judges the text, and which image a send goes to.
   sending to it takes), the buffer's own offered first — and the buffer
   takes that Scheme's language. `remote-stop` lets go of the buffers it
   served.
-- **A Scheme FILE runs in a separate scm by default.** The standalone's
+- **A Scheme FILE runs in a separate scm by default** (superseded
+  2026-11-23: a Scheme file sends to the editor's image unless one backend
+  runs -- "One backend", under E5b's events below). The standalone's
   `*buffer-backend*` sends a `.scm`/`.ss`/`.sld`/`.sls` file to one scm
   started on the first send (`*scm-files*`), so the program being written
   cannot freeze, crash or rename the editor. What configures the EDITOR
@@ -879,71 +881,40 @@ asked for ([repl.md](repl.md), "Events").
 - **Asking.** `remote-connect` calls `(%remote-subscribe id)`, which sends
   `(:op ping :id N :events #t)` without waiting. A key on `ping`, so
   edit's SBCL and Guile servers, and any scm before S40, answer it as a
-  ping. `remote-start` asks too, since it can start lux (below).
-- **lux from the editor** (Kevin, 2026-11-22). `lux` is a third
-  `*schemes*` entry: `lux-start`, or remote-start's `lux`, runs
-  `*lux-program* FILE --serve ADDR` on the buffer's file as saved, and a
-  file in a lux checkout (a directory above it holding `src/live.rs` and
-  `docs/plan.md`) offers lux first. The program is lux's `tools/lux`,
-  linked onto PATH, which runs lux with its dev shell's libraries. lux,
-  serving, pauses on an error loading the file rather than exiting, so the
-  editor that started it can send the fix.
-- **A lux file starts its lux** (Kevin, 2026-11-22: "suppose we load an
-  .scm file that has some lux code in it, couldn't we autostart lux and
-  connect to it"). lux code is a dialect, as a ray scene is: a file saying
-  `(animate '`, `(app :`, `(simulate :`, `(define-model ` or `(define (frame
-  target` -- every lux example says one -- is "Scheme (lux)" (14-remote,
-  asked before ray's), and the standalone sends it to a lux of its own
-  (`lux-file-backend`): `*lux-program* FILE --serve`, from its checkout's
-  root, started on the first send, subscribed to its events. One lux per
-  file, each a program with its window. `%remote-address` now answers #f
-  once the server has closed the connection, so a closed window, or an
-  exited ray, scm or Guile, is started again by the next send;
-  `lux-restart` closes one by hand. Test: `a_lux_files_first_send_starts_lux`.
-- **A file that calls lux** (Kevin: "sending any lux function from a new
-  .scm file should startup lux if not already started"). A second lux
-  detector, the standalone's (after ray's): the file calls a name lux
-  defines that it does not define itself. lux's names are read from its
-  checkout -- found through `*lux-program*` (tools/lux, followed to its
-  real path) or `*lux-checkout*` -- once: the top-level definitions of
-  `src/scheme/*.scm` and the primitives `src/*.rs` gives (`define_fn("…"`),
-  but `%` names and those this image binds; 160 today. Such a file is no
-  program to load, so its sends go to the lux last started while one runs,
-  else to one started with nothing loaded (`lux --serve`). A buffer keeps
-  the lux it found (`*lux-of-buffer*`) until that one closes.
-- **Nothing starts but a send** (Kevin, 2026-11-23: popping the editor's
-  menu over a lux example opened its window and ran it). The menu asks
-  `backend-of` whether the buffer sends anywhere; so do the REPL's prompt,
-  completion, describe and the agent -- and the backends of a Scheme
-  file's scm, a ray file's ray, a lux file's lux, Guile and SBCL started
-  their program when asked. Each now answers, while its program is not
-  running, `on-first-send` (14-remote): a backend offering only `:eval` and
-  `:eval-async`, which start the program and hand the send to it. Running,
-  it is the program's own, with completion and describe. (evcxr's already
-  started on its first send.)
-- **Where a buffer runs, on its modeline** (Kevin, 2026-11-23: "there
-  should also be a status message when starting or connecting to a
-  language ... in the edit status bar"). After the language, the
-  modeline gives the other process the buffer's sends go to -- "lux at
-  127.0.0.1:4321", "scm at …", "guile at …" -- and "lux starting…" while it
-  starts (`%buffer-set-status`, set by 14-remote's `status-refresh` after
-  every key, click, release and wake). Starting blocks until the program
-  listens, seconds for lux, so an async send to a program not running
-  (`on-first-send`) says so -- the modeline and the echo -- and starts it
-  at the next wake (`%wake`), once that is drawn. **A host must run
-  `(remote-poll)` when woken** for those starts to happen; the standalone
-  does. Tests: the modeline test, Guile's "guile starting…" before the
-  wake, the lux test's "lux at 127.0.0.1:…".
-- **Detected again** (Kevin, 2026-11-22). A file's language was decided
-  once, on opening it: `#!guile` typed into an empty .scm still sent to
-  scm. `redetect-language!` (07-backend) asks the detectors again on save
-  (a `*save-hooks*` entry) and before a send (`editor-send`,
-  `eval-owning`), and a language none claims any more goes back to Scheme
-  -- but only while the buffer is not CONNECTED (it has sent, or is
-  attached to a server; Kevin: "it should only detect if it's not already
-  connected") and its language is still what detection made it, not one
-  set by hand (`guile-mode`, `scheme-mode`). Test:
-  `a_file_that_comes_to_say_it_is_guile_is_guiles`.
+  ping. `remote-start` asks too, since it can start lux.
+- **One backend** (Kevin, 2026-11-23, replacing two days of
+  auto-starting -- a lux or ray for a file that said so, a Guile for a
+  Guile file, the language detected again on save and send: "this is too
+  complicated. If you load .scm file, then just the native editor scm repl
+  starts. If you load a .lisp file, then sbcl starts (if installed). then
+  use remote-start to start guile, lux or scm as a separate process (by
+  menu) ... if you can have multiple backends started, I say no").
+  - A Scheme or Guile buffer sends to the editor's image -- unless THE
+    backend runs: the one Scheme in a process of its own, `*remote*`,
+    started by `remote-start` (scm, lux or guile) or `scm-start`,
+    `lux-start`, `guile-start`, or attached by `remote-connect`. While it
+    runs every Scheme buffer sends to it, the scratch too, so the REPL
+    there talks to it; `~/.config/edit/init.scm` and the shell's own files
+    stay the editor's. `remote-stop` (or `guile-stop`) stops it.
+  - Starting one stops the one running (`stop-backends`). A Lisp file's
+    SBCL is the one thing that starts by itself, on its first send
+    (`on-first-send`, so a menu or the REPL asking where it sends starts
+    nothing), and it is the one backend too: it stops the Scheme running,
+    and starting a Scheme stops it.
+  - `lux-start` runs `*lux-program* FILE --serve ADDR` on the buffer's
+    file as saved, or `lux --serve` with nothing loaded for a buffer with
+    no file. *lux-program* is lux's `tools/lux`, linked onto PATH; lux,
+    serving, pauses on an error loading the file rather than exiting.
+  - The modeline says where a buffer runs, after its language: "lux at
+    127.0.0.1:4321" (`%buffer-set-status`, from 14-remote's
+    `status-refresh` after every key, click, release and wake), and the
+    REPL's prompt follows the buffer -- `lux λ > `, `scm λ > `, Guile's --
+    redrawn at the next key, not only when it takes the keyboard.
+  - `%remote-address` answers #f once the server has closed the
+    connection, so a closed lux window reads as nothing running.
+  - Test: `one_backend_at_a_time_and_every_scheme_file_sends_to_it`, with
+    a stand-in lux; `files_send_to_the_editor_until_a_scheme_is_started`;
+    the Guile tests start Guile with `guile-start`.
 - **Reading.** The reader thread tries `scm::Event::parse` on a datum
   starting `(:event` before reading it as an answer, and queues it as text
   (a `Val` cannot cross threads); an event lets no queued request go, since
@@ -1187,7 +1158,8 @@ without it).
   "/abs/file.scm")` — scm sets a parameter called with a value — on the
   send's first line, so an include resolves beside the file and a reported
   line stays the buffer's. `a_ray_file_sends_to_ray` (ignored; `RAY_BIN`)
-  proves both. M-x ray-restart stops the buffer's ray (its checkout's, so
+  proves both (superseded 2026-11-23: nothing starts a ray by itself; a
+  ray file sends where any Scheme file does). M-x ray-restart stopped the buffer's ray (its checkout's, so
   every ray file there starts over) and the next send starts a fresh one —
   remote-stop knows only remote-connect's. M-x remote-connect still
   attaches a buffer to a `ray --tcp` already running, the one ray-view

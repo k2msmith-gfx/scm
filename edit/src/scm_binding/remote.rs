@@ -908,173 +908,97 @@ mod tests {
     }
 }
 
-/// lux started from the editor: `lux-start` (remote-start's "lux") runs
-/// `*lux-program* FILE --serve ADDR` on the buffer's file and connects; a
-/// file in a lux checkout offers lux first. The lux here is a stand-in
-/// script that notes its arguments and serves as `scm --serve`, so the
-/// test needs scm on PATH, not lux.
+/// One backend at a time (Kevin, 2026-11-23): a Scheme file sends to the
+/// editor's image until M-x lux-start (or scm-start, guile-start,
+/// remote-start) runs a Scheme in a process of its own; then every Scheme
+/// file sends there, the scratch too but not the editor's own files, and
+/// the modeline and the REPL say where; starting another stops it;
+/// remote-stop goes back.
+/// The lux here is a stand-in script that notes its arguments and serves
+/// as `scm --serve`, so the test needs scm on PATH, not lux.
 #[cfg(test)]
-mod lux_tests {
+mod backend_tests {
     fn transcript() -> Vec<String> {
         crate::textpane::lines(crate::app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect()
     }
 
     #[test]
-    fn lux_start_runs_the_buffers_file_and_connects() {
+    fn one_backend_at_a_time_and_every_scheme_file_sends_to_it() {
         if !std::process::Command::new("scm").arg("--version").output().is_ok_and(|o| o.status.success()) {
             eprintln!("skipped: no scm on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("edit-lux-{}", std::process::id()));
-        for d in ["src", "docs", "examples"] {
-            std::fs::create_dir_all(dir.join(d)).unwrap();
-        }
-        std::fs::write(dir.join("src/live.rs"), "").unwrap();
-        std::fs::write(dir.join("docs/plan.md"), "").unwrap();
-        let file = dir.join("examples/hello.scm");
-        std::fs::write(&file, "(define (frame target time) #f)\n").unwrap();
-        let args = dir.join("args");
-        let lux = dir.join("lux");
-        std::fs::write(&lux, format!("#!/bin/sh\necho \"$@\" > {}\nexec scm --serve \"$3\"\n", args.display())).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&lux, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        crate::app::resize(800, 600, 1.0);
-        let mut s = super::super::standalone::Session::boot(None, &[file.to_string_lossy().into_owned()]).expect("boot");
-        assert_eq!(s.eval_to_string("(buffer-scheme)").unwrap(), "\"lux\"", "a lux checkout's file offers lux");
-        s.call(&format!("(set! *lux-program* \"{}\") (lux-start)", lux.display()));
-        let said = std::fs::read_to_string(&args).unwrap();
-        let addr = s.eval_to_string("(%remote-address *remote*)").unwrap();
-        assert_eq!(said.trim(), format!("{} --serve {}", file.display(), addr.trim_matches('"')));
-        s.call(r#"(%editor-set-text 1 "(* 6 7)") (%editor-goto-line 1 0) (eval-defun)"#);
-        assert!(s.settle(10.0));
-        assert!(transcript().iter().any(|l| l == "=> 42"), "the send went to the started program: {:?}", transcript());
-        s.call("(remote-stop)");
-        // A scratch buffer has no file for lux to run.
-        s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b))");
-        assert_eq!(s.eval_to_string("(buffer-scheme)").unwrap(), "\"scm\"");
-        assert!(s.eval_to_string("(guard (e (#t (error-object-message e))) (lux-args))").unwrap().contains("save this buffer"));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A lux program needs no lux-start: its words make it "Scheme (lux)"
-    /// and its first send starts lux on it, from its checkout's root, and
-    /// connects -- an empty file too, once lux code is typed into it. The
-    /// window closed, the next send starts another.
-    #[test]
-    fn a_lux_files_first_send_starts_lux() {
-        if !std::process::Command::new("scm").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            eprintln!("skipped: no scm on PATH");
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("edit-lux-auto-{}", std::process::id()));
-        for d in ["src", "docs", "examples"] {
-            std::fs::create_dir_all(dir.join(d)).unwrap();
-        }
-        // macOS's temp dir is under /var, a link to /private/var, and lux's
-        // $PWD is the resolved path.
+        let dir = std::env::temp_dir().join(format!("edit-one-backend-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
-        std::fs::write(dir.join("src/live.rs"), "").unwrap();
-        std::fs::write(dir.join("docs/plan.md"), "").unwrap();
-        let shown = dir.join("examples/shown.scm");
-        std::fs::write(&shown, "(define (show t) t)\n(animate 'show)\n").unwrap();
-        let empty = dir.join("examples/empty.scm");
-        std::fs::write(&empty, "").unwrap();
-        // The stand-in: notes where it ran and on what, and its pid, then
-        // serves as scm.
+        let (a, b) = (dir.join("a.scm"), dir.join("b.scm"));
+        std::fs::write(&a, "(define (frame target time) #f)\n").unwrap();
+        std::fs::write(&b, "").unwrap();
         let log = dir.join("log");
         let lux = dir.join("lux");
-        std::fs::write(
-            &lux,
-            format!("#!/bin/sh\necho \"$PWD $1 $$\" >> {}\nfor a; do addr=$a; done\nexec scm --serve \"$addr\"\n", log.display()),
-        )
-        .unwrap();
+        std::fs::write(&lux, format!("#!/bin/sh\necho \"$@\" >> {}\nfor x; do addr=$x; done\nexec scm --serve \"$addr\"\n", log.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&lux, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let started = || -> Vec<String> {
-            std::fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_string).collect()
-        };
+        let started = || -> Vec<String> { std::fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_string).collect() };
 
         crate::app::resize(800, 600, 1.0);
         let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
-        s.call(&format!("(set! *lux-program* \"{}\")", lux.display()));
-        // The form after the program's own (animate 'show), as in a file.
+        let open = |s: &mut super::super::standalone::Session, f: &std::path::Path| s.call(&format!("(open-path \"{}\")", f.display()));
+        let name = |s: &mut super::super::standalone::Session| s.eval_to_string("(%alist-ref (backend-of (%editor-active-buffer 1)) :name #f)").unwrap();
+        let runs = |s: &mut super::super::standalone::Session| s.eval_to_string("(buffer-runs-in (%editor-active-buffer 1))").unwrap();
         let send = |s: &mut super::super::standalone::Session, code: &str| {
-            s.call(&format!("(%editor-set-text 1 {:?}) (%editor-goto-line 1 1) (eval-defun)", format!("(animate 'show)\n{code}")));
-            assert!(s.settle(10.0));
-        };
-
-        s.call(&format!("(open-path \"{}\")", shown.display()));
-        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"lux\"");
-        // Nor does asking where it sends -- the editor's menu, the REPL's
-        // prompt, completion and describe all ask (Kevin, 2026-11-23: the
-        // menu opened a lux example's window).
-        s.call("(backend-of (%editor-active-buffer 1)) (repl-backend)");
-        assert!(started().is_empty(), "opening, or asking where it sends, starts nothing");
-        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"lux λ > \"", "the REPL says it is lux's, before it runs");
-        send(&mut s, "(* 6 7)");
-        assert!(transcript().iter().any(|l| l == "=> 42"), "{:?}", transcript());
-        let first = started();
-        assert_eq!(first.len(), 1);
-        assert!(first[0].starts_with(&format!("{} {} ", dir.display(), shown.display())), "from the checkout's root, on the file: {first:?}");
-        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"lux λ > \"", "and once it runs");
-        let runs = s.eval_to_string("(buffer-runs-in (%editor-active-buffer 1))").unwrap();
-        assert!(runs.starts_with("\"lux at 127.0.0.1:"), "the modeline says where: {runs}");
-        send(&mut s, "(* 6 8)");
-        assert!(transcript().iter().any(|l| l == "=> 48"));
-        assert_eq!(started().len(), 1, "one lux for the file");
-
-        // Its window closed: the next send starts another.
-        let pid = first[0].rsplit(' ').next().unwrap();
-        std::process::Command::new("kill").arg(pid).status().unwrap();
-        let t0 = std::time::Instant::now();
-        while s.eval_to_string("(%remote-address (hash-table-ref *lux-of-buffer* (%editor-active-buffer 1)))").unwrap() != "#f" {
-            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "the closed connection reads as down");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        send(&mut s, "(* 6 9)");
-        assert!(transcript().iter().any(|l| l == "=> 54"), "{:?}", transcript());
-        assert_eq!(started().len(), 2, "started again");
-
-        // An empty file, lux code typed in: its first send starts lux.
-        s.call(&format!("(open-path \"{}\")", empty.display()));
-        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"\"");
-        send(&mut s, "(* 7 7)");
-        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"lux\"");
-        assert!(transcript().iter().any(|l| l == "=> 49"), "{:?}", transcript());
-        assert!(started().last().unwrap().contains(&format!(" {} ", empty.display())), "{:?}", started());
-
-        // A file that only CALLS lux -- a name lux's sources define, and
-        // the file does not -- sends to the lux running; with none, it
-        // starts one with nothing loaded.
-        std::fs::create_dir_all(dir.join("src/scheme")).unwrap();
-        std::fs::write(dir.join("src/scheme/scene.scm"), "(define (sphere r) r)\n(define (%hidden) 1)\n").unwrap();
-        std::fs::write(dir.join("src/gpu.rs"), "interp.define_fn(\"gpu-encoder\", |_| {});\n").unwrap();
-        s.call(&format!("(set! *lux-checkout* \"{}\")", dir.display()));
-        assert_eq!(s.eval_to_string("(hash-table-ref/default (lux-names) \"sphere\" #f)").unwrap(), "#t");
-        assert_eq!(s.eval_to_string("(hash-table-ref/default (lux-names) \"gpu-encoder\" #f)").unwrap(), "#t");
-        assert_eq!(s.eval_to_string("(hash-table-ref/default (lux-names) \"%hidden\" #f)").unwrap(), "#f");
-        let calls = |s: &mut super::super::standalone::Session, name: &str, code: &str| {
-            s.call(&format!("(open-path \"{}\")", dir.join(name).display()));
             s.call(&format!("(%editor-set-text 1 {code:?}) (%editor-goto-line 1 0) (eval-defun)"));
             assert!(s.settle(10.0));
         };
-        let before = started().len();
-        calls(&mut s, "examples/calls.scm", "(if #f (sphere 1) (* 8 8))");
-        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"lux\"");
-        assert!(transcript().iter().any(|l| l == "=> 64"), "{:?}", transcript());
-        assert_eq!(started().len(), before, "it joined the lux running");
-        calls(&mut s, "examples/own.scm", "(define (sphere r) r)\n(* 3 3)");
-        assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"\"", "its own sphere is no lux call");
-        s.call("(lux-restart)");   // (own.scm has none: says so)
-        for pid in started().iter().filter_map(|l| l.rsplit(' ').next()) {
-            let _ = std::process::Command::new("kill").arg(pid).status();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        calls(&mut s, "examples/fresh.scm", "(if #f (sphere 2) (* 9 9))");
-        assert!(transcript().iter().any(|l| l == "=> 81"), "{:?}", transcript());
-        assert_eq!(started().len(), before + 1);
-        assert!(started().last().unwrap().contains(" --serve "), "nothing loaded: {:?}", started());
+
+        // Nothing starts by itself: a Scheme file is the editor's image's.
+        open(&mut s, &a);
+        assert_eq!(name(&mut s), "\"this image\"");
+        send(&mut s, "(define here 1)");
+        assert_eq!(s.eval_to_string("here").unwrap(), "1", "it ran here");
+        assert!(started().is_empty());
+        assert_eq!(runs(&mut s), "\"\"");
+        s.call("(repl-focus) (focus-scene-editor)");
+        assert_eq!(s.eval_to_string("*repl-prompt-shown*").unwrap(), "\"scheme λ > \"");
+
+        // lux-start runs the file; every Scheme file sends there.
+        s.call(&format!("(set! *lux-program* \"{}\") (lux-start)", lux.display()));
+        let addr = s.eval_to_string("(%remote-address *remote*)").unwrap();
+        let addr = addr.trim_matches('"');
+        assert_eq!(started(), [format!("{} --serve {addr}", a.display())]);
+        assert_eq!(runs(&mut s), format!("\"lux at {addr}\""), "the modeline says where");
+        s.key("right");
+        assert_eq!(s.eval_to_string("*repl-prompt-shown*").unwrap(), "\"lux λ > \"", "and the REPL, at the next key");
+        send(&mut s, "(* 6 7)");
+        assert!(transcript().iter().any(|l| l == "=> 42"), "{:?}", transcript());
+        open(&mut s, &b);
+        assert!(name(&mut s).starts_with("\"lux at "), "another file sends there too: {}", name(&mut s));
+        send(&mut s, "(* 6 8)");
+        assert!(transcript().iter().any(|l| l == "=> 48"));
+        s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b))");
+        assert!(name(&mut s).starts_with("\"lux at "), "the scratch too: {}", name(&mut s));
+        let shell_file = super::super::shell_dir().join("05-buffers.scm");
+        open(&mut s, &shell_file);
+        assert_eq!(name(&mut s), "\"this image\"", "the editor's own files are the editor's whatever runs");
+
+        // Starting another stops it: one backend.
+        let first = s.eval_to_string("*remote*").unwrap();
+        s.call("(scm-start)");
+        assert_eq!(s.eval_to_string(&format!("(%remote-address {first})")).unwrap(), "#f", "lux was stopped");
+        open(&mut s, &a);
+        assert!(name(&mut s).starts_with("\"scm at "), "{}", name(&mut s));
+        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"scm λ > \"");
+
+        // remote-stop: back to the editor's image.
+        s.call("(remote-stop)");
+        assert_eq!(name(&mut s), "\"this image\"");
+        assert_eq!(runs(&mut s), "\"\"");
+        assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"scheme λ > \"");
+
+        // lux-start with no file: lux with nothing loaded.
+        s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b)) (lux-start)");
+        assert!(started().last().unwrap().starts_with("--serve "), "{:?}", started());
+        s.call("(remote-stop)");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -1091,10 +1015,11 @@ mod guile_tests {
         crate::textpane::lines(crate::app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect()
     }
 
-    /// Always: a file that says it is Guile opens as Guile, and a Guile
-    /// send never falls through to scm's image when Guile cannot start.
+    /// Always: a file that says it is Guile opens as Guile, and nothing
+    /// starts by itself (Kevin, 2026-11-23): with no Guile running, its
+    /// sends go where a Scheme file's do, the editor's image.
     #[test]
-    fn a_guile_file_is_guiles_and_never_runs_as_scm() {
+    fn a_guile_file_is_guiles_and_starts_nothing() {
         crate::app::resize(800, 600, 1.0);
         let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
         let dir = std::env::temp_dir().join(format!("edit-guile-{}", std::process::id()));
@@ -1104,81 +1029,10 @@ mod guile_tests {
         let file = file.to_string_lossy().replace('\\', "/");
         s.call(&format!("(open-path \"{file}\")"));
         assert_eq!(s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap(), "\"guile\"");
-        s.call("(set! *guile-program* \"no-such-guile-here\")");
         s.call("(%editor-goto-line 1 1) (eval-defun)");
-        // Starting waits for the next wake, once the modeline says so.
-        assert_eq!(s.eval_to_string("(buffer-runs-in (%editor-active-buffer 1))").unwrap(), "\"guile starting…\"");
         s.poll();
-        assert_eq!(s.eval_to_string("(buffer-runs-in (%editor-active-buffer 1))").unwrap(), "\"\"", "it failed: nothing runs");
-        assert_eq!(s.eval_to_string("(%env-ref 'sq #f)").unwrap(), "#f", "nothing ran in scm's image");
-        assert!(transcript().iter().any(|l| l.starts_with("error: guile:")), "{:?}", transcript());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Always: a file comes to say it is Guile -- `#!guile` typed into an
-    /// empty .scm -- and is Guile's from its next save or send, without
-    /// being opened again (Kevin, 2026-11-22). Not once it is connected --
-    /// it has sent, or is attached to a server -- nor once its language was
-    /// set by hand.
-    #[test]
-    fn a_file_that_comes_to_say_it_is_guile_is_guiles() {
-        crate::app::resize(800, 600, 1.0);
-        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
-        s.call("(set! *guile-program* \"no-such-guile-here\")");
-        let dir = std::env::temp_dir().join(format!("edit-redetect-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let open = |s: &mut super::super::standalone::Session, name: &str| {
-            let file = dir.join(name);
-            std::fs::write(&file, "").unwrap();
-            s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
-        };
-        let language = |s: &mut super::super::standalone::Session| s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap();
-
-        // On save, both ways; by hand, it stays.
-        open(&mut s, "saved.scm");
-        assert_eq!(language(&mut s), "\"scheme\"");
-        s.call(r##"(%editor-set-text 1 "#!guile\n(define (sq x) (* x x))") (save-buffer)"##);
-        assert_eq!(language(&mut s), "\"guile\"", "saved saying Guile");
-        s.call(r#"(%editor-set-text 1 "(define (sq x) (* x x))") (save-buffer)"#);
-        assert_eq!(language(&mut s), "\"scheme\"", "saved saying nothing, Scheme again");
-        s.call(r#"(guile-mode) (save-buffer)"#);
-        assert_eq!(language(&mut s), "\"guile\"", "set by hand, it stays");
-
-        // The REPL's prompt follows, at the next key -- not only once the
-        // REPL has the keyboard again (Kevin, 2026-11-23).
-        open(&mut s, "prompt.scm");
-        s.call("(repl-focus) (focus-scene-editor)");
-        let shown = |s: &mut super::super::standalone::Session| s.eval_to_string("*repl-prompt-shown*").unwrap();
-        assert_eq!(shown(&mut s), "\"scm λ > \"");
-        s.call(r##"(%editor-set-text 1 "#!guile\n1")"##);
-        s.key("C-x");
-        s.key("C-s");
-        assert_eq!(language(&mut s), "\"guile\"");
-        assert_eq!(shown(&mut s), "\"scheme@(guile-user)> \"", "saved as Guile, the prompt is Guile's");
-        s.call("(repl-focus)");
-        assert_eq!(s.eval_to_string("(%edit :prompt)").unwrap(), "\"scheme@(guile-user)> \"");
-        s.call(r#"(%edit! :text "(+ 1") (scheme-mode)"#);
-        s.key("right");
-        assert_eq!(s.eval_to_string("(%edit :prompt)").unwrap(), "\"scm λ > \"", "while it is typed in too");
-        assert_eq!(s.eval_to_string("(%edit :text)").unwrap(), "\"(+ 1\"", "its text kept");
-        s.call("(focus-scene-editor)");
-
-        // Before a send, unsaved: the send goes to Guile, never to scm's
-        // image; then the buffer is connected, and stays Guile.
-        open(&mut s, "sent.scm");
-        s.call(r##"(%editor-set-text 1 "#!guile\n(define (sq x) (* x x))") (%editor-goto-line 1 1) (eval-defun)"##);
-        s.poll();
-        assert_eq!(language(&mut s), "\"guile\"", "the send found it Guile");
-        assert_eq!(s.eval_to_string("(%env-ref 'sq #f)").unwrap(), "#f", "nothing ran in scm's image");
-        assert!(transcript().iter().any(|l| l.starts_with("error: guile:")), "{:?}", transcript());
-        s.call(r#"(%editor-set-text 1 "(define (sq x) (* x x))") (save-buffer)"#);
-        assert_eq!(language(&mut s), "\"guile\"", "connected, it stays");
-
-        // Attached to a server, it stays as it is.
-        open(&mut s, "attached.scm");
-        s.call("(hash-table-set! *attached-backends* (%editor-active-buffer 1) (list (cons :name \"a server\")))");
-        s.call(r##"(%editor-set-text 1 "#!guile\n1") (save-buffer)"##);
-        assert_eq!(language(&mut s), "\"scheme\"", "attached, it stays");
+        assert_eq!(s.eval_to_string("(if (remote-running) 1 0)").unwrap(), "0", "no Guile was started");
+        assert_eq!(s.eval_to_string("(sq 3)").unwrap(), "9", "it ran in the editor's image");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1217,9 +1071,10 @@ mod guile_tests {
         // No Guile yet: nothing is marked, and nothing was started to ask.
         assert_eq!(marks(&mut s), "()", "its keywords are not errors");
         s.poll();
-        assert_eq!(s.eval_to_string("(if *guile* 1 0)").unwrap(), "0", "none was started to ask");
-        // A send starts it; from then on Guile reads the buffer.
-        s.call("(%editor-goto-line 1 1) (eval-defun)");
+        assert_eq!(s.eval_to_string("(if (guile-conn) 1 0)").unwrap(), "0", "none was started to ask");
+        // guile-start runs it, and a send goes there; from then on Guile
+        // reads the buffer.
+        s.call("(guile-start) (%editor-goto-line 1 1) (eval-defun)");
         assert!(s.settle(30.0), "Guile answers");
         let got = read(&mut s);
         assert!(got.starts_with("((2 1 "), "an error (1) on line 3: {got}");
@@ -1251,7 +1106,7 @@ mod guile_tests {
         }
         crate::app::resize(800, 600, 1.0);
         let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
-        s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b)) (guile-mode)");
+        s.call("(let ((b (%editor-buffer-new 1))) (register-buffer b #f) (visit-buffer b)) (guile-mode) (guile-start)");
         s.call(r#"(%editor-set-text 1 "(define* (sq x #:key (by 1)) \"Squares X.\" (* x x by))\n(sq 7 #:by 2)")"#);
         s.call("(%editor-goto-line 1 0) (eval-defun) (%editor-goto-line 1 1) (eval-defun)");
         assert!(s.settle(30.0), "Guile answers");
@@ -1314,12 +1169,12 @@ mod guile_tests {
         s.call("(remote-start)");
         assert_eq!(s.eval_to_string("(%edit :text)").unwrap_or_default(), "\"guile\"");
         s.key("C-g");
-        s.call("(remote-stop)");
         // An error comes back with Guile's message.
         s.call(r#"(%editor-set-text 1 "(car 5)") (%editor-goto-line 1 0) (eval-defun)"#);
         assert!(s.settle(10.0));
         assert!(transcript().iter().any(|l| l.starts_with("error: car:")), "{:?}", transcript());
         s.call("(guile-stop)");
+        assert_eq!(s.eval_to_string("(if (remote-running) 1 0)").unwrap(), "0", "guile-stop stopped it");
     }
 }
 

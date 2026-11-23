@@ -494,16 +494,6 @@ prim! {
 }
 
 prim! {
-    /// `(%wake)` — ask the host to come round: it runs `(remote-poll)`, so
-    /// the wake hooks, after it has drawn what this event changed. How work
-    /// that blocks (starting a program) waits until its "starting…" shows.
-    "%wake", fn wake_prim() {
-        crate::wake::wake();
-        Out::Nil
-    }
-}
-
-prim! {
     /// `(%buffer-tag id buf)` — `buf`'s modeline tag ("" for none).
     "%buffer-tag", fn buffer_tag_prim(id: num, buf: num) {
         Out::Text(crate::editorpane::buffer_tag(id as u32, buf as u32).unwrap_or_default())
@@ -792,7 +782,6 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         buffer_set_dialect_prim::install(interp)?,
         buffer_set_tag_prim::install(interp)?,
         buffer_set_status_prim::install(interp)?,
-        wake_prim::install(interp)?,
         editor_take_owned::install(interp)?,
         editor_own::install(interp)?,
         editor_owned_clear::install(interp)?,
