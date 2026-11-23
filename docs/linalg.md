@@ -153,9 +153,81 @@ sixteen values in storage order into an `f32vector` or `f64vector` from
 OFFSET -- the one copy a matrix makes on its way to a GPU buffer. Storage
 order is column-major, glam's, so it is a straight copy.
 
-**Still Scheme**, because nothing measured them hot: the vec3 and vec4
-layers, `mat4-determinant`, `mat4-decompose`, `mat4->quat`, the camera
-matrices, `quat-slerp`. Each can follow the same way when it is.
+**Still Scheme**, because nothing measured them hot: the vec3 layer
+(measured hot since, 2026-11-22 -- see "Next" below), the vec4 layer,
+`mat4-determinant`, `mat4-decompose`, `mat4->quat`, the camera matrices,
+`quat-slerp`. Each can follow the same way when it is.
+
+## Next: the vec3 layer native (proposed, 2026-11-22; NOT started)
+
+To be stage **S39** in plan §9 when it starts. Written as a handoff: the
+measurements, the design and the one open decision are all here.
+
+**Why.** lux profiled its flock (lux `docs/plan.md`, "The flock,
+profiled"; the scripts are lux's `tools/flock-profile.scm` and
+`tools/micro-costs.scm`). Once lux fixed its own layers, a 200-boid tick
+was 16 ms, 12 of it steering, and steering is mostly the vec3 layer. On an
+AMD Renoir laptop, less the loop's 0.13 µs:
+
+| | µs a call |
+|---|---|
+| a call, a fixnum `+`, a float `*`, a record accessor | 0.03-0.08 |
+| `v3` (three `exact->inexact`) | 0.44 |
+| `v3-scale` | 0.9 |
+| `v3+`, two arguments | 1.65 |
+| `map` over 3, `fold` over 3 (not this library) | 1.9, 1.0 |
+
+`v3+` is a loop over a rest list making seven calls (`v3-x` ×6 and
+`v3-add*`) for three additions. Native, it should cost what `%mat4*`'s
+call does, ~0.1-0.2 µs. Expected: steering 12 -> ~3 ms, the tick near
+5 ms. ray gets the same, wherever its Scheme uses `(scm linalg)`.
+
+**What.** As M7: primitives in `scm/src/prim/linalg.rs` named `%v3+` and
+so on, registered in its `install`, and the library binding its names to
+them -- `(define v3+ %v3+)   ; native: src/prim/linalg.rs` -- in place of
+the Scheme. The measured ones first: `v3`, `v3+`, `v3-` (one argument
+negates), `v3*`, `v3-negate`, `v3-scale`, `v3-dot`, `v3-cross`,
+`v3-length`, `v3-length-squared`, `v3-distance`, `v3-distance-squared`,
+`v3-normalize` (raising on zero with the same message), `v3-lerp`,
+`v3-min`, `v3-max`. The variadic ones fold left to right, as the Scheme
+does. The component layer (`v3-add*` and the rest) stays Scheme: the leaf
+compiler compiles it (`scm-llvm/tests/leaf_shapes.rs`), and
+`v3-normalize*` and friends are what its loops call.
+
+**The open decision: exact components.** M7 made every matrix result
+inexact, which changed nothing because every mat4 constructor already made
+flonums. **The vec3 layer is different**: `[0 1 0]` is a v3 (§4.5) and
+ray's `:at [0 1 0]` passes one, so exact vectors are common, and today
+`(v3+ [0 1 0] [1 0 0])` is the exact `#(1 1 0)`. Making that `#(1.0 1.0
+0.0)` would be visible -- printed, and to `eqv?`. **Recommended: a fast
+path when every component is a flonum, and otherwise the generic
+arithmetic the Scheme used**, so results are bit-identical AND as exact as
+before, everywhere. (`v3` itself, `v3-scale` and `v3-lerp` already convert
+with `%f`, so they are inexact either way; `v3-dot` of exact vectors stays
+exact under the recommendation.) Look in `prim.rs` for the generic `+`,
+`-`, `*` the fallback can call rather than repeating them.
+
+**Errors.** A wrong shape refused naming the procedure, as M7 did; the
+Scheme failed inside `vector-ref`. Check the fuzzer and the conformance
+suite for any expected message that changes.
+
+**Tests.** As M7's: the Scheme originals copied verbatim into
+`scm/tests/srfi/linalg-native.scm` as `ref-…`, every native procedure
+checked against them with `equal?` (which tells -0.0 from 0.0) on a
+pseudo-random stream with integers, zeros and negative zeros among the
+reals, on both tiers -- plus all-exact inputs, checking exactness is kept.
+Then the timings in a table here, as M7's.
+
+**Gates**: all of `CLAUDE.md`'s, the soak included. On NixOS the LLVM
+gate needs the prefix and `LIBRARY_PATH` lines `CLAUDE.md` gives.
+
+**Then in lux**: `cargo update -p schemers`, `cargo test --release`
+inside `nix develop`, and the flock profiled again.
+
+**After it, not part of it**: native `map` and `fold` (the prelude's and
+`(srfi 1)`'s, both Scheme, ~0.6 µs an element). A primitive that calls a
+Scheme procedure back is a VM matter, not a `prim/linalg.rs` one, so it
+is its own stage.
 
 ## Deliberate choices worth knowing
 
