@@ -168,9 +168,12 @@ and the event's own keys."
       (else #f))))
 
 (define (remote-poll)
-  "Deliver every answer an async send is owed: call each send's callback
-with its RESULT, then show each event a server pushed (remote-event), then
-run *wake-hooks*. The host calls this when a connection wakes it."
+  "Run what waited for this wake (a program's start), then *wake-hooks*;
+deliver every answer an async send is owed, calling each send's callback
+with its RESULT; show each event a server pushed (remote-event); and say on
+the modeline where the buffer on screen runs. The host calls this when it
+is woken."
+  (run-deferred)
   (for-each (lambda (h) (h)) *wake-hooks*)
   (for-each
     (lambda (row)
@@ -182,6 +185,7 @@ run *wake-hooks*. The host calls this when a connection wakes it."
     (%remote-poll))
   ; After the answers: a send's ok is shown before the pause it caused.
   (for-each (lambda (row) (remote-event (car row) (cadr row))) (%remote-events))
+  (status-refresh)
   #f)
 
 (define (remote-backend conn (label "scm"))
@@ -219,15 +223,61 @@ Until then this offers only the sends, and ALSO: what answers without the
 program (SBCL's REPL prompt). A menu, the REPL's prompt, completion and
 describe all ask a buffer for its backend, and asking must not start a
 program (Kevin, 2026-11-23: popping the editor's menu over a lux example
-opened its window and ran it)."
+opened its window and ran it).
+
+An async send says it is starting the program -- the echo, and the
+buffer's modeline, \"lux starting…\" -- and starts it at the next wake,
+once that is drawn: starting blocks until the program listens, seconds
+for lux (Kevin: \"there should also be a status message when starting or
+connecting to a language ... in the edit status bar\")."
   (append
     (list (cons :name label)
           (cons :eval (lambda (src) ((backend-op (start) :eval) src)))
           (cons :eval-async
                 (lambda (src k)
-                  (let* ((b (start)) (async (backend-op b :eval-async)))
-                    (if async (async src k) (k ((backend-op b :eval) src)))))))
+                  (let ((buf (%editor-active-buffer (editor-pane-id))))
+                    (hash-table-set! *starting* buf label)
+                    (status-refresh)
+                    (echo "starting " label "…")
+                    (set! *deferred*
+                          (append *deferred*
+                                  (list (lambda ()
+                                          (let ((b (guard (e (#t (unavailable-backend label e)))
+                                                     (dynamic-wind (lambda () #f) start
+                                                                   (lambda () (hash-table-delete! *starting* buf))))))
+                                            (let ((async (backend-op b :eval-async)))
+                                              (if async (async src k) (k ((backend-op b :eval) src)))))))))
+                    (%wake)))))
     also))
+
+; What waits for the next wake (on-first-send's starts), and which buffers
+; are starting their program: buf -> its label.
+(define *deferred* '())
+(define *starting* (make-hash-table equal?))
+
+(define (run-deferred)
+  (let ((now *deferred*))
+    (set! *deferred* '())
+    (for-each (lambda (f) (f)) now)))
+
+; WHERE A BUFFER RUNS, on its modeline: "lux starting…", then "lux at
+; 127.0.0.1:4321" -- the other process its sends go to, once it runs -- and
+; nothing for this image's own. Refreshed after every key, click, release
+; and wake, for the buffer on screen.
+(define (buffer-runs-in buf)
+  (cond ((hash-table-ref/default *starting* buf #f) => (lambda (label) (string-append label " starting…")))
+        ((guard (e (#t #f)) (running-image-backend buf)) => (lambda (b) (%alist-ref b :name "")))
+        (else "")))
+
+(define (status-refresh . _)
+  (guard (e (#t #f))
+    (let ((buf (%editor-active-buffer (editor-pane-id))))
+      (%buffer-set-status (editor-pane-id) buf (buffer-runs-in buf))))
+  #f)
+
+(add-handler *key-handlers* -40 :runs-in status-refresh)
+(add-handler *click-handlers* -40 :runs-in status-refresh)
+(add-handler *release-handlers* -40 :runs-in status-refresh)
 
 (define (unavailable-backend label e)
   "A backend for a Scheme that could not start: every send FAILS, saying

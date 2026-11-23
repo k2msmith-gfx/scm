@@ -1018,6 +1018,8 @@ mod lux_tests {
         assert_eq!(first.len(), 1);
         assert!(first[0].starts_with(&format!("{} {} ", dir.display(), shown.display())), "from the checkout's root, on the file: {first:?}");
         assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"lux λ > \"", "and once it runs");
+        let runs = s.eval_to_string("(buffer-runs-in (%editor-active-buffer 1))").unwrap();
+        assert!(runs.starts_with("\"lux at 127.0.0.1:"), "the modeline says where: {runs}");
         send(&mut s, "(* 6 8)");
         assert!(transcript().iter().any(|l| l == "=> 48"));
         assert_eq!(started().len(), 1, "one lux for the file");
@@ -1104,6 +1106,10 @@ mod guile_tests {
         assert_eq!(s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap(), "\"guile\"");
         s.call("(set! *guile-program* \"no-such-guile-here\")");
         s.call("(%editor-goto-line 1 1) (eval-defun)");
+        // Starting waits for the next wake, once the modeline says so.
+        assert_eq!(s.eval_to_string("(buffer-runs-in (%editor-active-buffer 1))").unwrap(), "\"guile starting…\"");
+        s.poll();
+        assert_eq!(s.eval_to_string("(buffer-runs-in (%editor-active-buffer 1))").unwrap(), "\"\"", "it failed: nothing runs");
         assert_eq!(s.eval_to_string("(%env-ref 'sq #f)").unwrap(), "#f", "nothing ran in scm's image");
         assert!(transcript().iter().any(|l| l.starts_with("error: guile:")), "{:?}", transcript());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1161,6 +1167,7 @@ mod guile_tests {
         // image; then the buffer is connected, and stays Guile.
         open(&mut s, "sent.scm");
         s.call(r##"(%editor-set-text 1 "#!guile\n(define (sq x) (* x x))") (%editor-goto-line 1 1) (eval-defun)"##);
+        s.poll();
         assert_eq!(language(&mut s), "\"guile\"", "the send found it Guile");
         assert_eq!(s.eval_to_string("(%env-ref 'sq #f)").unwrap(), "#f", "nothing ran in scm's image");
         assert!(transcript().iter().any(|l| l.starts_with("error: guile:")), "{:?}", transcript());
@@ -1444,6 +1451,7 @@ mod sbcl_tests {
         s.call(&format!("(open-path \"{}\")", file.to_string_lossy().replace('\\', "/")));
         assert_eq!(s.eval_to_string("(%buffer-language 1 (%editor-active-buffer 1))").unwrap(), "\"lisp\"");
         s.call("(set! *sbcl-program* \"no-such-sbcl-here\") (%editor-goto-line 1 0) (eval-defun)");
+        s.poll();
         assert!(transcript().iter().any(|l| l.starts_with("error: sbcl:")), "{:?}", transcript());
         // With no SBCL running, a Lisp buffer completes from its own words,
         // not scm's names.

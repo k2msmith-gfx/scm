@@ -921,6 +921,19 @@ asked for ([repl.md](repl.md), "Events").
   `:eval-async`, which start the program and hand the send to it. Running,
   it is the program's own, with completion and describe. (evcxr's already
   started on its first send.)
+- **Where a buffer runs, on its modeline** (Kevin, 2026-11-23: "there
+  should also be a status message when starting or connecting to a
+  language ... in the edit status bar"). After the language, the
+  modeline gives the other process the buffer's sends go to -- "lux at
+  127.0.0.1:4321", "scm at …", "guile at …" -- and "lux starting…" while it
+  starts (`%buffer-set-status`, set by 14-remote's `status-refresh` after
+  every key, click, release and wake). Starting blocks until the program
+  listens, seconds for lux, so an async send to a program not running
+  (`on-first-send`) says so -- the modeline and the echo -- and starts it
+  at the next wake (`%wake`), once that is drawn. **A host must run
+  `(remote-poll)` when woken** for those starts to happen; the standalone
+  does. Tests: the modeline test, Guile's "guile starting…" before the
+  wake, the lux test's "lux at 127.0.0.1:…".
 - **Detected again** (Kevin, 2026-11-22). A file's language was decided
   once, on opening it: `#!guile` typed into an empty .scm still sent to
   scm. `redetect-language!` (07-backend) asks the detectors again on save

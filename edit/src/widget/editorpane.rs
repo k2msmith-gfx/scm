@@ -89,6 +89,10 @@ struct Doc {
     /// modeline gives in brackets: "ray" makes "Scheme (ray)". Empty for
     /// none; Scheme policy writes it (the dialect detectors, 07-backend).
     dialect: String,
+    /// Where the buffer's sends run, which the modeline gives after its
+    /// language: "lux starting…", "lux at 127.0.0.1:4321". Empty for this
+    /// image's own; Scheme policy writes it (14-remote).
+    status: String,
     /// Some when this is an IMAGE buffer (view-only): draw blits it instead
     /// of the text editor, and edits are refused.
     image: Option<ImageBuf>,
@@ -272,6 +276,7 @@ impl Doc {
             auto_opened: false,
             tag: String::new(),
             dialect: String::new(),
+            status: String::new(),
             image: None,
             video: None,
             md: None,
@@ -1156,6 +1161,20 @@ pub fn set_buffer_dialect(id: u32, buf: u32, dialect: &str) -> bool {
         crate::host::mark_dirty_ui();
     }
     ok
+}
+
+/// Set where `buf`'s sends run, for its modeline (Scheme policy). Redraws
+/// only when it changes: the shell sets it after every event.
+pub fn set_buffer_status(id: u32, buf: u32, status: &str) -> bool {
+    let changed = with_doc(id, buf, |d| {
+        let changed = d.status != status;
+        d.status = status.to_string();
+        changed
+    });
+    if changed == Some(true) {
+        crate::host::mark_dirty_ui();
+    }
+    changed.is_some()
 }
 
 /// Set `buf`'s modeline tag (Scheme policy).
@@ -3676,7 +3695,8 @@ fn draw_video(
 /// A text buffer's modeline, left of the vi mode: its name (+ the dirty
 /// star, + its place in the loaded scene), the language it is read as
 /// ("Rust", or "Scheme (ray)" with its dialect; not for markdown, which is
-/// read, not edited), how the server
+/// read, not edited), where its sends run ("lux at 127.0.0.1:4321"), how
+/// the server
 /// watching it is ("rust-analyzer indexing (30%)"), how many warnings it
 /// has (E8), and where text that will not read is (in another language,
 /// where its first error is) — so a mark scrolled out of view is still found (M-g n
@@ -3692,6 +3712,9 @@ fn modeline_left(doc: &Doc, diags: &[language::Diagnostic]) -> String {
             "" => format!("{left} · {}", doc.lang.title()),
             dialect => format!("{left} · {} ({dialect})", doc.lang.title()),
         };
+    }
+    if !doc.status.is_empty() {
+        left = format!("{left} · {}", doc.status);
     }
     if let Some(mode) = watched_mode(doc) {
         left = format!("{left} · {mode}");
@@ -4892,6 +4915,10 @@ mod tests {
         assert_eq!(left(), "*scratch* · Scheme");
         set_buffer_dialect(id, active_buffer(id), "ray");
         assert_eq!(left(), "*scratch* · Scheme (ray)", "the dialect in brackets");
+        set_buffer_dialect(id, active_buffer(id), "lux");
+        assert!(set_buffer_status(id, active_buffer(id), "lux at 127.0.0.1:4321"));
+        assert_eq!(left(), "*scratch* · Scheme (lux) · lux at 127.0.0.1:4321", "then where it runs");
+        set_buffer_status(id, active_buffer(id), "");
         set_buffer_dialect(id, active_buffer(id), "");
         set_language(id, "guile");
         assert_eq!(left(), "*scratch* · Guile");
