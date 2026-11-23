@@ -911,6 +911,16 @@ asked for ([repl.md](repl.md), "Events").
   program to load, so its sends go to the lux last started while one runs,
   else to one started with nothing loaded (`lux --serve`). A buffer keeps
   the lux it found (`*lux-of-buffer*`) until that one closes.
+- **Nothing starts but a send** (Kevin, 2026-11-23: popping the editor's
+  menu over a lux example opened its window and ran it). The menu asks
+  `backend-of` whether the buffer sends anywhere; so do the REPL's prompt,
+  completion, describe and the agent -- and the backends of a Scheme
+  file's scm, a ray file's ray, a lux file's lux, Guile and SBCL started
+  their program when asked. Each now answers, while its program is not
+  running, `on-first-send` (14-remote): a backend offering only `:eval` and
+  `:eval-async`, which start the program and hand the send to it. Running,
+  it is the program's own, with completion and describe. (evcxr's already
+  started on its first send.)
 - **Detected again** (Kevin, 2026-11-22). A file's language was decided
   once, on opening it: `#!guile` typed into an empty .scm still sent to
   scm. `redetect-language!` (07-backend) asks the detectors again on save

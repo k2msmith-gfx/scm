@@ -1006,7 +1006,11 @@ mod lux_tests {
 
         s.call(&format!("(open-path \"{}\")", shown.display()));
         assert_eq!(s.eval_to_string("(%buffer-dialect 1 (%editor-active-buffer 1))").unwrap(), "\"lux\"");
-        assert!(started().is_empty(), "opening starts nothing");
+        // Nor does asking where it sends -- the editor's menu, the REPL's
+        // prompt, completion and describe all ask (Kevin, 2026-11-23: the
+        // menu opened a lux example's window).
+        s.call("(backend-of (%editor-active-buffer 1)) (repl-backend)");
+        assert!(started().is_empty(), "opening, or asking where it sends, starts nothing");
         send(&mut s, "(* 6 7)");
         assert!(transcript().iter().any(|l| l == "=> 42"), "{:?}", transcript());
         let first = started();

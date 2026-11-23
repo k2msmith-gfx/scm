@@ -37,8 +37,10 @@ starting it before then."
 ; to this image, where Guile code would run as scm's.
 (hash-table-set! *language-backends* "guile"
   (lambda ()
-    (guard (e (#t (unavailable-backend "guile" e)))
-      (remote-backend (guile-start) "guile"))))
+    (define (started)
+      (guard (e (#t (unavailable-backend "guile" e)))
+        (remote-backend (guile-start) "guile")))
+    (if (and *guile* (%remote-address *guile*)) (started) (on-first-send "guile" started))))
 
 ; Completion, the argument hint and the REPL's TAB ask the Guile that is
 ; running, and start none to ask (07-backend's running-image-backend): a

@@ -70,12 +70,15 @@ the shell's own (edit/scm/)?"
         (string-prefix? (string-append (real-file (%edit-path "scm")) "/") rp))))
 
 (define (scm-files-backend)
-  ; The separate scm, started on first use; a send FAILS if it cannot start.
-  (guard (e (#t (unavailable-backend "scm" e)))
-    (unless (and *scm-files* (%remote-address *scm-files*))
-      (set! *scm-files* (%remote-start *remote-program* 0 '()))
-      (echo "scm running at " (%remote-address *scm-files*) " for the Scheme files"))
-    (remote-backend *scm-files* "scm")))
+  ; The separate scm, started on the first send (14-remote's on-first-send);
+  ; a send FAILS if it cannot start.
+  (define (started)
+    (guard (e (#t (unavailable-backend "scm" e)))
+      (unless (and *scm-files* (%remote-address *scm-files*))
+        (set! *scm-files* (%remote-start *remote-program* 0 '()))
+        (echo "scm running at " (%remote-address *scm-files*) " for the Scheme files"))
+      (remote-backend *scm-files* "scm")))
+  (if (and *scm-files* (%remote-address *scm-files*)) (started) (on-first-send "scm" started)))
 
 ; A RAY file (21-ray: the modeline says "Scheme (ray)") runs in ray, whose
 ; image has the verbs it calls — `ray --serve`, the protocol scm's speaks
@@ -95,16 +98,19 @@ the shell's own (edit/scm/)?"
         (if (file-exists? built) built "ray"))))
 
 (define (ray-file-backend path)
-  ; The ray for PATH's checkout (or directory), started on first use; a send
-  ; FAILS if it cannot start, saying why.
+  ; The ray for PATH's checkout (or directory), started on the first send; a
+  ; send FAILS if it cannot start, saying why.
   (define dir (ray-dir path))
-  (guard (e (#t (unavailable-backend "ray" e)))
-    (let ((conn (hash-table-ref/default *ray-servers* dir #f)))
-      (unless (and conn (%remote-address conn))
-        (set! conn (%remote-start (ray-program dir) 0 '("--serve" "{addr}") dir))
-        (hash-table-set! *ray-servers* dir conn)
-        (echo "ray running at " (%remote-address conn) " for " dir))
-      (ray-sends-from path (remote-backend conn "ray")))))
+  (define (running) (let ((c (hash-table-ref/default *ray-servers* dir #f))) (and c (%remote-address c) c)))
+  (define (started)
+    (guard (e (#t (unavailable-backend "ray" e)))
+      (let ((conn (running)))
+        (unless conn
+          (set! conn (%remote-start (ray-program dir) 0 '("--serve" "{addr}") dir))
+          (hash-table-set! *ray-servers* dir conn)
+          (echo "ray running at " (%remote-address conn) " for " dir))
+        (ray-sends-from path (remote-backend conn "ray")))))
+  (if (running) (started) (on-first-send "ray" started)))
 
 (define (ray-sends-from path backend)
   ; BACKEND with each send prefixed by (%including PATH), on the send's own
@@ -173,8 +179,13 @@ Every ray file of the same checkout shares it, so they all start over."
     (if (equal? buf (%editor-active-buffer eid)) (%text (%editor-text eid)) "")))
 
 (define (lux-file-backend buf path)
-  ; BUF's lux, started on first use, or again once its window has closed;
-  ; a send FAILS if it cannot start, saying why.
+  ; BUF's lux, started on its first send, or again once its window has
+  ; closed; a send FAILS if it cannot start, saying why.
+  (if (lux-running (hash-table-ref/default *lux-of-buffer* buf #f))
+    (lux-started buf path)
+    (on-first-send "lux" (lambda () (lux-started buf path)))))
+
+(define (lux-started buf path)
   (guard (e (#t (unavailable-backend "lux" e)))
     (let ((conn (or (lux-running (hash-table-ref/default *lux-of-buffer* buf #f))
                     (and (not (lux-text? path (buffer-text buf))) (lux-running *lux-last*))

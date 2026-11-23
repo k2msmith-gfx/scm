@@ -212,6 +212,20 @@ need a value now."
         (cons :signature (lambda (name) (let ((d (describe name))) (and d (%alist-ref d :signature #f)))))
         (cons :definition-sites (lambda (name) (definition-sites name)))))
 
+(define (on-first-send label start)
+  "A backend for a program that is not running yet: START, a thunk that
+starts it and answers its backend, runs on the first SEND, and not before.
+Until then this offers only the sends. A menu, the REPL's prompt,
+completion and describe all ask a buffer for its backend, and asking must
+not start a program (Kevin, 2026-11-23: popping the editor's menu over a
+lux example opened its window and ran it)."
+  (list (cons :name label)
+        (cons :eval (lambda (src) ((backend-op (start) :eval) src)))
+        (cons :eval-async
+              (lambda (src k)
+                (let* ((b (start)) (async (backend-op b :eval-async)))
+                  (if async (async src k) (k ((backend-op b :eval) src))))))))
+
 (define (unavailable-backend label e)
   "A backend for a Scheme that could not start: every send FAILS, saying
 why, rather than falling through to another image, where the code would

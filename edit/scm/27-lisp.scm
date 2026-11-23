@@ -195,8 +195,10 @@ error, and a REPL line whole when its brackets close."
 ; this image, where Common Lisp would be read as Scheme.
 (hash-table-set! *language-backends* "lisp"
   (lambda ()
-    (guard (e (#t (unavailable-backend "sbcl" e)))
-      (lisp-backend (sbcl-start)))))
+    (define (started)
+      (guard (e (#t (unavailable-backend "sbcl" e)))
+        (lisp-backend (sbcl-start))))
+    (if (sbcl-running?) (started) (on-first-send "sbcl" started))))
 
 ; Completion, the argument hint and the REPL's TAB ask the SBCL that is
 ; running, and start none to ask. With none running a Lisp buffer offers
