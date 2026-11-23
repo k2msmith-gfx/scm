@@ -11,7 +11,7 @@
 //! way out would be a divergence in practice — so the tests below put every
 //! outcome through the wire and back.
 
-use scm::{Framing, Op, Outcome, Request, Response, Session};
+use scm::{Event, Framing, Op, Outcome, Request, Response, Session, Val};
 
 fn ask(s: &mut Session, op: Op) -> Outcome {
     s.handle(Request { id: 7, op }).outcome
@@ -697,6 +697,8 @@ fn a_request_round_trips_through_the_wire() {
         Request { id: 7, op: Op::Parse { code: "(+ 1".into() } },
         Request { id: 9, op: Op::Stream { on: true } },
         Request { id: 10, op: Op::Stream { on: false } },
+        Request { id: 11, op: Op::Events { on: true } },
+        Request { id: 12, op: Op::Events { on: false } },
         // The payload that would break a naive formatter: a quote, a
         // backslash, a newline and unbalanced parens inside a string.
         Request {
@@ -993,4 +995,65 @@ fn asking_to_stream_is_opt_in_and_unknown_to_an_older_server() {
         Response::parse(&wire).unwrap().outcome,
         Outcome::Streamed("mid".into())
     );
+}
+
+// ---- events (S40) --------------------------------------------------------
+
+#[test]
+fn asking_for_events_is_a_key_on_ping_so_any_server_answers_it() {
+    // A server that has no events -- an older scm, edit's SBCL and Guile
+    // servers -- ignores the unknown key and answers the ping. An op of its
+    // own would be refused as unknown.
+    assert_eq!(Request::parse("(:op ping :id 3 :events #t)").unwrap(), Request { id: 3, op: Op::Events { on: true } });
+    assert_eq!(Request::parse("(:op ping :id 3 :events #f)").unwrap(), Request { id: 3, op: Op::Events { on: false } });
+    assert_eq!(Request::parse("(:op ping :id 3)").unwrap(), Request { id: 3, op: Op::Ping });
+    assert_eq!(Request { id: 3, op: Op::Events { on: true } }.to_wire(), "(:op ping :id 3 :events #t)");
+    // The session keeps no state for it and answers what a ping answers.
+    let mut s = Session::new().unwrap();
+    assert!(matches!(ask(&mut s, Op::Events { on: true }), Outcome::Pong { .. }));
+}
+
+#[test]
+fn an_event_round_trips_through_the_wire() {
+    let events = [
+        Event::new("resumed", vec![]),
+        Event::new(
+            "paused",
+            vec![
+                ("message", Val::Str("view: car: not a pair: \"5\"\n(a)(b".into())),
+                ("backtrace", Val::List(vec![Val::Str("(car x)  at v.scm:3:5".into()), Val::Str("(view m)".into())])),
+            ],
+        ),
+        Event::new(
+            "odd name|x",
+            vec![
+                ("n", Val::Int(-7)),
+                ("x", Val::Float(0.25)),
+                ("ok", Val::Bool(false)),
+                ("kind", Val::Sym("update".into())),
+                ("at", Val::Keyword("at".into())),
+                ("none", Val::Null),
+                ("pair", Val::Pair(Box::new(Val::Keyword("a".into())), Box::new(Val::Int(1)))),
+            ],
+        ),
+    ];
+    for ev in events {
+        let wire = ev.to_wire();
+        assert!(matches!(scm::parse_status(&wire), scm::ParseStatus::Complete), "not a single datum: {wire}");
+        assert_eq!(Event::parse(&wire).unwrap(), ev, "{wire}");
+    }
+    assert_eq!(Event::new("resumed", vec![]).to_wire(), "(:event resumed)");
+}
+
+#[test]
+fn an_event_and_an_answer_cannot_be_taken_for_each_other() {
+    // A client tries `Event::parse` on each datum first: an answer is not an
+    // event, and an event -- no `:id`, no `:status` -- is not an answer.
+    let answer = Response { id: 1, outcome: Outcome::Value { value: "42".into(), output: String::new() } }.to_wire();
+    assert!(Event::parse(&answer).is_err());
+    let event = Event::new("paused", vec![("message", Val::Str("x".into()))]).to_wire();
+    assert!(Response::parse(&event).is_err(), "{event}");
+    // Anything without a written form goes as a string saying what it was.
+    let ev = Event::new("odd", vec![("v", Val::Unspecified)]);
+    assert_eq!(Event::parse(&ev.to_wire()).unwrap().get("v"), Some(&Val::Str("#<unspecified>".into())));
 }

@@ -106,8 +106,8 @@ pub mod vm;
 pub mod writer;
 
 pub use embed::{Args, Description, Error as EmbedError, Host, Interp, Proc, Rooted, Val};
-pub use repl::{Framing, Op, Outcome, Request, Response, Session};
-pub use serve::Server;
+pub use repl::{Event, Framing, Op, Outcome, Request, Response, Session};
+pub use serve::{EventSender, Server};
 pub use heap::{Engine, HostObject, Interner, Obj, OutputCallback};
 pub use reader::{ReadError, Reader, ReaderOptions, Span};
 pub use value::{KwId, ObjRef, SymId, Value};

@@ -146,6 +146,11 @@ impl Gen {
         }
         let _ = writeln!(self.out, "(define result (list {}))", items.join(" "));
         self.out.push_str("result\n");
+        // S41's shapes call `(srfi 1)`'s fold and for-each; the import
+        // goes first, and only where one was generated.
+        if self.out.contains("s1:") {
+            self.out.insert_str(0, "(import (rename (srfi 1) (fold s1:fold) (for-each s1:for-each)))\n");
+        }
         std::mem::take(&mut self.out)
     }
 
@@ -548,10 +553,12 @@ impl Gen {
         // the copy-at-import check and calls through an import; 50-56 for
         // S14's flat frames, loops and inline arithmetic; 57 for S30's
         // fused arithmetic; 58 for S34's fused list, equivalence and
-        // indexing primitives; and the `_` arm (49) is a real case
+        // indexing primitives; 59-63 for S41's native `map`, `for-each`,
+        // `fold`, `filter` and `reduce`, called with lambdas, over several
+        // lists, raising and escaping; and the `_` arm (49) is a real case
         // (`raise-continuable`) rather than a filler -- leaving the bound
         // alone silently drops whatever sits last.
-        match self.rng.below(59) {
+        match self.rng.below(64) {
             0..=3 => {
                 let op = *self.rng.pick(&["+", "-", "*"]);
                 let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d));
@@ -677,7 +684,87 @@ impl Gen {
             // primitive's error, caught), and `eqv?` on two bignums (equal by
             // value, which only the primitive knows).
             58 => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(let* ((p {a}) (q {b}) (l (list p q 3)) (v (vector p 7)) (s \"ab\") (big (* p 4611686018427387904))) (+ (car l) (car (cdr l)) (if (null? (cdr (cdr (cdr l)))) 1 2) (if (pair? l) 3 4) (if (eq? (car l) p) 5 6) (if (eqv? (* q 1) q) 7 8) (if (not (null? l)) 9 10) (if (zero? (- p p)) 11 12) (if (char=? (string-ref s 0) #\\a) 13 14) (char->integer (string-ref s 1)) (vector-ref v 1) (car (cons q l)) (cdr (cons q p)) (if (eqv? (* big 2) (+ big big)) 15 16) (guard (e (#t 17)) (vector-ref v (modulo (abs q) 3))) (guard (e (#t 18)) (car (if (= p 0) '() l)))))") }
+            59..=63 => self.iteration(d),
             _ => { let (a, b) = (self.expr(Ty::Int, d), self.expr(Ty::Int, d)); format!("(with-exception-handler (lambda (e) {a}) (lambda () (+ {b} (raise-continuable 'c))))") }
+        }
+    }
+
+    /// S41: the native iterations, as an integer. Each shape makes the
+    /// ORDER of the calls show in the value -- a non-commutative fold, a
+    /// for-each folding into a variable -- and some raise from inside the
+    /// procedure, escape from it, or hand map an improper list, so the
+    /// engines must agree on where an iteration stops and what it says.
+    /// `s1:fold` and `s1:for-each` are `(srfi 1)`'s, imported by `program`
+    /// when a shape used one.
+    fn iteration(&mut self, d: u32) -> String {
+        // A lambda of `params` integers whose body sees them all: its
+        // parameter list, its body, and the last parameter's fresh name.
+        let lambda = |me: &mut Self, params: &[&str]| -> (String, String, String) {
+            let names: Vec<String> = params.iter().map(|p| me.fresh(p)).collect();
+            for n in &names {
+                me.env.push((n.clone(), Ty::Int));
+            }
+            let body = me.expr(Ty::Int, d);
+            for _ in &names {
+                me.env.pop();
+            }
+            let last = names.last().cloned().unwrap_or_default();
+            (names.join(" "), body, last)
+        };
+        match self.rng.below(7) {
+            0 => {
+                let (ps, body, _) = lambda(self, &["x", "acc"]);
+                let (init, l) = (self.expr(Ty::Int, d), self.expr(Ty::List, d));
+                format!("(modulo (s1:fold (lambda ({ps}) (- (* 3 {body}) 1)) {init} {l}) 100003)")
+            }
+            1 => {
+                let (ps, body, _) = lambda(self, &["x", "y", "acc"]);
+                let (init, a, b) = (self.expr(Ty::Int, d), self.expr(Ty::List, d), self.expr(Ty::List, d));
+                format!("(modulo (s1:fold (lambda ({ps}) {body}) {init} {a} {b}) 100003)")
+            }
+            2 => {
+                let (ps, body, _) = lambda(self, &["x", "y"]);
+                let (a, b) = (self.expr(Ty::List, d), self.expr(Ty::List, d));
+                format!("(apply + (map (lambda ({ps}) {body}) {a} {b}))")
+            }
+            3 => {
+                let (ps, body, _) = lambda(self, &["x"]);
+                let l = self.expr(Ty::List, d);
+                let each = *self.rng.pick(&["for-each", "s1:for-each"]);
+                format!("(let ((n 0)) ({each} (lambda ({ps}) (set! n (modulo (+ (* n 7) {body}) 100003))) {l}) n)")
+            }
+            4 => {
+                let (ps, body, _) = lambda(self, &["acc", "x"]);
+                let acc = ps.split(' ').next().unwrap_or_default().to_string();
+                let (fs, test) = {
+                    let x = self.fresh("x");
+                    self.env.push((x.clone(), Ty::Int));
+                    let t = self.expr(Ty::Bool, d);
+                    self.env.pop();
+                    (x, t)
+                };
+                let (init, l) = (self.expr(Ty::Int, d), self.expr(Ty::List, d));
+                format!("(modulo (reduce (lambda ({ps}) (- {body} (* 2 {acc}))) {init} (filter (lambda ({fs}) {test}) {l})) 100003)")
+            }
+            5 => {
+                // Raising from inside the procedure, or an improper list
+                // map itself refuses; compared by what the guard saw.
+                let (ps, body, _) = lambda(self, &["x"]);
+                let (k, l, a) = (self.expr(Ty::Int, d), self.expr(Ty::List, d), self.expr(Ty::Int, d));
+                let call = match self.rng.below(4) {
+                    0 => format!("(apply + (map (lambda ({ps}) (if (> {body} {k}) (raise 'big) {body})) {l}))"),
+                    1 => format!("(apply + (map (lambda ({ps}) (if (> {body} {k}) (error \"too big\" {body}) {body})) {l}))"),
+                    2 => format!("(apply + (map (lambda ({ps}) {body}) (append {l} {a})))"),
+                    _ => format!("(s1:fold (lambda ({ps} acc) (+ acc {body})) 0 (cons {a} {a}))"),
+                };
+                format!("(guard (e ((symbol? e) -1) ((error-object? e) (string-length (error-object-message e)))) {call})")
+            }
+            _ => {
+                // An escape from the middle, through a dynamic-wind.
+                let (ps, body, acc) = lambda(self, &["x", "acc"]);
+                let (k, l) = (self.expr(Ty::Int, d), self.expr(Ty::List, d));
+                format!("(call/cc (lambda (k) (dynamic-wind (lambda () #f) (lambda () (s1:fold (lambda ({ps}) (if (> {acc} {k}) (k {acc}) (modulo (+ {acc} {body}) 100003))) 0 {l})) (lambda () #f))))")
+            }
         }
     }
 

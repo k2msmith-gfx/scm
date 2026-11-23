@@ -88,3 +88,42 @@ fn the_generator_exercises_the_library_system() {
     assert!(uses >= 15, "only {uses} of {with_library} library programs used an import");
     assert!(modifiers.len() >= 3, "import modifiers barely covered: {modifiers:?}");
 }
+
+/// S41: the native iterations are generated, and called the ways that
+/// matter -- a fold over one list and over two, a map over two, a
+/// for-each whose order shows, filter and reduce, a raise inside the
+/// procedure, an improper list, and an escape through a dynamic-wind --
+/// and the programs that use them mostly run to a value, so the engines
+/// are compared on what the iteration computed and not only on errors.
+#[test]
+fn the_generator_exercises_the_native_iterations() {
+    // Each marker is one of `iteration`'s own; the generator's older
+    // one-list `map` is not counted.
+    let shapes = ["(s1:fold (lambda (", "(apply + (map (lambda (", "for-each (lambda (", "(filter (lambda (",
+                  "(reduce (lambda (", "(raise 'big)", "(error \"too big\"", " acc) (+ acc ", "(call/cc (lambda (k) (dynamic-wind"];
+    let mut seen = [0u32; 9];
+    let (mut using, mut valued) = (0, 0);
+    for index in 0..200u64 {
+        let mut g = scm_conform::fuzz::Gen::new(41u64.wrapping_mul(1_000_003).wrapping_add(index));
+        let p = g.program();
+        let body = p.split("(define result").nth(1).unwrap_or("");
+        let mut used = false;
+        for (i, s) in shapes.iter().enumerate() {
+            if body.contains(s) {
+                seen[i] += 1;
+                used = true;
+            }
+        }
+        if used {
+            using += 1;
+            if matches!(scm_conform::fuzz::run(&p, scm::Tier::T1, false, None), Verdict::Value { .. }) {
+                valued += 1;
+            }
+        }
+    }
+    for (s, n) in shapes.iter().zip(seen) {
+        assert!(n >= 5, "`{s}` in only {n} of 200 programs: {seen:?}");
+    }
+    assert!(using >= 60, "only {using} of 200 programs used a native iteration");
+    assert!(valued * 10 >= using * 8, "only {valued} of {using} iteration programs produced a value");
+}

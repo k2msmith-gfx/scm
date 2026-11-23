@@ -22,7 +22,7 @@ not to reopen.
 - **`docs/<stage>.md`** — one record per stage. `conformance.md`,
   `fuzz.md`, `srfi.md`, `libraries.md`, `repl.md`, `s11-leaf.md`,
   `s12-bytecode.md`, `s13-general-tier.md`, `numeric-tower.md`,
-  `linalg.md`, `noise.md`, `vs-steel.md`, `vs-others.md`, `leaf-survey.md`,
+  `linalg.md`, `s41-native-map.md`, `noise.md`, `vs-steel.md`, `vs-others.md`, `leaf-survey.md`,
   `scene-language-survey.md`.
 - **`docs/scene-language-survey.md`** — what ray's 219 scene files actually
   require of the language, measured rather than guessed. **Scope work from

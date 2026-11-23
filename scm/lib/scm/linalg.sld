@@ -155,7 +155,10 @@
         (vector (- dx (* k nx)) (- dy (* k ny)) (- dz (* k nz)))))
 
     ;; ── vec3: the readable layer ─────────────────────────────────────
-    (define (v3 x y z) (vector (%f x) (%f y) (%f z)))
+    ;; Native (S39, src/prim/linalg.rs): each the Scheme it replaced,
+    ;; operation for operation -- bit-identical, exact components kept
+    ;; exact -- and a wrong shape refused naming the procedure.
+    (define v3 %v3)   ; native: src/prim/linalg.rs
 
     (define (v3? v)
       (and (vector? v) (= 3 (vector-length v))
@@ -169,79 +172,34 @@
 
     ;; Variadic, because summing offsets is the common case and
     ;; `(v3+ a b c)` beats nesting.
-    (define (v3+ a . rest)
-      (let loop ((acc a) (vs rest))
-        (if (null? vs)
-            acc
-            (loop (v3-add* (v3-x acc) (v3-y acc) (v3-z acc)
-                           (v3-x (car vs)) (v3-y (car vs)) (v3-z (car vs)))
-                  (cdr vs)))))
+    (define v3+ %v3+)   ; native: src/prim/linalg.rs
 
     ;; One argument negates, as `-` does on numbers.
-    (define (v3- a . rest)
-      (if (null? rest)
-          (v3-negate a)
-          (let loop ((acc a) (vs rest))
-            (if (null? vs)
-                acc
-                (loop (v3-sub* (v3-x acc) (v3-y acc) (v3-z acc)
-                               (v3-x (car vs)) (v3-y (car vs)) (v3-z (car vs)))
-                      (cdr vs))))))
+    (define v3- %v3-)   ; native: src/prim/linalg.rs
 
     ;; Componentwise, which is what a colour or a per-axis scale wants.
-    (define (v3* a . rest)
-      (let loop ((acc a) (vs rest))
-        (if (null? vs)
-            acc
-            (let ((b (car vs)))
-              (loop (vector (* (v3-x acc) (v3-x b))
-                            (* (v3-y acc) (v3-y b))
-                            (* (v3-z acc) (v3-z b)))
-                    (cdr vs))))))
+    (define v3* %v3*)   ; native: src/prim/linalg.rs
 
-    (define (v3/ a b)
-      (vector (/ (v3-x a) (v3-x b)) (/ (v3-y a) (v3-y b)) (/ (v3-z a) (v3-z b))))
-
-    (define (v3-negate a) (vector (- (v3-x a)) (- (v3-y a)) (- (v3-z a))))
-
-    (define (v3-scale a k) (v3-scale* (v3-x a) (v3-y a) (v3-z a) (%f k)))
-
-    (define (v3-dot a b)
-      (v3-dot* (v3-x a) (v3-y a) (v3-z a) (v3-x b) (v3-y b) (v3-z b)))
-
-    (define (v3-cross a b)
-      (v3-cross* (v3-x a) (v3-y a) (v3-z a) (v3-x b) (v3-y b) (v3-z b)))
-
-    (define (v3-length a) (v3-length* (v3-x a) (v3-y a) (v3-z a)))
-
-    (define (v3-length-squared a)
-      (v3-length-squared* (v3-x a) (v3-y a) (v3-z a)))
-
-    (define (v3-distance a b)
-      (v3-distance* (v3-x a) (v3-y a) (v3-z a) (v3-x b) (v3-y b) (v3-z b)))
-
-    (define (v3-distance-squared a b)
-      (v3-distance-squared* (v3-x a) (v3-y a) (v3-z a) (v3-x b) (v3-y b) (v3-z b)))
+    (define v3/ %v3/)   ; native: src/prim/linalg.rs
+    (define v3-negate %v3-negate)   ; native: src/prim/linalg.rs
+    (define v3-scale %v3-scale)   ; native: src/prim/linalg.rs
+    (define v3-dot %v3-dot)   ; native: src/prim/linalg.rs
+    (define v3-cross %v3-cross)   ; native: src/prim/linalg.rs
+    (define v3-length %v3-length)   ; native: src/prim/linalg.rs
+    (define v3-length-squared %v3-length-squared)   ; native: src/prim/linalg.rs
+    (define v3-distance %v3-distance)   ; native: src/prim/linalg.rs
+    (define v3-distance-squared %v3-distance-squared)   ; native: src/prim/linalg.rs
 
     ;; Raises on a zero vector: silently returning zero would make a
     ;; mis-set direction look like a legal one.
-    (define (v3-normalize a)
-      (let ((n (v3-length a)))
-        (if (= n 0.0)
-            (error "v3-normalize: the zero vector has no direction")
-            (v3-scale a (/ 1.0 n)))))
+    (define v3-normalize %v3-normalize)   ; native: src/prim/linalg.rs
 
     (define (v3-normalize-or a fallback)
       (if (= 0.0 (v3-length a)) fallback (v3-normalize a)))
 
-    (define (v3-lerp a b t)
-      (v3-lerp* (v3-x a) (v3-y a) (v3-z a) (v3-x b) (v3-y b) (v3-z b) (%f t)))
-
-    (define (v3-min a b)
-      (vector (min (v3-x a) (v3-x b)) (min (v3-y a) (v3-y b)) (min (v3-z a) (v3-z b))))
-
-    (define (v3-max a b)
-      (vector (max (v3-x a) (v3-x b)) (max (v3-y a) (v3-y b)) (max (v3-z a) (v3-z b))))
+    (define v3-lerp %v3-lerp)   ; native: src/prim/linalg.rs
+    (define v3-min %v3-min)   ; native: src/prim/linalg.rs
+    (define v3-max %v3-max)   ; native: src/prim/linalg.rs
 
     (define (v3-abs a)
       (vector (abs (v3-x a)) (abs (v3-y a)) (abs (v3-z a))))

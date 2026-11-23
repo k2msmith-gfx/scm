@@ -861,6 +861,30 @@ window: SLIME's model.
 - **Measured** (`a_slow_send_does_not_wait`): the send returned in 1 ms
   while the form ran 150 ms, and describe answered in 33 µs during it.
 
+**Events from the server (2026-11-22, scm's S40).** lux pauses on an
+error in a frame, and that error comes after the send that caused it was
+answered `ok`: the trial against cl-wgpu found it reached only lux's
+terminal. scm's protocol now lets a connection ask for messages nobody
+asked for ([repl.md](repl.md), "Events").
+- **Asking.** `remote-connect` calls `(%remote-subscribe id)`, which sends
+  `(:op ping :id N :events #t)` without waiting. A key on `ping`, so
+  edit's SBCL and Guile servers, and any scm before S40, answer it as a
+  ping. `remote-start` does not ask: the Schemes it starts push nothing.
+- **Reading.** The reader thread tries `scm::Event::parse` on a datum
+  starting `(:event` before reading it as an answer, and queues it as text
+  (a `Val` cannot cross threads); an event lets no queued request go, since
+  it answers nothing. `(%remote-events)` drains them as `((conn alist) …)`.
+- **Showing** (`14-remote.scm`, `remote-event`). `remote-poll` delivers the
+  answers first, then the events, so a send's `=>` shows before the pause it
+  caused. `paused` is shown as a failed send: `paused: MESSAGE` in the
+  transcript and the echo, and the backtrace to the error pane
+  (`note-send-error!`, labelled "the program at ADDR", `C-h e`); `resumed`
+  is a dim transcript line. Unknown events are ignored.
+- **Checked** (`a_servers_event_shows_as_a_failed_send`): a real
+  `scm::Server` retaining `paused`, as lux does while paused; the editor
+  connects, the transcript and the error pane show it with its calls, a
+  send still answers, and a pushed `resumed` arrives.
+
 **The file tree (2026-11-13).** Kevin asked for one in `edit`, rooted at the
 git checkout, with what git ignores hidden and a menu to expand, collapse
 and collapse all.

@@ -51,7 +51,9 @@
       (let ((out (open-output-string)))
         (define (emit . parts) (for-each (lambda (p) (display p out)) parts))
         (emit "# " message "\n\n")
-        (emit "From " (md-code (string-append label ": " (send-shown src))) ". ")
+        ; SRC is "" for an error no send raised -- a frame's, from a
+        ; server's event (14-remote) -- and LABEL says where it was.
+        (emit "From " (md-code (if (string=? src "") label (string-append label ": " (send-shown src)))) ". ")
         (emit "Innermost call first; each with the locals it could see. "
               ; SBCL's send is still in its break (27-lisp) — at the REPL,
               ; not here — and scm's has stopped: the page is the frames as

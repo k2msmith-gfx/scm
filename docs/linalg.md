@@ -158,10 +158,39 @@ order is column-major, glam's, so it is a straight copy.
 `mat4-determinant`, `mat4-decompose`, `mat4->quat`, the camera matrices,
 `quat-slerp`. Each can follow the same way when it is.
 
-## Next: the vec3 layer native (proposed, 2026-11-22; NOT started)
+## The vec3 layer native (S39, built 2026-11-22)
 
-To be stage **S39** in plan §9 when it starts. Written as a handoff: the
-measurements, the design and the one open decision are all here.
+**As built.** Sixteen procedures in `scm/src/prim/linalg.rs`, bound by
+the library as M7's are: `v3`, `v3+`, `v3-`, `v3*`, `v3/`, `v3-negate`,
+`v3-scale`, `v3-dot`, `v3-cross`, `v3-length`, `v3-length-squared`,
+`v3-distance`, `v3-distance-squared`, `v3-normalize`, `v3-lerp`,
+`v3-min`, `v3-max`. The open decision below was taken as recommended: a
+flonum fast path, and otherwise the generic `+ - * / sqrt min max` the
+Scheme called, in its order and grouping -- `(+ a b c)` as one three-way
+fold, not two additions -- so results are bit-identical and exact vectors
+stay exact (`(v3+ [0 1 0] [1 0 0])` is still `#(1 1 0)`, `(v3-length
+#(3 4 0))` the exact 5). `v3-normalize`'s zero vector raises through the
+same `error` with the same message. `v3-normalize-or`, `v3-clamp` and the
+rest stay Scheme and call the native ones. `tests/srfi/linalg-native.scm`
+checks each against the Scheme original on reals, exact integers (with
+2^70 among them) and a mix, on both tiers; its comparison treats NaN as
+the same as NaN, which `equal?` does not and `v3/` of 0 by 0 needs.
+
+Measured on an Apple M4 Pro under heavy load (another render running), so
+the ratios matter more than the times: µs a call, less the loop's own
+0.046, the Scheme original against the native, in the same run.
+
+| | Scheme | native | × |
+|---|---|---|---|
+| `v3` | 0.15 | 0.026 | 5.7 |
+| `v3+`, two | 0.46 | 0.050 | 9.2 |
+| `v3-scale` | 0.23 | 0.040 | 5.7 |
+| `v3-dot` | 0.28 | 0.024 | 11.8 |
+| `v3-length` | 0.21 | 0.012 | 18.5 |
+| `v3-normalize` | 0.54-0.69 | 0.046 | 12-15 |
+
+The design as it was handed over follows.
+
 
 **Why.** lux profiled its flock (lux `docs/plan.md`, "The flock,
 profiled"; the scripts are lux's `tools/flock-profile.scm` and
@@ -227,7 +256,9 @@ inside `nix develop`, and the flock profiled again.
 **After it, not part of it**: native `map` and `fold` (the prelude's and
 `(srfi 1)`'s, both Scheme, ~0.6 µs an element). A primitive that calls a
 Scheme procedure back is a VM matter, not a `prim/linalg.rs` one, so it
-is its own stage.
+is its own stage. **Done as S41** ([s41-native-map.md](s41-native-map.md)):
+with both, lux's flock tick went 4.30 -> 2.33 (S39) -> 2.08 ms (S41) and
+its steering 3.17 -> 0.98 ms, A/B interleaved on a loaded M4 Pro.
 
 ## Deliberate choices worth knowing
 

@@ -24,7 +24,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::embed::{Description, Error, Interp};
+use crate::embed::{Description, Error, Interp, Val};
 
 /// What a client asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +59,44 @@ pub enum Op {
     /// two clients of one session can differ -- which is why `handle`
     /// answers this with a pong and `scm --serve` acts on it.
     Stream { on: bool },
+    /// Ask for the host's **events** on this connection: messages nobody
+    /// asked for, `(:event paused :message "…")`, pushed when something
+    /// happens between requests (S40). lux pauses on an error in a frame,
+    /// after the send that caused it was answered `ok`; this is how the
+    /// editor hears.
+    ///
+    /// On the wire it is a **key on `ping`**, `(:op ping :id 1 :events
+    /// #t)`, not an op of its own, and that is the point: an unknown key is
+    /// ignored, so a server that has no events -- an older scm, edit's SBCL
+    /// and Guile servers -- answers it as the ping it is, where an unknown
+    /// op would be refused. An editor may ask every server it connects to.
+    ///
+    /// Opt-in and per connection for S25's reason: `scm-mode.el` and every
+    /// client written before this would read an unsolicited datum as an
+    /// answer. Like `Stream`, the session keeps no state for it and
+    /// `handle` answers a pong; [`crate::Server`] acts on it.
+    Events { on: bool },
+}
+
+/// Something the host says without being asked (S40), sent only to the
+/// connections that asked with [`Op::Events`]:
+///
+/// ```text
+/// (:event paused :message "view: car: not a pair: 5" :backtrace ("(car x)  at v.scm:3:5"))
+/// (:event resumed)
+/// ```
+///
+/// It has no `:id` and no `:status`, so no client can take it for an
+/// answer: a client tells the two apart by the leading `:event`. The names
+/// and fields are the host's -- scm defines none -- and a field's value is
+/// any [`Val`] the wire can write: strings, numbers, booleans, symbols,
+/// keywords, and lists of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Event {
+    /// What happened: `paused`, `resumed`. Written as a symbol.
+    pub name: String,
+    /// Its fields in order, each a keyword (without its colon) and a value.
+    pub fields: Vec<(String, Val)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,7 +185,7 @@ impl Session {
             // whoever owns the output channel, which for `--serve` is the
             // connection. Acknowledged rather than refused, so an embedded
             // host that forwards every request sees nothing surprising.
-            Op::Stream { .. } => Outcome::Pong {
+            Op::Stream { .. } | Op::Events { .. } => Outcome::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             Op::Ping => Outcome::Pong {
@@ -222,6 +260,7 @@ impl Request {
         let mut prefix: Option<String> = None;
         let mut name: Option<String> = None;
         let mut on = false;
+        let mut events: Option<bool> = None;
         let mut i = 0;
         while i < items.len() {
             let crate::Value::Keyword(k) = items[i] else {
@@ -242,6 +281,7 @@ impl Request {
                 "code" => code = Some(text_of(&e, val).ok_or(":code must be a string")?),
                 "prefix" => prefix = Some(text_of(&e, val).unwrap_or_default()),
                 "on" => on = matches!(val, crate::Value::Bool(true)),
+                "events" => events = Some(matches!(val, crate::Value::Bool(true))),
                 "name" => name = Some(text_of(&e, val).ok_or(":name must be a symbol or string")?),
                 // Unknown keys are ignored rather than refused, so a newer
                 // client talking to an older server still works.
@@ -264,7 +304,12 @@ impl Request {
                 code: code.ok_or("parse needs :code")?,
             },
             Some("interrupt") => Op::Interrupt,
-            Some("ping") => Op::Ping,
+            // S40: `:events` rides on the ping, so a server without events
+            // answers it as a ping (see `Op::Events`).
+            Some("ping") => match events {
+                Some(on) => Op::Events { on },
+                None => Op::Ping,
+            },
             Some("stream") => Op::Stream { on },
             Some(other) => return Err(format!("unknown op `{other}`")),
             None => return Err("a request needs :op".into()),
@@ -307,6 +352,11 @@ impl Request {
             Op::Ping => out.push_str(&format!("(:op ping :id {}", self.id)),
             Op::Stream { on } => out.push_str(&format!(
                 "(:op stream :id {} :on {}",
+                self.id,
+                if *on { "#t" } else { "#f" }
+            )),
+            Op::Events { on } => out.push_str(&format!(
+                "(:op ping :id {} :events {}",
                 self.id,
                 if *on { "#t" } else { "#f" }
             )),
@@ -509,6 +559,165 @@ impl Response {
             None => return Err("a response needs :status".into()),
         };
         Ok(Response { id, outcome })
+    }
+}
+
+impl Event {
+    /// An event called NAME with FIELDS, given as `(keyword, value)`.
+    pub fn new(name: &str, fields: Vec<(&str, Val)>) -> Event {
+        Event {
+            name: name.to_string(),
+            fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        }
+    }
+
+    /// The field KEY's value, if it has one.
+    pub fn get(&self, key: &str) -> Option<&Val> {
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// The event as one datum, which is also its own frame.
+    pub fn to_wire(&self) -> String {
+        let mut out = String::from("(:event ");
+        push_symbol(&mut out, &self.name);
+        for (k, v) in &self.fields {
+            out.push_str(" :");
+            out.push_str(k);
+            out.push(' ');
+            push_val(&mut out, v);
+        }
+        out.push(')');
+        out
+    }
+
+    /// Read an event back, the inverse of [`Event::to_wire`]; an error for
+    /// anything that is not one -- an answer, say -- so a client can try
+    /// this first on every datum it reads. Unknown keys are kept, since
+    /// every key but `:event` is the host's.
+    pub fn parse(text: &str) -> Result<Event, String> {
+        let mut e = crate::Engine::new();
+        let v = crate::read_one(text, &mut e)
+            .map_err(|err| format!("{err}"))?
+            .ok_or("an empty event")?;
+        let items = proper_list(&e, v).ok_or("an event must be a proper list")?;
+        let mut name = None;
+        let mut fields = Vec::new();
+        let mut i = 0;
+        while i < items.len() {
+            let crate::Value::Keyword(k) = items[i] else {
+                return Err("an event is :key value pairs".into());
+            };
+            let key = e.interner.kw_name(k).to_string();
+            let Some(&val) = items.get(i + 1) else {
+                return Err(format!(":{key} has no value"));
+            };
+            if key == "event" && name.is_none() {
+                name = Some(text_of(&e, val).ok_or(":event must be a symbol or string")?);
+            } else {
+                fields.push((key, wire_val(&e, val, 0)));
+            }
+            i += 2;
+        }
+        Ok(Event { name: name.ok_or("not an event: no :event")?, fields })
+    }
+}
+
+/// A symbol's name as the reader reads it back: plain when it is plain,
+/// `|…|` otherwise.
+fn push_symbol(out: &mut String, name: &str) {
+    let plain = !name.is_empty()
+        && !name.starts_with(':')
+        && !name.starts_with('#')
+        && name.parse::<f64>().is_err()
+        && name
+            .chars()
+            .all(|c| !c.is_whitespace() && !"()\"';`,|\\".contains(c));
+    if plain {
+        out.push_str(name);
+    } else {
+        out.push('|');
+        for c in name.chars() {
+            if c == '|' || c == '\\' {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out.push('|');
+    }
+}
+
+/// A host value as wire text. What has no written form -- a procedure, a
+/// host object -- goes as a string saying what it was, rather than as
+/// text the reader would refuse.
+fn push_val(out: &mut String, v: &Val) {
+    match v {
+        Val::Null => out.push_str("()"),
+        Val::Bool(true) => out.push_str("#t"),
+        Val::Bool(false) => out.push_str("#f"),
+        Val::Int(n) => out.push_str(&n.to_string()),
+        Val::BigInt(digits) => out.push_str(digits),
+        Val::Float(x) if x.is_nan() => out.push_str("+nan.0"),
+        Val::Float(x) if x.is_infinite() => out.push_str(if *x > 0.0 { "+inf.0" } else { "-inf.0" }),
+        Val::Float(x) => out.push_str(&format!("{x:?}")),
+        Val::Str(s) => push_string(out, s),
+        Val::Sym(s) => push_symbol(out, s),
+        Val::Keyword(k) => {
+            out.push(':');
+            out.push_str(k);
+        }
+        Val::Char(c) => push_string(out, &c.to_string()),
+        Val::List(items) | Val::Vector(items) => {
+            out.push('(');
+            for (i, x) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                push_val(out, x);
+            }
+            out.push(')');
+        }
+        Val::Pair(a, d) => {
+            out.push('(');
+            push_val(out, a);
+            out.push_str(" . ");
+            push_val(out, d);
+            out.push(')');
+        }
+        other => push_string(out, &format!("#<{}>", match other {
+            Val::Unspecified => "unspecified",
+            Val::Proc(_) => "procedure",
+            Val::Host(_) => "host object",
+            _ => "value",
+        })),
+    }
+}
+
+/// A datum read from the wire as a host value: the inverse of
+/// [`push_val`], bounded in depth because a server is not trusted.
+fn wire_val(e: &crate::Engine, v: crate::Value, depth: usize) -> Val {
+    use crate::Value as V;
+    match v {
+        V::Null => Val::Null,
+        V::Bool(b) => Val::Bool(b),
+        V::Fixnum(n) => Val::Int(n),
+        V::Flonum(x) => Val::Float(x),
+        V::Char(c) => Val::Char(c),
+        V::Symbol(s) => Val::Sym(e.interner.sym_name(s).to_string()),
+        V::Keyword(k) => Val::Keyword(e.interner.kw_name(k).to_string()),
+        V::Obj(r) if depth < 64 => match e.obj(r) {
+            crate::Obj::Str(chars) => Val::Str(chars.iter().collect()),
+            crate::Obj::Pair(..) => match proper_list(e, v) {
+                Some(items) => Val::List(items.into_iter().map(|x| wire_val(e, x, depth + 1)).collect()),
+                None => match e.obj(r) {
+                    crate::Obj::Pair(a, d) => {
+                        Val::Pair(Box::new(wire_val(e, *a, depth + 1)), Box::new(wire_val(e, *d, depth + 1)))
+                    }
+                    _ => Val::Opaque,
+                },
+            },
+            _ => Val::Opaque,
+        },
+        _ => Val::Opaque,
     }
 }
 

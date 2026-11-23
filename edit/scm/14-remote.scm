@@ -87,10 +87,33 @@ a buffer sending to it is set to."
 ; argument hint, which arrives as a socket's answer does).
 (define *wake-hooks* '())
 
+; ── Events (scm's S40) ─────────────────────────────────────────────────────
+; What a server says without being asked. remote-connect asks for them; lux
+; sends (:event paused :message … :backtrace (…)) when an error in a frame
+; pauses it -- after the send that caused it was answered ok, so without
+; this the editor never hears -- and (:event resumed) when it draws again.
+; A paused program shows as a failed send does: the transcript, the echo,
+; and the error pane (C-h e) with its calls.
+
+(define (remote-event conn ev)
+  "Show EV, an event connection CONN's server pushed: an alist with :event
+and the event's own keys."
+  (let ((at (string-append "the program at " (or (%remote-address conn) "?"))))
+    (case (%alist-ref ev :event #f)
+      ((paused)
+        (let ((message (%alist-ref ev :message "")))
+          (*transcript-append* (string-append "paused: " message) :error)
+          (echo "paused: " message)
+          (note-send-error! at "" message (map remote-frame (%alist-ref ev :backtrace '())))))
+      ((resumed)
+        (*transcript-append* "resumed" :dim)
+        (echo "resumed"))
+      (else #f))))
+
 (define (remote-poll)
   "Deliver every answer an async send is owed: call each send's callback
-with its RESULT, then run *wake-hooks*. The host calls this when a
-connection wakes it."
+with its RESULT, then show each event a server pushed (remote-event), then
+run *wake-hooks*. The host calls this when a connection wakes it."
   (for-each (lambda (h) (h)) *wake-hooks*)
   (for-each
     (lambda (row)
@@ -100,6 +123,8 @@ connection wakes it."
             (hash-table-delete! *remote-callbacks* (cons conn rid))
             (when k (k (remote-result r)))))))
     (%remote-poll))
+  ; After the answers: a send's ok is shown before the pause it caused.
+  (for-each (lambda (row) (remote-event (car row) (cadr row))) (%remote-events))
   #f)
 
 (define (remote-backend conn (label "scm"))
@@ -175,11 +200,16 @@ run somewhere it was not written for. E is what the start raised."
 Attach to a REPL server already running — SLIME's slime-connect — and
 point this buffer's sends at it. KIND names the Scheme it is (\"scm\", the
 default, or \"guile\" for a serve.scm). `ray --tcp` serves scm on 4007 (the
-default), `scm --serve HOST:PORT` anywhere. Its image is the one a send
-changes, and the one completion and describe read."
+default), `scm --serve HOST:PORT` anywhere, lux `--serve`. Its image is the
+one a send changes, and the one completion and describe read.
+
+It asks the server for its events: lux's errors in a frame, which come
+after the send that caused them was answered, show in the transcript and
+the error pane (C-h e) as a failed send does."
   (unless (%remote-refused)
     (when *remote* (%remote-close *remote*))
     (set! *remote* (%remote-connect addr))
+    (%remote-subscribe *remote*)
     (set! *remote-kind* kind)
     (remote-attach)
     *remote*))

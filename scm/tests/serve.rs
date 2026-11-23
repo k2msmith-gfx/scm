@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
-use scm::{Op, Server, Session};
+use scm::{Event, Op, Server, Session, Val};
 
 fn connect(server: &Server) -> (TcpStream, BufReader<TcpStream>) {
     let s = TcpStream::connect(server.local_addr()).unwrap();
@@ -84,4 +84,140 @@ fn an_interrupt_needs_no_session() {
     input.read_line(&mut line).unwrap();
     assert!(line.contains(":id 9"), "{line}");
     assert!(flag.load(std::sync::atomic::Ordering::Relaxed), "the session's flag is set");
+}
+
+// ---- events (S40) --------------------------------------------------------
+
+fn line(input: &mut BufReader<TcpStream>) -> String {
+    let mut line = String::new();
+    input.read_line(&mut line).unwrap();
+    line.trim_end().to_string()
+}
+
+/// Ask for events on a connection; the pong is answered by its own thread.
+fn subscribe(out: &mut TcpStream, input: &mut BufReader<TcpStream>, server: &Server, want: usize) -> String {
+    out.write_all(b"(:op ping :id 1 :events #t)").unwrap();
+    let pong = line(input);
+    let start = Instant::now();
+    while server.subscribers() < want {
+        assert!(start.elapsed() < Duration::from_secs(10), "never subscribed");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    pong
+}
+
+#[test]
+fn an_event_reaches_only_the_connections_that_asked() {
+    let mut session = Session::new().unwrap();
+    let server = Server::bind("127.0.0.1:0", session.interrupt_handle()).unwrap();
+    let (mut a, mut a_in) = connect(&server);
+    let (mut b, mut b_in) = connect(&server);
+    let pong = subscribe(&mut a, &mut a_in, &server, 1);
+    assert!(pong.contains(":id 1") && pong.contains(":status ok"), "{pong}");
+    let paused = Event::new(
+        "paused",
+        vec![
+            ("message", Val::Str("view: car: not a pair: 5".into())),
+            ("backtrace", Val::List(vec![Val::Str("(car x)  at v.scm:3:5".into())])),
+        ],
+    );
+    assert_eq!(server.push_event(&paused), 1);
+    assert_eq!(Event::parse(&line(&mut a_in)).unwrap(), paused);
+    // B never asked: the next thing it reads is the answer to its own
+    // request, exactly the bytes it read before S40.
+    let answer = ask(&server, &mut session, &mut b, &mut b_in, "(:op eval :id 4 :code \"(+ 1 2)\")");
+    assert_eq!(answer.trim_end(), "(:id 4 :status ok :value \"3\" :output \"\")");
+    // Asked to stop, A hears no more; a dead connection is dropped.
+    a.write_all(b"(:op ping :id 2 :events #f)").unwrap();
+    assert!(line(&mut a_in).contains(":id 2"));
+    assert_eq!(server.subscribers(), 0);
+    assert_eq!(server.push_event(&Event::new("resumed", vec![])), 0);
+}
+
+#[test]
+fn an_answer_comes_before_the_event_it_caused() {
+    // lux resumes from the callback when a definition is sent, and pushes
+    // `resumed` there: the send's `ok` must still be first on the wire.
+    let mut session = Session::new().unwrap();
+    let server = Server::bind("127.0.0.1:0", session.interrupt_handle()).unwrap();
+    let (mut out, mut input) = connect(&server);
+    subscribe(&mut out, &mut input, &server, 1);
+    out.write_all(b"(:op eval :id 5 :code \"(define (view) 1)\")").unwrap();
+    let start = Instant::now();
+    while server.serve_pending(&mut session, |_, _| {
+        server.push_event(&Event::new("resumed", vec![]));
+    }) == 0
+    {
+        assert!(start.elapsed() < Duration::from_secs(10), "no request arrived");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(line(&mut input).starts_with("(:id 5 :status ok"));
+    assert_eq!(line(&mut input), "(:event resumed)");
+}
+
+#[test]
+fn a_late_subscriber_hears_the_retained_event() {
+    // An editor that connects to a program already paused hears why at
+    // once, after the answer to its ping; once cleared, nothing.
+    let session = Session::new().unwrap();
+    let server = Server::bind("127.0.0.1:0", session.interrupt_handle()).unwrap();
+    let paused = Event::new("paused", vec![("message", Val::Str("frame: oops".into()))]);
+    server.retain_event(Some(&paused));
+    let (mut a, mut a_in) = connect(&server);
+    assert!(subscribe(&mut a, &mut a_in, &server, 1).contains(":id 1"));
+    assert_eq!(Event::parse(&line(&mut a_in)).unwrap(), paused);
+    server.retain_event(None);
+    let (mut b, mut b_in) = connect(&server);
+    subscribe(&mut b, &mut b_in, &server, 2);
+    b.write_all(b"(:op interrupt :id 6)").unwrap();
+    assert!(line(&mut b_in).contains(":id 6"), "nothing came between the pong and this answer");
+}
+
+#[test]
+fn streamed_output_and_events_never_interleave() {
+    // Every write to a connection holds its one writer: a burst of events
+    // pushed from another thread while an eval streams arrives as whole
+    // datums, each readable.
+    let mut session = Session::new().unwrap();
+    let server = Server::bind("127.0.0.1:0", session.interrupt_handle()).unwrap();
+    let (mut out, mut input) = connect(&server);
+    out.write_all(b"(:op stream :id 1 :on #t)").unwrap();
+    line(&mut input);
+    out.write_all(b"(:op ping :id 2 :events #t)").unwrap();
+    line(&mut input);
+    while server.subscribers() < 1 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let pusher = {
+        let server = server.event_sender();
+        std::thread::spawn(move || {
+            let big = "x".repeat(5000);
+            for i in 0..200 {
+                server.push_event(&Event::new("tick", vec![("n", Val::Int(i)), ("pad", Val::Str(big.clone()))]));
+            }
+        })
+    };
+    // Read on a thread of its own: the eval writes ~1 MB from this thread's
+    // serve_pending, more than a socket buffers.
+    let reader = std::thread::spawn(move || {
+        let (mut events, mut answered) = (0, false);
+        while events < 200 || !answered {
+            let l = line(&mut input);
+            if let Ok(ev) = Event::parse(&l) {
+                assert_eq!(ev.get("n"), Some(&Val::Int(events)), "in order and whole");
+                events += 1;
+            } else {
+                let r = scm::Response::parse(&l).unwrap_or_else(|e| panic!("{e}: {}", &l[..l.len().min(80)]));
+                answered |= r.id == 3 && !matches!(r.outcome, scm::Outcome::Streamed(_));
+            }
+        }
+    });
+    out.write_all(b"(:op eval :id 3 :code \"(let loop ((i 0)) (when (< i 200) (display (make-string 5000 #\\\\y)) (flush-output-port) (loop (+ i 1))))\")").unwrap();
+    let start = Instant::now();
+    while server.serve_pending(&mut session, |_, _| {}) == 0 {
+        assert!(start.elapsed() < Duration::from_secs(10), "no request arrived");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    pusher.join().unwrap();
+    reader.join().unwrap();
 }

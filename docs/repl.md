@@ -382,6 +382,91 @@ with a runaway -- or a frame loop that has not served yet -- still hears an
 interrupt. `scm/tests/serve.rs` drives `serve_pending`; the CLI's tests and
 the Emacs check drive `serve_forever`.
 
+## Events: what the host says unasked (S40)
+
+The protocol was one request, one answer. lux broke that assumption from
+the far side: its session draws frames between requests, and an error in a
+frame -- a typo in `view`, a bad message in `update` -- happens *after* the
+send that caused it was answered `ok`. The trial against cl-wgpu (cl-gpu's
+`docs/trial`, S3) found the error reached only lux's terminal, so an editor
+never saw it. Nothing in the protocol could carry it: there was no request
+for it to answer.
+
+So a connection may ask to be told:
+
+    -> (:op ping :id 1 :events #t)
+    <- (:id 1 :status ok :version "0.0.1")
+    ...                                   (a send, answered ok; the next frame fails)
+    <- (:event paused :message "view: car: not a pair: 0"
+               :backtrace ("(car n)  at <repl:3>:1:19" "(view m)"))
+    ...                                   (the fix, answered ok)
+    <- (:event resumed)
+
+An event has **no `:id` and no `:status`**, so it cannot be taken for an
+answer; a client tells the two apart by the leading `:event`
+(`scm::Event::parse` fails on anything else, so a client tries it first).
+Its name and fields are the host's -- scm defines none, lux defines
+`paused` and `resumed` -- and a field is anything the wire writes: strings,
+numbers, booleans, symbols, keywords and lists of them.
+
+### A key on `ping`, not an op
+
+S25's streaming is an op, `:op stream`, and the plan said "as S25's
+streaming is". It is a key instead, because of who asks. `edit`'s
+`remote-connect` attaches to whatever speaks this protocol -- scm, lux,
+ray, and edit's own SBCL and Guile servers -- and an **unknown op is
+refused** -- scm answers `malformed`, and so do the SBCL and Guile servers --
+where **an unknown key is ignored**. As a key on the one op every server
+has, the request is a plain ping to a server that has no events, and an
+editor can ask every server it connects to without knowing which it is.
+`:events #f` stops them. `Session::handle` answers it as a ping, like
+`stream`: the connection, not the session, holds the setting.
+
+### Opt-in and per connection, for S25's reasons
+
+`scm-mode.el` dispatches by `:id` and every client written before this
+reads each datum as an answer; a client that does not ask sees exactly the
+bytes it saw before. Two clients of one session may differ.
+
+### The host's side
+
+```rust
+let event = scm::Event::new("paused", vec![("message", Val::Str(why)), ("backtrace", frames)]);
+server.retain_event(Some(&event));   // for a connection that asks later
+server.push_event(&event);           // to every connection that asked, now
+server.event_sender()                // the same from another thread
+```
+
+`push_event` writes from the calling thread and drops a connection whose
+socket has died. A connection that is alive but has stopped reading will,
+once its socket's buffer is full, block the push -- and lux's frame with it
+-- as a streamed chunk already could; an editor reads continuously, so this
+is recorded rather than guarded against. **A retained event** is sent to a connection the moment
+it asks, after its pong: lux retains `paused` while paused and clears it on
+resuming, so an editor that attaches to a program already paused hears why
+at once instead of never.
+
+Two orderings are guaranteed, and both needed a change underneath:
+
+- **A datum is never cut by another.** An event can be pushed while an
+  eval's output streams down the same socket. Every write to a connection
+  -- answer, pong, streamed chunk, event -- now goes through that
+  connection's one locked writer.
+- **An answer precedes the event it caused.** The answer used to be
+  written by the connection's thread after the session's thread handed it
+  over, so an event pushed by the host's callback (lux's `resumed`) or by
+  the next frame (`paused`) could overtake it. The session's thread now
+  writes the answer itself, then runs the callback; the connection's thread
+  still waits for it before reading the next request, so requests on one
+  connection are still answered one at a time.
+
+### What a client does with them
+
+`edit` asks on `remote-connect` and shows a `paused` event as a failed send
+is shown: in the transcript, in the echo area, and in the error pane
+(`C-h e`) with its backtrace; `resumed` is a transcript line.
+`scm-mode.el` does not ask, and needs no change.
+
 ## What is not here yet
 
 - ~~**A break REPL**~~ — done, above.
@@ -397,5 +482,7 @@ the Emacs check drive `serve_forever`.
 - ~~**A Rust client of the protocol.**~~ `scm --connect` (S22), above.
 - ~~**Streaming output.**~~ Done, S25 — above.
 - **Several interpreters over one socket.** One session per server today.
+- **Events in `scm --connect` and `scm-mode.el`.** Neither asks; `scm
+  --serve` itself pushes none.
 - **Completion inside a form** — candidates come from the global environment,
   so a local binding is not offered.

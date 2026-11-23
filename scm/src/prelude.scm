@@ -194,48 +194,13 @@
             [(same? x (car (car alist))) (car alist)]
             [else (loop (cdr alist))]))))
 
-;; `map` over one or more lists, and `for-each` for effect. Written with an
-;; accumulate-and-reverse loop rather than recursion, because a scene maps over
-;; thousands of points and this is the idiom a model writes (plan §4.9).
-(define (map f lst . more)
-  (if (null? more)
-      (let loop ((lst lst) (acc '()))
-        (if (null? lst)
-            (reverse acc)
-            (loop (cdr lst) (cons (f (car lst)) acc))))
-      (let loop ((ls (cons lst more)) (acc '()))
-        (if (any-null? ls)
-            (reverse acc)
-            (loop (map-cdr ls) (cons (apply f (map-car ls)) acc))))))
-
-(define (any-null? ls)
-  (cond [(null? ls) #f]
-        [(null? (car ls)) #t]
-        [else (any-null? (cdr ls))]))
-
-(define (map-car ls) (if (null? ls) '() (cons (car (car ls)) (map-car (cdr ls)))))
-(define (map-cdr ls) (if (null? ls) '() (cons (cdr (car ls)) (map-cdr (cdr ls)))))
-
-(define (for-each f lst . more)
-  (if (null? more)
-      (let loop ((lst lst))
-        (if (null? lst)
-            (if #f #f)
-            (begin (f (car lst)) (loop (cdr lst)))))
-      (let loop ((ls (cons lst more)))
-        (if (any-null? ls)
-            (if #f #f)
-            (begin (apply f (map-car ls)) (loop (map-cdr ls)))))))
-
-(define (filter pred lst)
-  (let loop ((lst lst) (acc '()))
-    (cond [(null? lst) (reverse acc)]
-          [(pred (car lst)) (loop (cdr lst) (cons (car lst) acc))]
-          [else (loop (cdr lst) acc)])))
-
-(define (reduce f init lst)
-  (let loop ((lst lst) (acc init))
-    (if (null? lst) acc (loop (cdr lst) (f acc (car lst))))))
+;; `map` and `for-each` over one or more lists, stopping at the shortest,
+;; `filter` and `reduce` -- `(f acc elem)`, with an init -- are the
+;; machine's (S41, vm/iter.rs): primitives that call the procedure from a
+;; frame on the explicit stack, so a long one is interruptible, an error in
+;; the procedure unwinds as it would from a Scheme loop, and the loop around
+;; the call costs nothing. Their old definitions are kept, verbatim, in
+;; scm/tests/srfi/native-map.scm, which holds the primitives to them.
 
 (define (fold-left f init lst) (reduce f init lst))
 

@@ -287,3 +287,40 @@ fn unary_minus_is_negation() {
         }
     }
 }
+
+// ---- S41: the native iterations stop for fuel and the interrupt ---------
+
+/// `map`, `for-each` and `fold` are primitives now, but each element is a
+/// call from a frame on the explicit stack, so a circular list -- which
+/// never ends -- is stopped by fuel and by the interrupt as the Scheme
+/// loop was, whether the procedure is a closure or a plain primitive that
+/// never reaches a safepoint of its own. And the frames are gone after.
+#[test]
+fn a_native_map_over_a_circular_list_stops_for_fuel_and_interrupt() {
+    for tier in TIERS {
+        let mut it = interp(tier);
+        show(&mut it, "(import (srfi 1)) (define c (list 1 2 3)) (set-cdr! (cddr c) c)");
+        for src in [
+            "(for-each values c)",
+            "(for-each (lambda (x) x) c)",
+            "(map (lambda (x) x) c)",
+            "(map + c c)",
+            "(fold + 0 c)",
+            "(filter odd? c)",
+            "(reduce + 0 c)",
+        ] {
+            it.set_fuel(Some(2000));
+            assert_eq!(it.eval(src).err(), Some(Error::OutOfFuel), "{tier:?}: fuel, {src}");
+            it.set_fuel(None);
+
+            let flag = it.interrupt_handle();
+            let t = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                flag.store(true, Ordering::Relaxed);
+            });
+            assert_eq!(it.eval(src).err(), Some(Error::Interrupted), "{tier:?}: interrupt, {src}");
+            t.join().unwrap();
+            assert_eq!(show(&mut it, "(map - '(1 2))"), "(-1 -2)", "{tier:?}: after {src}");
+        }
+    }
+}

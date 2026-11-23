@@ -209,15 +209,11 @@
               (else (loop (cdr ls))))))
 
     ;; ── fold, unfold, map ─────────────────────────────────────────────
-    (define (fold kons knil l . more)
-      (if (null? more)
-          (let loop ((l l) (acc knil))
-            (if (null? l) acc (loop (cdr l) (kons (car l) acc))))
-          (let loop ((ls (cons l more)) (acc knil))
-            (if (any-empty? ls)
-                acc
-                (loop (map cdr ls)
-                      (apply kons (append (map car ls) (list acc))))))))
+    ;; Native (S41, src/vm/iter.rs): the machine calls `kons` from a frame
+    ;; on its stack, in this order, `(kons e1 e2 ... acc)`, stopping at the
+    ;; shortest list. The Scheme it replaced is kept in
+    ;; scm/tests/srfi/native-map.scm, which holds the primitive to it.
+    (define fold %fold)
 
     (define (fold-right kons knil l . more)
       (if (null? more)
@@ -271,18 +267,11 @@
       (let loop ((seed seed) (acc (if (pair? opt) (car opt) '())))
         (if (p seed) acc (loop (g seed) (cons (f seed) acc)))))
 
-    ;; SRFI 1's `map` stops at the shortest list; R7RS's requires equal
-    ;; lengths, so this is a superset and replacing the global is safe.
-    (define (map f l . more)
-      (if (null? more)
-          (let loop ((l l) (acc '()))
-            (if (null? l) (reverse acc) (loop (cdr l) (cons (f (car l)) acc))))
-          (let loop ((ls (cons l more)) (acc '()))
-            (if (any-empty? ls)
-                (reverse acc)
-                (loop (map-cdrs ls) (cons (apply f (map-cars ls)) acc))))))
+    ;; `map` is the global one, which is the machine's (S41) and stops at the
+    ;; shortest list as SRFI 1's must; R7RS's requires equal lengths, so
+    ;; re-exporting it is the superset.
 
-    ;; Spelled out rather than using `map`, which is being defined.
+    ;; Spelled out, as they were when `map` was defined here too.
     (define (map-cars ls)
       (let loop ((ls ls) (acc '()))
         (if (null? ls) (reverse acc) (loop (cdr ls) (cons (caar ls) acc)))))
@@ -293,16 +282,9 @@
     (define map-in-order map)
     (define map! map)
 
-    (define (for-each f l . more)
-      (if (null? more)
-          (let loop ((l l))
-            (if (null? l)
-                #t
-                (begin (f (car l)) (loop (cdr l)))))
-          (let loop ((ls (cons l more)))
-            (if (any-empty? ls)
-                #t
-                (begin (apply f (map-cars ls)) (loop (map-cdrs ls)))))))
+    ;; Native too, and SRFI 1's returns #t where the global's value is
+    ;; unspecified, so it is a primitive of its own.
+    (define for-each %srfi-1-for-each)
 
     (define (append-map f l . more)
       (apply append (apply map f l more)))
@@ -326,11 +308,8 @@
               (else (loop (cdr xs) acc)))))
 
     ;; ── filtering and partitioning ────────────────────────────────────
-    (define (filter pred l)
-      (let loop ((l l) (acc '()))
-        (cond ((null? l) (reverse acc))
-              ((pred (car l)) (loop (cdr l) (cons (car l) acc)))
-              (else (loop (cdr l) acc)))))
+    ;; `filter` is the global one, the machine's (S41), with the same
+    ;; definition.
     (define filter! filter)
 
     (define (remove pred l) (filter (lambda (x) (not (pred x))) l))

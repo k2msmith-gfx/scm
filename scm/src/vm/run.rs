@@ -82,6 +82,9 @@ impl Vm {
         if self.host_fns.get(i).is_some_and(|h| h.is_some()) {
             return false;
         }
+        if self.iter_kind(id).is_some() {
+            return false;
+        }
         let special = [
             self.apply_prim,
             self.call_with_values_prim,

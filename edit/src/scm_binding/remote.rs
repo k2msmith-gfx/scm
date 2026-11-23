@@ -23,6 +23,13 @@
 //! with a timeout: past it the client sends `:interrupt` on a SECOND
 //! connection (the server is single-threaded, so an interrupt queued behind
 //! the evaluation would never arrive; `scm-mode.el` keeps the same pair).
+//!
+//! **Events** (scm's S40): `remote-connect` asks the server for messages
+//! nobody asked for -- `(:op ping :events #t)`, a plain ping to a server
+//! that has none -- and the reader queues each `(:event …)` that comes,
+//! apart from the answers, for `(remote-poll)` to show. lux sends `paused`
+//! when a frame's error pauses it, after the send that caused it was
+//! answered `ok`, and `resumed`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -31,7 +38,7 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use scm::{Op, Outcome, Request, Response, Val};
+use scm::{Event, Op, Outcome, Request, Response, Val};
 
 use super::{val_num, val_text, val_textv};
 
@@ -44,6 +51,9 @@ struct Inbox {
     /// Async sends not yet answered, and the answers that have come.
     pending: Mutex<HashSet<u64>>,
     done: Mutex<VecDeque<(Response, String)>>,
+    /// Events the server pushed, as they came (S40): wire text, read on
+    /// the UI thread, since a `Val` cannot cross threads.
+    events: Mutex<VecDeque<String>>,
     /// The server closed the connection (or the read failed): what it said.
     closed: Mutex<Option<String>>,
     /// ONE request in flight at a time; the rest wait here. A server that
@@ -164,6 +174,12 @@ fn read_loop(mut stream: TcpStream, inbox: Arc<Inbox>, addr: String) {
             match first_datum_len(&pending) {
                 Some(n) => {
                     let text: String = pending.drain(..n).collect();
+                    // An event answers nothing, so it lets no request go.
+                    if text.trim_start().starts_with("(:event") && Event::parse(&text).is_ok() {
+                        inbox.events.lock().unwrap_or_else(|e| e.into_inner()).push_back(text);
+                        crate::wake::wake();
+                        continue;
+                    }
                     let Ok(answer) = Response::parse(&text) else { continue };
                     if matches!(answer.outcome, Outcome::Streamed(_)) {
                         continue;
@@ -333,6 +349,30 @@ fn drain() -> Vec<(u32, Response, String)> {
         let mut out = Vec::new();
         for (&id, conn) in conns.iter() {
             out.extend(conn.inbox.done.lock().unwrap_or_else(|e| e.into_inner()).drain(..).map(|(r, text)| (id, r, text)));
+        }
+        out
+    })
+}
+
+/// Ask connection `id`'s server for its events, not waiting: the answer is
+/// a pong, and the reader lets the next request go when it lands.
+fn subscribe(id: u32) -> Result<(), String> {
+    CONNS.with(|c| {
+        let mut conns = c.borrow_mut();
+        let conn = conns.get_mut(&id).ok_or("no such connection")?;
+        send(conn, Op::Events { on: true }).map(|_| ())
+    })
+}
+
+/// Every event that has come, on every connection: (connection, event),
+/// oldest first on each.
+fn drain_events() -> Vec<(u32, Event)> {
+    CONNS.with(|c| {
+        let conns = c.borrow();
+        let mut out = Vec::new();
+        for (&id, conn) in conns.iter() {
+            let texts: Vec<String> = conn.inbox.events.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+            out.extend(texts.iter().filter_map(|t| Event::parse(t).ok()).map(|ev| (id, ev)));
         }
         out
     })
@@ -546,6 +586,27 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         }
         Ok(Val::List(out))
     })?;
+    // `(%remote-subscribe id)` — ask the server for its events (S40). A
+    // server with none answers it as a ping.
+    interp.define_fn("%remote-subscribe", |args| {
+        subscribe(conn_id(args))?;
+        Ok(Val::Bool(true))
+    })?;
+    // `(%remote-events)` — every event that has come, on any connection:
+    // ((connection ((:event . paused) (:message . "…") (:backtrace . (…))))
+    // …), oldest first.
+    interp.define_fn("%remote-events", |_| {
+        Ok(Val::List(
+            drain_events()
+                .into_iter()
+                .map(|(conn, ev)| {
+                    let mut alist = vec![entry("event", Val::Sym(ev.name))];
+                    alist.extend(ev.fields.into_iter().map(|(k, v)| entry(&k, v)));
+                    Val::List(vec![Val::Int(conn as i64), Val::List(alist)])
+                })
+                .collect(),
+        ))
+    })?;
     // `(%remote-complete id prefix)` — the server's global names with PREFIX.
     interp.define_fn("%remote-complete", |args| {
         let prefix = val_text(args, 1).unwrap_or_default();
@@ -592,6 +653,8 @@ pub(super) fn install(interp: &mut scm::Interp) -> Result<Vec<&'static str>, scm
         "%remote-eval-async",
         "%remote-running",
         "%remote-poll",
+        "%remote-subscribe",
+        "%remote-events",
     ])
 }
 
@@ -728,6 +791,61 @@ mod tests {
             assert_eq!(doc, "#f", "describe does not queue behind a running send");
             assert!(ask < std::time::Duration::from_millis(100), "{ask:?}");
         }
+        s.call("(remote-stop)");
+    }
+
+    /// scm's S40, as lux uses it: remote-connect asks for events, and a
+    /// frame's error -- which no send raised, so no answer carries it --
+    /// shows in the transcript and the error pane with its calls; resumed
+    /// follows. A real `scm::Server`, retaining `paused` as lux does while
+    /// paused, so it arrives the moment the editor asks.
+    #[test]
+    fn a_servers_event_shows_as_a_failed_send() {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut session = scm::Session::new().unwrap();
+            let server = scm::Server::bind("127.0.0.1:0", session.interrupt_handle()).unwrap();
+            tx.send((server.local_addr().to_string(), server.event_sender())).unwrap();
+            loop {
+                server.serve_pending(&mut session, |_, _| {});
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let (addr, events) = rx.recv().unwrap();
+        events.retain_event(Some(&Event::new(
+            "paused",
+            vec![
+                ("message", Val::Str("view: car: not a pair: 0".into())),
+                ("backtrace", Val::List(vec![Val::Str("(car n)  at lantern.scm:4:19".into()), Val::Str("(view m)".into())])),
+            ],
+        )));
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        s.call(&format!("(remote-connect \"{addr}\")"));
+        let transcript = || -> Vec<String> { crate::textpane::lines(crate::app::TRANSCRIPT).into_iter().map(|(_, l)| l).collect() };
+        let until = |s: &mut super::super::standalone::Session, line: &str| {
+            let t0 = Instant::now();
+            while !transcript().iter().any(|l| l == line) {
+                assert!(t0.elapsed() < Duration::from_secs(10), "no {line:?} in {:?}", transcript());
+                s.call("(remote-poll)");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        until(&mut s, "paused: view: car: not a pair: 0");
+        assert_eq!(s.eval_to_string("(list-ref *last-error* 2)").unwrap(), "\"view: car: not a pair: 0\"");
+        assert_eq!(
+            s.eval_to_string("(list-ref *last-error* 3)").unwrap(),
+            "((\"(car n)\" \"lantern.scm:4:19\" ()) (\"(view m)\" #f ()))"
+        );
+        let page = s.eval_to_string("(error-markdown *last-error*)").unwrap();
+        assert!(page.contains(&format!("From `the program at {addr}`")), "{page}");
+        // Sends still answer, between events.
+        s.call(r#"(%editor-set-text 1 "(* 6 7)") (%editor-goto-line 1 0) (eval-defun)"#);
+        assert!(s.settle(10.0));
+        assert!(transcript().iter().any(|l| l == "=> 42"), "{:?}", transcript());
+        events.retain_event(None);
+        assert_eq!(events.push_event(&Event::new("resumed", vec![])), 1);
+        until(&mut s, "resumed");
         s.call("(remote-stop)");
     }
 }

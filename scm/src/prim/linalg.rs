@@ -15,8 +15,16 @@
 //! originals and checks every procedure against them on random input, on
 //! both tiers.
 //!
+//! **The vec3 layer (S39) keeps exactness**, which the matrices did not
+//! need to: `[0 1 0]` is a v3, and `(v3+ [0 1 0] [1 0 0])` was the exact
+//! `#(1 1 0)` in Scheme. So each v3 procedure computes on the components as
+//! they are: two flonums are added, multiplied or compared directly, and
+//! anything else goes to the generic `+`, `-`, `*`, `/`, `sqrt`, `min` and
+//! `max` the Scheme called -- the same operations, in the same order and
+//! grouping, so a result is bit-identical and exactly as exact as before.
+//!
 //! Two differences from the Scheme, both deliberate: results of arithmetic
-//! are always inexact (a mat4 built from exact integers by hand multiplied
+//! of matrices are always inexact (a mat4 built from exact integers by hand multiplied
 //! exactly in Scheme; every constructor `(scm linalg)` exports already made
 //! flonums) -- `mat4-transpose`, which only moves elements, keeps them as
 //! they are, as the Scheme did -- and an argument of the wrong shape is
@@ -42,6 +50,23 @@ pub(super) fn install(vm: &mut Vm) {
     vm.define_prim("%quat*", quat_mul);
     vm.define_prim("%quat->mat4", quat_to_mat4);
     vm.define_prim("%mat4-store!", mat4_store);
+    vm.define_prim("%v3", v3);
+    vm.define_prim("%v3+", v3_add);
+    vm.define_prim("%v3-", v3_sub);
+    vm.define_prim("%v3*", v3_mul);
+    vm.define_prim("%v3/", v3_div);
+    vm.define_prim("%v3-negate", v3_negate);
+    vm.define_prim("%v3-scale", v3_scale);
+    vm.define_prim("%v3-dot", v3_dot);
+    vm.define_prim("%v3-cross", v3_cross);
+    vm.define_prim("%v3-length", v3_length);
+    vm.define_prim("%v3-length-squared", v3_length_squared);
+    vm.define_prim("%v3-distance", v3_distance);
+    vm.define_prim("%v3-distance-squared", v3_distance_squared);
+    vm.define_prim("%v3-normalize", v3_normalize);
+    vm.define_prim("%v3-lerp", v3_lerp);
+    vm.define_prim("%v3-min", v3_min);
+    vm.define_prim("%v3-max", v3_max);
 }
 
 /// The `n` reals of a vector argument, or a refusal naming `who`.
@@ -325,4 +350,289 @@ fn mat4_store(e: &mut Engine, a: &[Value]) -> PResult {
         _ => return Err(err(format!("{WHO}: expects an f32vector or f64vector"))),
     }
     Ok(Value::Unspecified)
+}
+
+// ── the vec3 layer (S39) ─────────────────────────────────────────────
+//
+// A v3's components are kept as they come, exact or not, and every
+// operation below is one the Scheme made: a flonum fast path, else the
+// generic primitive it called.
+
+/// A v3's three components, as they are, or a refusal naming `who`.
+fn parts(e: &Engine, who: &str, v: Value) -> Result<[Value; 3], VmError> {
+    let refuse = || err(format!("{who}: expects a v3 (a vector of 3 reals)"));
+    let Value::Obj(r) = v else { return Err(refuse()) };
+    let Obj::Vector { items, .. } = e.obj(r) else { return Err(refuse()) };
+    let [x, y, z] = items[..] else { return Err(refuse()) };
+    for c in [x, y, z] {
+        as_f64(e, c).ok_or_else(refuse)?;
+    }
+    Ok([x, y, z])
+}
+
+/// Exactly N arguments, or a refusal naming `who`.
+fn args<const N: usize>(who: &str, a: &[Value]) -> Result<[Value; N], VmError> {
+    a.try_into()
+        .map_err(|_| err(format!("{who}: expects {N} arguments, got {}", a.len())))
+}
+
+fn vec3(e: &mut Engine, [x, y, z]: [Value; 3]) -> Value {
+    e.vector(vec![x, y, z], false)
+}
+
+/// `%f`: `exact->inexact`.
+fn inexact(e: &Engine, who: &str, v: Value) -> Result<f64, VmError> {
+    real(e, who, v)
+}
+
+fn add2(e: &mut Engine, x: Value, y: Value) -> PResult {
+    match (x, y) {
+        (Value::Flonum(a), Value::Flonum(b)) => Ok(Value::Flonum(a + b)),
+        _ => super::add(e, &[x, y]),
+    }
+}
+
+/// `(+ a b c)`, one fold: not two `add2`s, which would add two exact
+/// integers exactly before meeting a flonum, where `+` converts all three.
+fn add3(e: &mut Engine, x: Value, y: Value, z: Value) -> PResult {
+    match (x, y, z) {
+        (Value::Flonum(a), Value::Flonum(b), Value::Flonum(c)) => Ok(Value::Flonum(a + b + c)),
+        _ => super::add(e, &[x, y, z]),
+    }
+}
+
+fn sub2(e: &mut Engine, x: Value, y: Value) -> PResult {
+    match (x, y) {
+        (Value::Flonum(a), Value::Flonum(b)) => Ok(Value::Flonum(a - b)),
+        _ => super::sub(e, &[x, y]),
+    }
+}
+
+fn neg(e: &mut Engine, x: Value) -> PResult {
+    match x {
+        Value::Flonum(a) => Ok(Value::Flonum(-a)),
+        _ => super::sub(e, &[x]),
+    }
+}
+
+fn mul2(e: &mut Engine, x: Value, y: Value) -> PResult {
+    match (x, y) {
+        (Value::Flonum(a), Value::Flonum(b)) => Ok(Value::Flonum(a * b)),
+        _ => super::mul(e, &[x, y]),
+    }
+}
+
+fn div2(e: &mut Engine, x: Value, y: Value) -> PResult {
+    match (x, y) {
+        (Value::Flonum(a), Value::Flonum(b)) => Ok(Value::Flonum(a / b)),
+        _ => super::div(e, &[x, y]),
+    }
+}
+
+fn sqrt(e: &mut Engine, x: Value) -> PResult {
+    match x {
+        Value::Flonum(a) => Ok(Value::Flonum(a.sqrt())),
+        _ => super::p_sqrt(e, &[x]),
+    }
+}
+
+/// `min` of two flonums is the first unless the second is less, as
+/// `fold_extreme` decides.
+fn min2(e: &mut Engine, x: Value, y: Value) -> PResult {
+    match (x, y) {
+        (Value::Flonum(a), Value::Flonum(b)) => Ok(Value::Flonum(if b < a { b } else { a })),
+        _ => super::p_min(e, &[x, y]),
+    }
+}
+
+fn max2(e: &mut Engine, x: Value, y: Value) -> PResult {
+    match (x, y) {
+        (Value::Flonum(a), Value::Flonum(b)) => Ok(Value::Flonum(if b > a { b } else { a })),
+        _ => super::p_max(e, &[x, y]),
+    }
+}
+
+/// `(+ (* x x) (* y y) (* z z))`.
+fn length_squared(e: &mut Engine, [x, y, z]: [Value; 3]) -> PResult {
+    let (xx, yy, zz) = (mul2(e, x, x)?, mul2(e, y, y)?, mul2(e, z, z)?);
+    add3(e, xx, yy, zz)
+}
+
+fn difference(e: &mut Engine, [ax, ay, az]: [Value; 3], [bx, by, bz]: [Value; 3]) -> Result<[Value; 3], VmError> {
+    Ok([sub2(e, ax, bx)?, sub2(e, ay, by)?, sub2(e, az, bz)?])
+}
+
+/// `v3-scale` once its factor is a flonum: `(* x k)` for each.
+fn scaled(e: &mut Engine, [x, y, z]: [Value; 3], k: f64) -> Result<[Value; 3], VmError> {
+    let k = Value::Flonum(k);
+    Ok([mul2(e, x, k)?, mul2(e, y, k)?, mul2(e, z, k)?])
+}
+
+/// `(v3 x y z)`: three reals, made inexact.
+fn v3(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3";
+    let [x, y, z] = args::<3>(WHO, a)?;
+    let c = [inexact(e, WHO, x)?, inexact(e, WHO, y)?, inexact(e, WHO, z)?];
+    Ok(flonums(e, &c))
+}
+
+/// A variadic componentwise fold, left to right: `v3+`, `v3-`, `v3*`. One
+/// argument is returned as it is, as the Scheme's loop did.
+fn fold3(e: &mut Engine, who: &str, a: &[Value], op: fn(&mut Engine, Value, Value) -> PResult) -> PResult {
+    let Some((&first, rest)) = a.split_first() else {
+        return Err(err(format!("{who}: expects at least one v3")));
+    };
+    let mut acc = parts(e, who, first)?;
+    if rest.is_empty() {
+        return Ok(first);
+    }
+    for &v in rest {
+        let [bx, by, bz] = parts(e, who, v)?;
+        acc = [op(e, acc[0], bx)?, op(e, acc[1], by)?, op(e, acc[2], bz)?];
+    }
+    Ok(vec3(e, acc))
+}
+
+fn v3_add(e: &mut Engine, a: &[Value]) -> PResult {
+    fold3(e, "v3+", a, add2)
+}
+
+/// One argument negates, as `-` does on numbers.
+fn v3_sub(e: &mut Engine, a: &[Value]) -> PResult {
+    if let [v] = a {
+        return negate(e, "v3-", *v);
+    }
+    fold3(e, "v3-", a, sub2)
+}
+
+fn v3_mul(e: &mut Engine, a: &[Value]) -> PResult {
+    fold3(e, "v3*", a, mul2)
+}
+
+fn v3_div(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3/";
+    let [p, q] = args::<2>(WHO, a)?;
+    let ([ax, ay, az], [bx, by, bz]) = (parts(e, WHO, p)?, parts(e, WHO, q)?);
+    let c = [div2(e, ax, bx)?, div2(e, ay, by)?, div2(e, az, bz)?];
+    Ok(vec3(e, c))
+}
+
+fn negate(e: &mut Engine, who: &str, v: Value) -> PResult {
+    let [x, y, z] = parts(e, who, v)?;
+    let c = [neg(e, x)?, neg(e, y)?, neg(e, z)?];
+    Ok(vec3(e, c))
+}
+
+fn v3_negate(e: &mut Engine, a: &[Value]) -> PResult {
+    let [v] = args::<1>("v3-negate", a)?;
+    negate(e, "v3-negate", v)
+}
+
+fn v3_scale(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3-scale";
+    let [v, k] = args::<2>(WHO, a)?;
+    let p = parts(e, WHO, v)?;
+    let k = inexact(e, WHO, k)?;
+    let c = scaled(e, p, k)?;
+    Ok(vec3(e, c))
+}
+
+/// `(+ (* ax bx) (* ay by) (* az bz))`.
+fn v3_dot(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3-dot";
+    let [p, q] = args::<2>(WHO, a)?;
+    let ([ax, ay, az], [bx, by, bz]) = (parts(e, WHO, p)?, parts(e, WHO, q)?);
+    let (x, y, z) = (mul2(e, ax, bx)?, mul2(e, ay, by)?, mul2(e, az, bz)?);
+    add3(e, x, y, z)
+}
+
+fn v3_cross(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3-cross";
+    let [p, q] = args::<2>(WHO, a)?;
+    let ([ax, ay, az], [bx, by, bz]) = (parts(e, WHO, p)?, parts(e, WHO, q)?);
+    let mut c = [Value::Unspecified; 3];
+    for (out, (s, t, u, v)) in c.iter_mut().zip([(ay, bz, az, by), (az, bx, ax, bz), (ax, by, ay, bx)]) {
+        let (l, r) = (mul2(e, s, t)?, mul2(e, u, v)?);
+        *out = sub2(e, l, r)?;
+    }
+    Ok(vec3(e, c))
+}
+
+fn v3_length_squared(e: &mut Engine, a: &[Value]) -> PResult {
+    let [v] = args::<1>("v3-length-squared", a)?;
+    let p = parts(e, "v3-length-squared", v)?;
+    length_squared(e, p)
+}
+
+fn v3_length(e: &mut Engine, a: &[Value]) -> PResult {
+    let [v] = args::<1>("v3-length", a)?;
+    let p = parts(e, "v3-length", v)?;
+    let s = length_squared(e, p)?;
+    sqrt(e, s)
+}
+
+fn v3_distance_squared(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3-distance-squared";
+    let [p, q] = args::<2>(WHO, a)?;
+    let (p, q) = (parts(e, WHO, p)?, parts(e, WHO, q)?);
+    let d = difference(e, p, q)?;
+    length_squared(e, d)
+}
+
+fn v3_distance(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3-distance";
+    let [p, q] = args::<2>(WHO, a)?;
+    let (p, q) = (parts(e, WHO, p)?, parts(e, WHO, q)?);
+    let d = difference(e, p, q)?;
+    let s = length_squared(e, d)?;
+    sqrt(e, s)
+}
+
+/// Raises on a zero vector, with the Scheme's message and through the same
+/// `error`: silently returning zero would make a mis-set direction look
+/// like a legal one. Otherwise `(v3-scale a (/ 1.0 n))`.
+fn v3_normalize(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3-normalize";
+    let [v] = args::<1>(WHO, a)?;
+    let p = parts(e, WHO, v)?;
+    let s = length_squared(e, p)?;
+    let n = sqrt(e, s)?;
+    if as_f64(e, n) == Some(0.0) {
+        let msg = e.string("v3-normalize: the zero vector has no direction");
+        return super::error_prim(e, &[msg]);
+    }
+    let k = div2(e, Value::Flonum(1.0), n)?;
+    let k = inexact(e, WHO, k)?;
+    let c = scaled(e, p, k)?;
+    Ok(vec3(e, c))
+}
+
+/// `(+ a (* t (- b a)))` for each, `t` made inexact.
+fn v3_lerp(e: &mut Engine, a: &[Value]) -> PResult {
+    const WHO: &str = "v3-lerp";
+    let [p, q, t] = args::<3>(WHO, a)?;
+    let (p, q) = (parts(e, WHO, p)?, parts(e, WHO, q)?);
+    let t = Value::Flonum(inexact(e, WHO, t)?);
+    let mut c = [Value::Unspecified; 3];
+    for i in 0..3 {
+        let d = sub2(e, q[i], p[i])?;
+        let m = mul2(e, t, d)?;
+        c[i] = add2(e, p[i], m)?;
+    }
+    Ok(vec3(e, c))
+}
+
+fn extreme(e: &mut Engine, who: &str, a: &[Value], op: fn(&mut Engine, Value, Value) -> PResult) -> PResult {
+    let [p, q] = args::<2>(who, a)?;
+    let ([ax, ay, az], [bx, by, bz]) = (parts(e, who, p)?, parts(e, who, q)?);
+    let c = [op(e, ax, bx)?, op(e, ay, by)?, op(e, az, bz)?];
+    Ok(vec3(e, c))
+}
+
+fn v3_min(e: &mut Engine, a: &[Value]) -> PResult {
+    extreme(e, "v3-min", a, min2)
+}
+
+fn v3_max(e: &mut Engine, a: &[Value]) -> PResult {
+    extreme(e, "v3-max", a, max2)
 }

@@ -255,6 +255,34 @@ fn the_native_linear_algebra_agrees_with_the_scheme_it_replaced() {
     }
 }
 
+/// S41: the machine's `map`, `for-each`, `filter`, `reduce` and
+/// `(srfi 1)`'s `fold` and `for-each` make the same calls in the same
+/// order as the Scheme they replaced, kept verbatim in the program -- and
+/// again under a collector that runs at every safepoint, since each frame
+/// holds the lists and the accumulator between calls.
+#[test]
+fn the_native_iterations_agree_with_the_scheme_they_replaced() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "native-map.scm"), "()", "native map and fold on {tier:?}");
+    }
+    let src = std::fs::read_to_string(test_dir().join("native-map.scm")).unwrap();
+    // The long lists are 100,000 elements; collecting at every safepoint
+    // over those is minutes, so the stressed run takes the short ones.
+    let src = src.replace("(= i 100000)", "(= i 300)")
+        .replace("100000)", "300)")
+        .replace("4999950000", "44850")
+        .replace("50000)", "150)");
+    for tier in [Tier::T0, Tier::T1] {
+        let mut vm = Vm::with_tier(tier);
+        vm.engine.set_gc_stress(true);
+        let got = match vm.eval_str_named(&src, "native-map.scm") {
+            Ok(v) => write_str(&vm.engine, v),
+            Err(e) => format!("the program failed: {e}"),
+        };
+        assert_eq!(got, "()", "native map and fold under gc stress on {tier:?}");
+    }
+}
+
 /// `(scm noise)` has no right answer to compare against, so the gate is
 /// on properties: deterministic, continuous across lattice boundaries, in
 /// the range it claims, exactly zero on the lattice for gradient noise,

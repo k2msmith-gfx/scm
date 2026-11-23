@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod compile;
+mod iter;
 pub mod library;
 pub mod native;
 mod run;
@@ -272,6 +273,17 @@ enum Frame {
     /// unchanged -- no second break, and the backtrace already captured is
     /// the original failure's. See `unwind_uncaught`.
     Rethrow { err: VmError },
+    /// S41: `map`, `for-each`, `fold`, `filter` or `reduce` is waiting
+    /// for its procedure to return. `list` and `more` are the lists'
+    /// remaining tails (for `for-each` and `filter`, the pairs just
+    /// called on), `acc` what is gathered so far. See `vm/iter.rs`.
+    Iter {
+        kind: iter::IterKind,
+        f: Value,
+        list: Value,
+        more: Vec<Value>,
+        acc: Value,
+    },
     /// An element of a `[…]` vector is being evaluated. This is the whole
     /// reason the reader keeps a `bracket` flag: a bracket vector *evaluates*
     /// its elements, where `#(…)` is a constant (plan §4.5).
@@ -375,6 +387,13 @@ impl Frame {
             }
             Frame::ConsumeValues { consumer } => {
                 out.push(*consumer);
+                return;
+            }
+            Frame::Iter { f, list, more, acc, .. } => {
+                out.push(*f);
+                out.push(*list);
+                out.extend(more.iter().copied());
+                out.push(*acc);
                 return;
             }
             Frame::Defaults {
@@ -645,6 +664,9 @@ pub struct Vm {
     eval_prim: Option<PrimId>,
     callcc_prim: Option<PrimId>,
     dynamic_wind_prim: Option<PrimId>,
+    /// S41: which primitives are the iterations `vm/iter.rs` runs, indexed
+    /// by `PrimId`. Like the five above, none of them is plain.
+    iter_prims: Vec<Option<iter::IterKind>>,
     next_cont_id: u64,
     /// S26: each optional or keyword parameter's name, to the hidden symbol
     /// its supplied-flag is bound under (see `given_flag`), and the set of
@@ -859,6 +881,7 @@ impl Vm {
             eval_prim: None,
             callcc_prim: None,
             dynamic_wind_prim: None,
+            iter_prims: Vec::new(),
             next_cont_id: 1,
             given_flags: HashMap::default(),
             given_syms: HashSet::default(),
@@ -899,6 +922,19 @@ impl Vm {
                 if vm.plain.len() <= i {
                     vm.plain.resize(i + 1, true);
                 }
+                vm.plain[i] = false;
+            }
+            for (name, kind) in iter::IterKind::ALL {
+                vm.define_prim(name, iter::placeholder);
+                let sym = vm.engine.interner.symbol(name);
+                let Some(Value::Primitive(id)) = vm.global(sym) else {
+                    unreachable!("just defined")
+                };
+                let i = id.0 as usize;
+                if vm.iter_prims.len() <= i {
+                    vm.iter_prims.resize(i + 1, None);
+                }
+                vm.iter_prims[i] = Some(kind);
                 vm.plain[i] = false;
             }
         }
@@ -3216,6 +3252,7 @@ impl Vm {
                 };
                 self.apply(consumer, args)
             }
+            Frame::Iter { kind, f, list, more, acc } => self.iter_resume(kind, f, list, more, acc, v),
             Frame::Catch { .. } => {
                 let ok = Value::Bool(true);
                 let pair = self.engine.cons(ok, v);
@@ -3394,6 +3431,12 @@ impl Vm {
                 }
                 _ => Err(self.err("call-with-values: expects a producer and a consumer")),
             };
+        }
+        // S41: `map` and the other iterations the machine runs itself.
+        if let Value::Primitive(id) = callee
+            && let Some(kind) = self.iter_kind(id)
+        {
+            return self.iter_start(kind, args);
         }
         // A parameter object is callable: `(p)` reads it, `(p v)` sets the
         // current binding.

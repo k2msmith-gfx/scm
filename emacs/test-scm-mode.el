@@ -14,9 +14,11 @@
 (cl-assert (equal (plist-get (scm--request-sync 'eval '(:code "(display \"hi\\n\") (string-append \"a\" \"b\")")) :output) "hi\n"))
 (cl-assert (eq (plist-get (scm--request-sync 'parse '(:code "(+ 1")) :framing) 'incomplete))
 (cl-assert (member "vector-ref" (scm--candidates "vector-r")))
-(let ((r (scm--request-sync 'describe '(:name "map"))))
+(let ((r (scm--request-sync 'describe '(:name "fold-left"))))
   (cl-assert (plist-get r :bound))
   (cl-assert (equal (plist-get r :kind) "procedure")))
+;; `map' is the machine's since S41 (vm/iter.rs), and says so.
+(cl-assert (equal (plist-get (scm--request-sync 'describe '(:name "map")) :kind) "primitive"))
 ;; A signature reaches eldoc in the spelling a Scheme or Racket reader knows
 ;; (S21b): `:units units', not `&named units'. This is the protocol half of
 ;; that change -- what the editor shows is whatever `describe' returns.
