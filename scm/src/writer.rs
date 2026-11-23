@@ -68,6 +68,32 @@ fn children(e: &Engine, r: ObjRef, out: &mut Vec<Value>) {
     }
 }
 
+/// S42: the records in V that `write` would reach and whose type is one of
+/// TYPES, each once, with its type: through pairs and vectors, as the
+/// printer goes, and not into a record, which prints as its printer says.
+pub(crate) fn records_in(e: &Engine, v: Value, types: &[Value]) -> Vec<(Value, Value)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![v];
+    let mut kids = Vec::new();
+    while let Some(v) = stack.pop() {
+        let Value::Obj(r) = v else { continue };
+        if !seen.insert(r) {
+            continue;
+        }
+        if let Obj::Record { rtype, .. } = e.obj(r) {
+            if types.contains(rtype) {
+                out.push((v, *rtype));
+            }
+            continue;
+        }
+        kids.clear();
+        children(e, r, &mut kids);
+        stack.extend(kids.iter().rev());
+    }
+    out
+}
+
 /// Refs that lie on a cycle, found with an explicit stack rather than
 /// recursion -- a structure deep enough to need labels is also deep enough to
 /// overflow a recursive walk, and requirement 8 says the host survives.
@@ -318,6 +344,9 @@ fn emit(
                     stack.push(Job::Text(" "));
                 }
             }
+            // A record whose type has a printer (S42): the text its
+            // printer made, which the caller ran first.
+            Obj::Record { .. } if e.record_views.contains_key(&r) => out.push_str(&e.record_views[&r]),
             // R7RS does not specify how a record prints. The name alone,
             // because a record may contain itself and the label machinery
             // for shared structure covers pairs and vectors only.

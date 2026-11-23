@@ -184,7 +184,7 @@ simplification, which the differential fuzzer checks on every run. See
 
 ## The additions
 
-Six things this language has that R7RS-small does not. Each is here for a
+Seven things this language has that R7RS-small does not. Each is here for a
 named consumer rather than for taste, each is listed so a host knows what it
 is relying on, and none of them changes the meaning of a standard program.
 
@@ -332,6 +332,20 @@ When nothing in Scheme refers to one any longer, the collector frees it and
 the host's value is dropped -- at the next full collection, for one that has
 lived through others. The consumer is lux, whose renderer is Scheme over a
 GPU (its plan's M3); R7RS has no notion of a foreign value at all.
+
+### 7. Record printers
+
+`(set-record-type-printer! type printer)` -- Guile's extension, in Guile's
+spelling -- gives a record type its printed form: PRINTER, a procedure of
+the record and a port, writes it, and `write`, `display`, `write-shared`,
+`write-simple` and a host's printing (a REPL's answer, `describe`) print
+that wherever one of its records would print `#<type>`, in a list or
+vector or another record's printer. Setting it again replaces it. A record
+met again inside its own printing prints as `#<type>`, so one that holds
+itself does not print forever. A printer that raises fails the `write`;
+a host's printing falls back on `#<type>` instead. The consumer is lux,
+whose app state is records that printed as `#<%mrec>`; R7RS says nothing
+of how a record prints.
 
 ## The limits
 

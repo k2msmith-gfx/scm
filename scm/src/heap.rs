@@ -798,6 +798,12 @@ pub struct Engine {
     /// otherwise report the location of whatever *used* to live there, which
     /// is worse than reporting nothing.
     locs: HashMap<ObjRef, Loc>,
+    /// S42: what each record with a printer prints as, while one value is
+    /// being printed. The prelude's `write` and `display`, and the host's
+    /// [`crate::Interp::pretty`], run the printers first -- the printer
+    /// in `writer.rs` cannot call Scheme -- set this, print, and clear it.
+    /// Each record in it is reachable from the value being printed.
+    pub(crate) record_views: HashMap<ObjRef, String>,
     /// Where output goes as it happens, when a host asked for it, and the
     /// one port it applies to.
     ///
@@ -912,6 +918,7 @@ impl Engine {
             collections: 0,
             handles: Vec::new(),
             locs: HashMap::default(),
+            record_views: HashMap::default(),
             sink: None,
             stream_port: None,
             aliases: HashMap::default(),

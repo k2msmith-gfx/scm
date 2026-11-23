@@ -3457,6 +3457,66 @@ fn record_type_parts(e: &Engine, t: Value) -> Option<(SymId, Rc<Vec<SymId>>)> {
     }
 }
 
+// ---- record printers (S42) ------------------------------------------------
+//
+// `set-record-type-printer!` is the prelude's: a printer is Scheme, and the
+// printer in writer.rs cannot call Scheme. So `write`, `display` and the
+// host's `pretty` find the records a value holds whose types have printers
+// (`%records-in`), run each printer into a string port, hand the texts to
+// the engine (`%set-record-views!`), print, and clear them.
+
+/// The items of the proper list V, or an error naming WHO.
+fn list_items(e: &Engine, who: &str, mut v: Value) -> Result<Vec<Value>, VmError> {
+    let mut out = Vec::new();
+    loop {
+        match v {
+            Value::Null => return Ok(out),
+            Value::Obj(r) => match *e.obj(r) {
+                Obj::Pair(car, cdr) => {
+                    out.push(car);
+                    v = cdr;
+                }
+                _ => return Err(err(format!("{who}: not a proper list"))),
+            },
+            _ => return Err(err(format!("{who}: not a proper list"))),
+        }
+    }
+}
+
+/// `(%records-in x types)` => `((record . type) …)`: each record `write`
+/// would reach in X whose type is in the list TYPES, once.
+fn p_records_in(e: &mut Engine, a: &[Value]) -> PResult {
+    let [x, types] = a else {
+        return Err(err("%records-in: expects a value and a list of record types"));
+    };
+    let types = list_items(e, "%records-in", *types)?;
+    let found = crate::writer::records_in(e, *x, &types);
+    let pairs: Vec<Value> = found.into_iter().map(|(r, t)| e.cons(r, t)).collect();
+    Ok(e.list(&pairs))
+}
+
+/// `(%set-record-views! ((record . text) …))`: what those records print as
+/// until the next call; `'()` clears it.
+fn p_set_record_views(e: &mut Engine, a: &[Value]) -> PResult {
+    let [alist] = a else {
+        return Err(err("%set-record-views!: expects an association list"));
+    };
+    let mut views = Vec::new();
+    for entry in list_items(e, "%set-record-views!", *alist)? {
+        let Value::Obj(p) = entry else {
+            return Err(err("%set-record-views!: each entry is (record . text)"));
+        };
+        let Obj::Pair(Value::Obj(r), text) = *e.obj(p) else {
+            return Err(err("%set-record-views!: each entry is (record . text)"));
+        };
+        let text: String = str_chars("%set-record-views!", e, text)?.iter().collect();
+        views.push((r, text));
+    }
+    e.record_views.clear();
+    e.record_views.extend(views);
+    Ok(Value::Unspecified)
+}
+
 /// `(%record-type 'name '(field …))`
 fn p_record_type(e: &mut Engine, a: &[Value]) -> PResult {
     let [Value::Symbol(name), fields] = a else {
@@ -5131,6 +5191,8 @@ pub fn install(vm: &mut Vm) {
     vm.define_prim("%array-strides", p_array_strides);
     vm.define_prim("%array-offset", p_array_offset);
     vm.define_prim("%record-type", p_record_type);
+    vm.define_prim("%records-in", p_records_in);
+    vm.define_prim("%set-record-views!", p_set_record_views);
     vm.define_prim("%record-make", p_record_make);
     vm.define_prim("%record-is?", p_record_is);
     vm.define_prim("%record-get", p_record_get);

@@ -628,3 +628,23 @@ fn a_callback_stored_by_a_host_function_that_then_reenters_survives() {
         assert_eq!(i.value(&v).unwrap(), Val::Int(n + 2), "fired from a host call, round {n}");
     }
 }
+
+/// S42: a host prints a value as `write` would, record printers and all --
+/// a REPL's answer is `pretty` -- and a printer that fails leaves its
+/// records as `#<type>` rather than failing the answer.
+#[test]
+fn a_hosts_printing_uses_record_printers() {
+    let mut it = Interp::new().unwrap();
+    it.eval("(define-record-type point (make-point x y) point? (x point-x) (y point-y))").unwrap();
+    let p = it.eval("(list (make-point 1 2) 'a)").unwrap();
+    assert_eq!(it.write(&p).unwrap(), "(#<point> a)");
+    it.eval("(set-record-type-printer! point (lambda (r port) (display \"#<point \" port) (write (point-x r) port) (display \">\" port)))")
+        .unwrap();
+    assert_eq!(it.write(&p).unwrap(), "(#<point 1> a)");
+    assert_eq!(it.display(&p).unwrap(), "(#<point 1> a)");
+    assert_eq!(it.pretty(&p, 80).unwrap(), "(#<point 1> a)");
+    it.eval("(define pt (make-point 7 8))").unwrap();
+    assert_eq!(it.describe("pt").unwrap().value, "#<point 7>");
+    it.eval("(set-record-type-printer! point (lambda (r port) (error \"no\")))").unwrap();
+    assert_eq!(it.pretty(&p, 80).unwrap(), "(#<point> a)");
+}

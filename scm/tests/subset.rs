@@ -225,6 +225,21 @@ fn the_documented_additions_hold() {
     // the rest, through a host.
     assert_eq!(eval("(list (host-object? 5) (host-object? (vector)))"), "(#f #f)");
     assert!(eval("(host-object-kind 5)").contains("not a host object"));
+
+    // 7. Record printers: wherever the record is, replaced, self-holding.
+    let printed = |body: &str| {
+        eval(&format!(
+            "(define-record-type cell (make-cell v) cell? (v cell-v set-cell-v!)) \
+             (define (w x) (let ([p (open-output-string)]) (write x p) (get-output-string p))) {body}"
+        ))
+    };
+    assert_eq!(printed("(w (make-cell 1))"), "\"#<cell>\"");
+    let print_v = "(set-record-type-printer! cell (lambda (r p) (display \"<\" p) (write (cell-v r) p) (display \">\" p)))";
+    assert_eq!(printed(&format!("{print_v} (w (list (make-cell 1) (vector (make-cell 2))))")), "\"(<1> #(<2>))\"");
+    assert_eq!(printed(&format!("{print_v} (set-record-type-printer! cell (lambda (r p) (display 'c p))) (w (make-cell 1))")), "\"c\"");
+    assert_eq!(printed(&format!("{print_v} (define c (make-cell #f)) (set-cell-v! c c) (w c)")), "\"<#<cell>>\"");
+    assert!(raises("(define-record-type cell (make-cell v) cell? (v cell-v)) \
+                    (set-record-type-printer! cell (lambda (r p) (error \"no\"))) (write (make-cell 1))"));
 }
 
 #[test]

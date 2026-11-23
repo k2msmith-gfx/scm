@@ -618,6 +618,78 @@
        (define (acc o) (%record-get o t 'f))
        (define (mod o v) (%record-put! o t 'f v)))]))
 
+;; ── record printers (S42) ────────────────────────────────────────────────
+;;
+;; `(set-record-type-printer! type printer)`, Guile's extension and Guile's
+;; spelling: PRINTER, `(lambda (record port) ...)`, writes the record to the
+;; port, and `write`, `display` and a REPL's answer print what it wrote
+;; where they would print `#<type>`. The printer in writer.rs cannot call
+;; Scheme, so printing runs the printers first: the records a value holds
+;; whose types have printers (`%records-in`), each printed into a string,
+;; the texts handed to the engine (`%set-record-views!`) for the one print.
+;; Until a program sets its first printer, `write`, `display`, `write-shared`
+;; and `write-simple` are the primitives as they were -- no cost, and the
+;; leaf compiler still refuses `display` as the impure primitive it is --
+;; and setting one rebinds them to the procedures below that run printers.
+
+(define %record-printers '())   ; ((type . printer) ...)
+
+(define (set-record-type-printer! type printer)
+  (unless (procedure? printer)
+    (error "set-record-type-printer!: the printer is a procedure of a record and a port" printer))
+  (set! %record-printers
+        (cons (cons type printer)
+              (let drop ([ps %record-printers])
+                (cond [(null? ps) '()]
+                      [(eq? (car (car ps)) type) (cdr ps)]
+                      [else (cons (car ps) (drop (cdr ps)))]))))
+  (set! write %viewed-write)
+  (set! display %viewed-display)
+  (set! write-shared %viewed-write-shared)
+  (set! write-simple %viewed-write-simple))
+
+;; The records whose printers are running: one met again inside its own
+;; printing -- a record that holds itself -- prints as `#<type>`.
+(define %printing '())
+
+;; What each record in X with a printer prints as: ((record . text) ...).
+(define (%record-views x)
+  (let loop ([rs (%records-in x (map car %record-printers))] [out '()])
+    (if (null? rs)
+        out
+        (let ([r (car (car rs))])
+          (loop (cdr rs)
+                (if (memq r %printing)
+                    out
+                    (cons (cons r (%record-text r (cdr (assq (cdr (car rs)) %record-printers)))) out)))))))
+
+(define (%record-text r printer)
+  (let ([port (open-output-string)] [outer %printing])
+    (dynamic-wind
+     (lambda () (set! %printing (cons r outer)))
+     (lambda () (printer r port) (get-output-string port))
+     (lambda () (set! %printing outer)))))
+
+;; THUNK, which prints X, with X's records printed by their printers.
+(define (%with-record-views x thunk)
+  (let ([views (%record-views x)])
+    (if (null? views)
+        (thunk)
+        (dynamic-wind
+         (lambda () (%set-record-views! views))
+         thunk
+         (lambda () (%set-record-views! '()))))))
+
+(define %write write)
+(define %display display)
+(define %write-shared write-shared)
+(define %write-simple write-simple)
+
+(define (%viewed-write x . port) (%with-record-views x (lambda () (apply %write x port))))
+(define (%viewed-display x . port) (%with-record-views x (lambda () (apply %display x port))))
+(define (%viewed-write-shared x . port) (%with-record-views x (lambda () (apply %write-shared x port))))
+(define (%viewed-write-simple x . port) (%with-record-views x (lambda () (apply %write-simple x port))))
+
 ;; `(list-set! lst k obj)`, which is just `set-car!` on the right pair.
 (define (list-set! lst k obj) (set-car! (list-tail lst k) obj))
 

@@ -283,6 +283,25 @@ fn the_native_iterations_agree_with_the_scheme_they_replaced() {
     }
 }
 
+/// S42: `set-record-type-printer!` -- what `write` and `display` print for
+/// a record type's records, nested, self-holding and failing -- and again
+/// under a collector that runs at every safepoint, since the printers run
+/// before the print and the texts are kept by the record they belong to.
+#[test]
+fn record_printers_print_records_on_both_tiers() {
+    for tier in [Tier::T0, Tier::T1] {
+        assert_eq!(run(tier, "record-printer.scm"), "()", "record printers on {tier:?}");
+        let src = std::fs::read_to_string(test_dir().join("record-printer.scm")).unwrap();
+        let mut vm = Vm::with_tier(tier);
+        vm.engine.set_gc_stress(true);
+        let got = match vm.eval_str_named(&src, "record-printer.scm") {
+            Ok(v) => write_str(&vm.engine, v),
+            Err(e) => format!("the program failed: {e}"),
+        };
+        assert_eq!(got, "()", "record printers under gc stress on {tier:?}");
+    }
+}
+
 /// `(scm noise)` has no right answer to compare against, so the gate is
 /// on properties: deterministic, continuous across lattice boundaries, in
 /// the range it claims, exactly zero on the lattice for gradient noise,

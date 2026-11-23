@@ -780,11 +780,45 @@ impl Interp {
         Ok(self.root(raw))
     }
 
+    /// F, which prints the raw value V, with the records in V whose types
+    /// have printers printed as theirs say (S42): the prelude's
+    /// `%record-views` run first, since the printer cannot call Scheme. A
+    /// printer that fails leaves its records as `#<type>`.
+    fn printing<T>(&mut self, v: Value, f: impl FnOnce(&crate::heap::Engine) -> T) -> T {
+        let printers = self.vm.engine.interner.symbol("%record-printers");
+        let views = self.vm.engine.interner.symbol("%record-views");
+        if matches!(self.vm.global(printers), None | Some(Value::Null)) {
+            return f(&self.vm.engine);
+        }
+        let Some(proc) = self.vm.global(views) else { return f(&self.vm.engine) };
+        let vm = &mut self.vm;
+        let alist = match guard(|| vm.call_procedure(proc, vec![v])) {
+            Ok(Ok(alist)) => alist,
+            _ => return f(&self.vm.engine),
+        };
+        let mut cur = alist;
+        let mut texts = Vec::new();
+        while let Value::Obj(p) = cur {
+            let Obj::Pair(entry, rest) = *self.vm.engine.obj(p) else { break };
+            if let Value::Obj(e) = entry
+                && let Obj::Pair(Value::Obj(r), Value::Obj(t)) = *self.vm.engine.obj(e)
+                && let Obj::Str(chars) = self.vm.engine.obj(t)
+            {
+                texts.push((r, chars.iter().collect::<String>()));
+            }
+            cur = rest;
+        }
+        self.vm.engine.record_views.extend(texts);
+        let out = f(&self.vm.engine);
+        self.vm.engine.record_views.clear();
+        out
+    }
+
     /// `(write v)` as a string: the round-trippable spelling.
     pub fn write(&mut self, v: &Rooted) -> Result<String, Error> {
         self.enter()?;
         let raw = self.raw(v)?;
-        Ok(crate::writer::write_str(&self.vm.engine, raw))
+        Ok(self.printing(raw, |e| crate::writer::write_str(e, raw)))
     }
 
     /// `(display v)` as a string: the human one.
@@ -799,17 +833,17 @@ impl Interp {
             let vs = vs.clone();
             return Ok(vs
                 .iter()
-                .map(|x| crate::writer::pretty_str(&self.vm.engine, *x, width))
+                .map(|x| self.printing(*x, |e| crate::writer::pretty_str(e, *x, width)))
                 .collect::<Vec<_>>()
                 .join("\n"));
         }
-        Ok(crate::writer::pretty_str(&self.vm.engine, value, width))
+        Ok(self.printing(value, |e| crate::writer::pretty_str(e, value, width)))
     }
 
     pub fn display(&mut self, v: &Rooted) -> Result<String, Error> {
         self.enter()?;
         let raw = self.raw(v)?;
-        Ok(crate::writer::display_str(&self.vm.engine, raw))
+        Ok(self.printing(raw, |e| crate::writer::display_str(e, raw)))
     }
 
     /// Scheme's `eqv?`, which is the question [`Rooted`]'s `PartialEq` is not
@@ -862,7 +896,7 @@ impl Interp {
                 _ => "variable",
             }
             .to_string(),
-            value: crate::writer::write_str(&self.vm.engine, v),
+            value: self.printing(v, |e| crate::writer::write_str(e, v)),
         })
     }
 
