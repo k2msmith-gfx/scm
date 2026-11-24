@@ -1060,6 +1060,76 @@ mod backend_tests {
         s.call("(remote-stop)");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Opening a Scheme file asks which installed Scheme to start, a Lisp
+    /// file whether to start SBCL (Kevin: "If you say no (n), it doesn't
+    /// ask again for that file"); nothing is asked while the backend
+    /// running takes the file. The lux is a stand-in serving as scm.
+    #[test]
+    fn opening_a_file_asks_for_a_backend_and_no_is_remembered() {
+        let on_path = |p: &str| std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success());
+        if !on_path("scm") {
+            eprintln!("skipped: no scm on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("edit-ask-backend-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let (a, b, c, l) = (dir.join("a.scm"), dir.join("b.scm"), dir.join("c.scm"), dir.join("x.lisp"));
+        for f in [&a, &b, &c] {
+            std::fs::write(f, "(define x 1)\n").unwrap();
+        }
+        std::fs::write(&l, "(defun f () 1)\n").unwrap();
+        let log = dir.join("log");
+        let lux = dir.join("lux");
+        std::fs::write(&lux, format!("#!/bin/sh\necho \"$@\" >> {}\nfor x; do addr=$x; done\nexec scm --serve \"$addr\"\n", log.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lux, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        s.call(&format!("(set! *lux-program* \"{}\") (set! *guile-program* \"no-such-guile\") (set! *ask-backend-on-open* #t)", lux.display()));
+        let open = |s: &mut super::super::standalone::Session, f: &std::path::Path| {
+            s.call("(mini-dismiss)");
+            s.call(&format!("(open-path \"{}\")", f.display()));
+        };
+        let asked = |s: &mut super::super::standalone::Session| -> Option<String> {
+            (crate::app::typing() == Some(crate::app::MINIBUFFER)).then(|| s.eval_to_string("(%edit :prompt)").unwrap())
+        };
+        let answer = |s: &mut super::super::standalone::Session, key: &str| s.call(&format!("((%edit :on-submit) {key:?})"));
+
+        // A Scheme file: the Schemes installed, Guile not.
+        open(&mut s, &a);
+        let q = asked(&mut s).expect("asked on opening a.scm");
+        assert!(q.contains("lux (l)") && q.contains("scm (s)") && !q.contains("guile"), "{q}");
+        answer(&mut s, "n");
+        assert_eq!(s.eval_to_string("(if *remote* 1 0)").unwrap(), "0", "no starts nothing");
+        open(&mut s, &b);
+        assert!(asked(&mut s).is_some(), "another file is asked about");
+        s.call("(mini-dismiss)");
+        open(&mut s, &a);
+        assert_eq!(asked(&mut s), None, "a file answered no is not asked again");
+
+        // l starts lux on the file; a Scheme file opened then is not asked.
+        open(&mut s, &b);
+        answer(&mut s, "l");
+        assert!(std::fs::read_to_string(&log).unwrap().starts_with(&format!("{} --serve ", b.display())));
+        assert_eq!(s.eval_to_string("*remote-kind*").unwrap(), "\"lux\"");
+        open(&mut s, &c);
+        assert_eq!(asked(&mut s), None, "lux takes c.scm already");
+
+        // A Lisp file asks about SBCL, saying what it stops.
+        open(&mut s, &l);
+        if on_path("sbcl") {
+            let q = asked(&mut s).expect("asked on opening x.lisp");
+            assert!(q.contains("sbcl backend (stops lux)? (y/n)"), "{q}");
+            answer(&mut s, "y");
+            assert_eq!(s.eval_to_string("(sbcl-running?)").unwrap(), "#t");
+            assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"CL-USER> \"");
+        }
+        s.call("(remote-stop)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// E6: GNU Guile through the same backend — a Guile the editor starts, running

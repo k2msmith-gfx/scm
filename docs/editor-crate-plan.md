@@ -928,6 +928,20 @@ asked for ([repl.md](repl.md), "Events").
     `remote-start` offers only `installed-backends`; starting one not
     installed raises "guile is not installed — no `guile` on PATH; set
     *guile-program* to where it is", the one running left running.
+  - **Asked on opening a file** (Kevin, 2026-11-23: "If one opens or
+    creates a .scm file, ask 'open lux (l), scm (s) or guile (g) backend?
+    no (n)' ... If you say no (n), it doesn't ask again for that file").
+    The standalone's `open-path` (C-x C-f, the file tree, a new file)
+    asks, through `offer-backend`: a Scheme file "Open a backend — lux (l),
+    scm (s), guile (g) — or no (n)?", the installed ones only; a Lisp file
+    "Open an sbcl backend? (y/n)"; "(stops lux)" when one of another kind
+    runs. n, or RET alone, is remembered for the file this session; C-g
+    asks next time. Not asked while the backend running takes the file,
+    for the editor's own files or ray's scenes, nor in the modeler. The
+    files named on the command line are asked about once, the one on
+    screen, after the editor has the keyboard. A Lisp file answered no
+    still starts SBCL on its first send. `*ask-backend-on-open*` #f in
+    init.scm turns it off; the tests boot with it off.
   - `%remote-address` answers #f once the server has closed the
     connection, so a closed lux window reads as nothing running.
   - Test: `one_backend_at_a_time_and_every_scheme_file_sends_to_it`, with
