@@ -4861,16 +4861,32 @@ fn file_err(e: &mut Engine, msg: &str) -> VmError {
     VmError::Raised(obj, text)
 }
 
+/// A file's name as the system takes it: a leading `~` or `~/` is HOME, as a
+/// shell has it, so (load "~/devel/x.scm") is the file a terminal's `ls
+/// ~/devel/x.scm` lists (Kevin, 2026-11-23); the prompt's TAB completes
+/// `~/` names too. Anything else, and with no HOME, as it is.
+pub(crate) fn home_path(path: &str, home: Option<&str>) -> String {
+    match (home, path.strip_prefix('~')) {
+        (Some(home), Some("")) => home.to_string(),
+        (Some(home), Some(rest)) if rest.starts_with('/') => format!("{home}{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+fn system_path(path: &str) -> String {
+    home_path(path, std::env::var("HOME").ok().as_deref())
+}
+
 fn p_file_exists(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("file-exists?", a)?;
     let path: String = str_chars("file-exists?", e, v)?.iter().collect();
-    Ok(Value::Bool(std::path::Path::new(&path).exists()))
+    Ok(Value::Bool(std::path::Path::new(&system_path(&path)).exists()))
 }
 
 fn p_delete_file(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("delete-file", a)?;
     let path: String = str_chars("delete-file", e, v)?.iter().collect();
-    match std::fs::remove_file(&path) {
+    match std::fs::remove_file(system_path(&path)) {
         Ok(()) => Ok(Value::Unspecified),
         Err(err_io) => Err(file_err(e, &format!("delete-file: {path}: {err_io}"))),
     }
@@ -4879,7 +4895,7 @@ fn p_delete_file(e: &mut Engine, a: &[Value]) -> PResult {
 fn p_open_input_file(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("open-input-file", a)?;
     let path: String = str_chars("open-input-file", e, v)?.iter().collect();
-    match std::fs::read_to_string(&path) {
+    match std::fs::read_to_string(system_path(&path)) {
         Ok(text) => Ok(e.port(PortKind::StringIn {
             chars: text.chars().collect(),
             pos: 0,
@@ -4894,8 +4910,9 @@ fn p_open_input_file(e: &mut Engine, a: &[Value]) -> PResult {
 fn p_open_output_file(e: &mut Engine, a: &[Value]) -> PResult {
     let v = one("open-output-file", a)?;
     let path: String = str_chars("open-output-file", e, v)?.iter().collect();
-    match std::fs::File::create(&path) {
-        Ok(_) => Ok(e.port(PortKind::FileOut { path, buf: String::new() })),
+    let real = system_path(&path);
+    match std::fs::File::create(&real) {
+        Ok(_) => Ok(e.port(PortKind::FileOut { path: real, buf: String::new() })),
         Err(err_io) => Err(file_err(e, &format!("open-output-file: {path}: {err_io}"))),
     }
 }
@@ -4911,7 +4928,7 @@ const BUILTIN_DOCS: &[(&str, &str, &str)] = &[
         "Read the file FILENAME and evaluate its forms in order, at top level, \
          as if each were typed at the REPL; its value is the last form's. A \
          relative FILENAME is from the current directory, where the program \
-         was started. Loading a changed file again redefines what it defines. \
+         was started; ~/ at its start is your home directory. Loading a changed file again redefines what it defines. \
          An error stops the load at that form, keeping what came before, and \
          the backtrace names the file and line.",
     ),
@@ -4948,7 +4965,7 @@ const BUILTIN_DOCS: &[(&str, &str, &str)] = &[
 fn load_prim(vm: &mut Vm, a: &[Value]) -> PResult {
     let v = one("load", a)?;
     let path: String = str_chars("load", &vm.engine, v)?.iter().collect();
-    let text = std::fs::read_to_string(&path)
+    let text = std::fs::read_to_string(system_path(&path))
         .map_err(|io| file_err(&mut vm.engine, &format!("load: {path}: {io}")))?;
     vm.eval_str_named(&text, &path)
 }
@@ -5435,4 +5452,20 @@ fn p_host_object_kind(e: &mut Engine, a: &[Value]) -> PResult {
         return Ok(Value::Symbol(e.interner.symbol(&kind)));
     }
     Err(err(format!("host-object-kind: not a host object: {}", write_str(e, v))))
+}
+
+#[cfg(test)]
+mod home_paths {
+    use super::home_path;
+
+    #[test]
+    fn a_leading_tilde_is_home_and_nothing_else_is() {
+        let home = Some("/Users/k");
+        assert_eq!(home_path("~/devel/x.scm", home), "/Users/k/devel/x.scm");
+        assert_eq!(home_path("~", home), "/Users/k");
+        assert_eq!(home_path("~bob/x", home), "~bob/x", "another user's home is not looked up");
+        assert_eq!(home_path("a/~/b", home), "a/~/b");
+        assert_eq!(home_path("x.scm", home), "x.scm");
+        assert_eq!(home_path("~/x", None), "~/x", "with no HOME, as it is");
+    }
 }

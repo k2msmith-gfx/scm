@@ -355,6 +355,13 @@ fn the_system_interface() {
     assert_eq!(eval("(exact? (jiffies-per-second))"), "#t");
     assert_eq!(eval("(file-exists? \".\")"), "#t");
     assert_eq!(eval("(file-exists? \"/no/such/file\")"), "#f");
+    // ~ is HOME, as a shell has it: (load "~/devel/x.scm") is the file a
+    // terminal's ~/devel/x.scm is.
+    if std::env::var("HOME").is_ok_and(|h| std::path::Path::new(&h).is_dir()) {
+        assert_eq!(eval("(file-exists? \"~\")"), "#t");
+        assert_eq!(eval("(file-exists? \"~/\")"), "#t");
+    }
+    assert_eq!(eval("(file-exists? \"~no-such-user-12345/x\")"), "#f", "~user is not expanded");
     // A missing file raises a FILE error, which file-error? identifies --
     // stubbing that would have been a lie dressed as a pass.
     assert_eq!(
