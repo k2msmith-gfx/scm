@@ -21,7 +21,6 @@
 ;## `:top` all of them. C-h e shows the calls with their locals.
 
 (define *sbcl-program* "sbcl")   ; what sbcl-start runs
-(define *sbcl* #f)               ; the connection to it, once started
 (define *sbcl-init* #t)          ; load ~/.sbclrc (Quicklisp and the rest)? (D1)
 (define *sbcl-repl-package* "CL-USER")
 (define *sbcl-level* 0)          ; how many breaks deep the connection is
@@ -35,32 +34,36 @@
           (if *sbcl-init* '() (list "--no-userinit"))
           (list "--load" (%edit-path "sbcl/serve.lisp") "--end-toplevel-options" "{addr}")))
 
-; remote-start can start one too (14-remote's *schemes*).
+; SBCL is a backend as scm, lux and Guile are (14-remote): remote-start
+; offers it, it is the one backend while it runs -- the REPL is its REPL --
+; and remote-stop stops it. Its backend is lisp-backend's, and a fresh one
+; starts at CL-USER, no break deep.
 (define-scheme! "sbcl" (lambda () *sbcl-program*) sbcl-args "lisp")
-
-(define (sbcl-running?) (and *sbcl* (%remote-address *sbcl*) #t))
-
-(define (sbcl-start)
-  "Start an SBCL for the Lisp buffers' sends, or answer the one running —
-M-x sbcl-start. The first send from a Lisp buffer starts it; this is for
-starting it before then. It is the one backend: a Scheme running in a
-process of its own (14-remote's remote-start) stops."
-  (unless (sbcl-running?)
-    ; One backend (14-remote): the Scheme running in a process of its own stops.
-    (when (remote-running) (remote-stop))
-    (set! *sbcl* (%remote-start *sbcl-program* 0 (sbcl-args)))
+(hash-table-set! *backend-kinds* "sbcl" (lambda (conn) (lisp-backend conn)))
+(hash-table-set! *backend-started* "sbcl"
+  (lambda ()
     (set! *sbcl-repl-package* "CL-USER")
     (set! *sbcl-level* 0)
-    (set! *sbcl-asking* #f)
-    (echo "sbcl running at " (%remote-address *sbcl*)))
-  *sbcl*)
+    (set! *sbcl-asking* #f)))
+
+(define (sbcl-conn)
+  "The connection to SBCL while it runs as the backend, else #f."
+  (and (equal? *remote-kind* "sbcl") (remote-running)))
+
+(define (sbcl-running?) (and (sbcl-conn) #t))
+
+(define (sbcl-start)
+  "Start SBCL as the backend, or answer the one running — M-x sbcl-start,
+(remote-start \"sbcl\"). The first send from a Lisp buffer starts it too.
+The one running stops first; M-x remote-stop stops it."
+  (or (sbcl-conn)
+      (begin
+        (start-backend "sbcl")
+        (or (sbcl-conn) (error "sbcl did not start")))))
 
 (define (sbcl-stop)
-  "Stop the SBCL the editor started."
-  (when *sbcl*
-    (%remote-close *sbcl*)
-    (set! *sbcl* #f)
-    (echo "sbcl stopped")))
+  "Stop SBCL, when it is the backend — M-x remote-stop."
+  (when (sbcl-conn) (remote-stop)))
 
 (define (sbcl-restart)
   "Stop the SBCL and start a fresh one — everything sent to it is gone."
@@ -212,7 +215,7 @@ error, and a REPL line whole when its brackets close."
 (hash-table-set! *language-running* "lisp"
   (lambda ()
     (if (sbcl-running?)
-        (lisp-backend *sbcl*)
+        (lisp-backend (sbcl-conn))
         (list (cons :name "sbcl (not running)")
               (cons :complete (lambda (prefix) (buffer-words (%editor-text (editor-pane-id)) "-*+!?<>=/%&:")))
               (cons :doc (lambda (name) #f))
@@ -234,13 +237,13 @@ error, and a REPL line whole when its brackets close."
 (define (sbcl-read-poll)
   ; Put the next changed Lisp buffer to SBCL, when SBCL can take it.
   (when (and *sbcl-read-check* (not %sbcl-reading) (not *sbcl-asking*)
-             (sbcl-running?) (zero? (%remote-running *sbcl*)))
+             (sbcl-running?) (zero? (%remote-running (sbcl-conn))))
     (and-let* ((next (%read-pending "lisp")))
       (let ((path (car next)) (version (cadr next)) (text (caddr next)))
         (guard (e (#t (set! %sbcl-reading #f)))
           (set! %sbcl-reading #t)
           (hash-table-set! *remote-callbacks*
-            (cons *sbcl* (%remote-eval-async *sbcl* (lisp-call "read-check" text) #f))
+            (cons (sbcl-conn) (%remote-eval-async (sbcl-conn) (lisp-call "read-check" text) #f))
             (lambda (r)
               (set! %sbcl-reading #f)
               (let ((said (and (eq? (%alist-ref r :status #f) 'ok)
@@ -270,7 +273,7 @@ error, and a REPL line whole when its brackets close."
                    (%lisp-definitions path name (list (list path (%text (%editor-text eid)))))
                    '()))
          (loaded (if (sbcl-running?)
-                     (let ((s (lisp-ask *sbcl* (lisp-call "definitions-in" (lisp-buffer-package) name))))
+                     (let ((s (lisp-ask (sbcl-conn) (lisp-call "definitions-in" (lisp-buffer-package) name))))
                        (if (list? s) (filter (lambda (site) (and (list? site) (= (length site) 4))) s) '()))
                      '())))
     (append here

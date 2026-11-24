@@ -1001,6 +1001,65 @@ mod backend_tests {
         s.call("(remote-stop)");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// SBCL is a backend as the Schemes are (Kevin: "I think it is best they
+    /// all work exactly the same"): remote-start offers it, sbcl-start from a
+    /// Scheme file makes the REPL SBCL's while the Scheme files stay the
+    /// editor's image's, and remote-stop stops it. A backend not installed
+    /// is not offered, and starting it says so, leaving the one running.
+    #[test]
+    fn sbcl_is_a_backend_as_the_schemes_are_and_only_what_is_installed_starts() {
+        let on_path = |p: &str| std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success());
+        if !on_path("scm") || !on_path("sbcl") {
+            eprintln!("skipped: needs scm and sbcl on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("edit-sbcl-backend-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.scm");
+        std::fs::write(&a, "(define x 1)\n").unwrap();
+
+        crate::app::resize(800, 600, 1.0);
+        let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
+        s.call(&format!("(open-path \"{}\")", a.display()));
+        let prompt = |s: &mut super::super::standalone::Session| s.eval_to_string("(repl-prompt)").unwrap();
+        let sends_to = |s: &mut super::super::standalone::Session| s.eval_to_string("(%alist-ref (backend-of (%editor-active-buffer 1)) :name #f)").unwrap();
+
+        // What is installed: a program by name on PATH, or by its path.
+        assert_eq!(s.eval_to_string("(program-found? \"sbcl\")").unwrap(), "#t");
+        assert_eq!(s.eval_to_string("(program-found? \"no-such-program-at-all\")").unwrap(), "#f");
+        assert_eq!(s.eval_to_string("(program-found? \"/no/such/sbcl\")").unwrap(), "#f");
+        s.call("(set! *guile-program* \"no-such-guile\")");
+        let offered = s.eval_to_string("(installed-backends)").unwrap();
+        assert!(offered.contains("\"sbcl\"") && offered.contains("\"scm\"") && !offered.contains("\"guile\""), "{offered}");
+
+        // sbcl-start from a Scheme file: the REPL is SBCL's, the file the
+        // editor's image's; the scm running stopped.
+        s.call("(scm-start)");
+        let scm = s.eval_to_string("*remote*").unwrap();
+        s.call("(sbcl-start)");
+        assert_eq!(s.eval_to_string(&format!("(%remote-address {scm})")).unwrap(), "#f", "scm was stopped");
+        assert_eq!(prompt(&mut s), "\"CL-USER> \"");
+        assert_eq!(sends_to(&mut s), "\"this image\"", "a Scheme file never sends to SBCL");
+        let r = s.eval_to_string("(%alist-ref ((backend-op (repl-backend) :eval) \"(+ 40 2)\") :printed #f)").unwrap();
+        assert_eq!(r, "\"42\"", "the REPL evaluates in SBCL");
+
+        // A backend not installed: starting it says why; SBCL runs on.
+        let why = s.eval_to_string("(guard (e ((string? e) e)) (guile-start) \"started\")").unwrap();
+        assert!(why.contains("guile is not installed") && why.contains("*guile-program*"), "{why}");
+        assert_eq!(s.eval_to_string("(sbcl-running?)").unwrap(), "#t");
+
+        // remote-stop stops SBCL as it stops a Scheme.
+        s.call("(remote-stop)");
+        assert_eq!(s.eval_to_string("(sbcl-running?)").unwrap(), "#f");
+        assert_eq!(prompt(&mut s), "\"scheme λ > \"");
+
+        // remote-start "sbcl" is sbcl-start.
+        s.call("(remote-start \"sbcl\")");
+        assert_eq!(prompt(&mut s), "\"CL-USER> \"");
+        s.call("(remote-stop)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// E6: GNU Guile through the same backend — a Guile the editor starts, running
@@ -1557,7 +1616,7 @@ mod sbcl_tests {
         // Mended: the mark goes — and #.(error …) was neither run nor marked.
         s.call(r##"(%editor-edit 1 "#\\notachar" "#\\a")"##);
         assert_eq!(read(&mut s), "()");
-        let left = s.eval_to_string(r#"(lisp-ask *sbcl* "(list (find-symbol \"BRAND-NEW\" :shapes) (find-symbol \"F\" :shapes))")"#).unwrap();
+        let left = s.eval_to_string(r#"(lisp-ask (sbcl-conn) "(list (find-symbol \"BRAND-NEW\" :shapes) (find-symbol \"F\" :shapes))")"#).unwrap();
         assert_eq!(left, "(NIL NIL)", "reading interned nothing in SHAPES");
         // A package that does not exist.
         s.call(r#"(%editor-edit 1 "(list #\\a)" "(list (foo:bar))")"#);
@@ -1610,7 +1669,7 @@ mod sbcl_tests {
         assert_eq!(at(&mut s), "(\"main.lisp\" 1)", "M-, comes back");
         // Loaded from outside the project: SBCL says where.
         s.call(&format!(
-            "(sbcl-start) (lisp-ask *sbcl* \"(load (compile-file \\\"{}\\\" :output-file \\\"{}\\\"))\")",
+            "(sbcl-start) (lisp-ask (sbcl-conn) \"(load (compile-file \\\"{}\\\" :output-file \\\"{}\\\"))\")",
             path(&lib.join("far.lisp")),
             path(&top.join("far.fasl"))
         ));

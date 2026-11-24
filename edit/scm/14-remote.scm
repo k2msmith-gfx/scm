@@ -8,11 +8,14 @@
 ;## scm_binding/remote.rs.
 
 ; THE BACKEND (Kevin, 2026-11-23: "if you can have multiple backends
-; started, I say no"): ONE Scheme in a process of its own at a time,
-; started by remote-start -- or scm-start, lux-start, guile-start --
-; or attached by remote-connect. While it runs every Scheme file sends to
-; it (the host's *buffer-backend*); starting another, or a Lisp file's
-; SBCL (27-lisp), stops it.
+; started, I say no"; "I think it is best they all work exactly the same"):
+; ONE program in a process of its own at a time -- scm, lux, Guile or SBCL --
+; started by remote-start, or scm-start, lux-start, guile-start,
+; sbcl-start, or a Lisp file's first send, or attached by remote-connect.
+; While it runs the REPL is its REPL, whatever buffer is on screen, and the
+; files in its language send to it (the host's *buffer-backend*): the
+; Scheme files to a Scheme, the Lisp files to SBCL. Starting another stops
+; it; remote-stop stops it, and the REPL is the editor's image's again.
 (define *remote* #f)              ; the current connection's id, or #f
 (define *remote-kind* "scm")      ; which Scheme it is — a *schemes* name
 (define *remote-timeout* 30)      ; seconds a send waits before interrupting
@@ -26,6 +29,12 @@
 ; LANGUAGE a buffer sending to it is set to. 15-guile adds Guile; a third is
 ; one more define-scheme!.
 (define *schemes* '())
+
+; What a backend of a kind is, over its connection, where it is not
+; remote-backend's -- SBCL's lisp-backend, with its packages and breaks
+; (27-lisp) -- and what runs once one of the kind has started.
+(define *backend-kinds* (make-hash-table equal?))   ; kind -> (lambda (conn) backend)
+(define *backend-started* (make-hash-table equal?)) ; kind -> thunk
 
 ; Whether this HOST lets a buffer send to another process at all, as a
 ; FORWARD HOOK answering #t, or a string saying why not. The standalone
@@ -288,32 +297,52 @@ Asks which call and what; (eval-in-frame 1 \"x\") asks nothing."
   "The backend's connection while it runs, else #f."
   (and *remote* (%remote-address *remote*) *remote*))
 
+(define (remote-language)
+  ; The editor language of the backend's files: "scheme", "guile", "lisp".
+  (match (assoc *remote-kind* *schemes*)
+    ((name program args language) language)
+    (_ "scheme")))
+
+(define (scheme-remote)
+  "The backend's connection while it runs and is a Scheme -- scm, lux,
+Guile -- which the Scheme files send to; else #f (none, or SBCL)."
+  (and (remote-running) (member (remote-language) '("scheme" "guile")) *remote*))
+
+(define (the-backend)
+  "The backend while it runs, as a backend the REPL evaluates in -- SBCL's
+with its packages and breaks -- else #f."
+  (and (remote-running)
+       ((hash-table-ref/default *backend-kinds* *remote-kind* (lambda (conn) (remote-backend conn *remote-kind*)))
+        *remote*)))
+
 (define (stop-backends)
-  ; The one-backend rule: before another starts, the one running stops --
-  ; this one, and a Lisp file's SBCL (27-lisp).
+  ; The one-backend rule: before another starts, the one running stops.
   (when *remote*
     (%remote-close *remote*)
-    (set! *remote* #f))
-  (guard (e (#t #f))
-    (when (sbcl-running?) (sbcl-stop))))
+    (set! *remote* #f)))
 
 (define (remote-took! kind)
-  ; The backend is KIND now: the buffer on screen takes its language (a
-  ; Guile file Guile's), and the modeline and the echo say where it runs.
+  ; The backend is KIND now: a Scheme buffer on screen takes a Scheme's
+  ; language (a Guile file Guile's), and the modeline and the echo say
+  ; where it runs.
   (set! *remote-kind* kind)
-  (match (assoc kind *schemes*)
-    ((name program args language) (%editor-set-language (editor-pane-id) language))
-    (_ #f))
-  (status-refresh)
-  (echo kind " running at " (%remote-address *remote*) " — the Scheme files send there; M-x remote-stop stops it"))
+  (let ((here (%buffer-language (editor-pane-id) (%editor-active-buffer (editor-pane-id))))
+        (there (remote-language)))
+    (when (and (member here '("scheme" "guile")) (member there '("scheme" "guile")))
+      (%editor-set-language (editor-pane-id) there))
+    (let ((started (hash-table-ref/default *backend-started* kind #f)))
+      (when started (started)))
+    (status-refresh)
+    (echo kind " running at " (%remote-address *remote*) " — the REPL and the "
+          (if (equal? there "lisp") "Lisp" "Scheme") " files send there; M-x remote-stop stops it")))
 
 (define (remote-connect (addr "127.0.0.1:4007") (kind "scm"))
   "(remote-connect [\"HOST:PORT\" [KIND]])  ->  the connection
 
 Attach to a REPL server already running — SLIME's slime-connect — as THE
-backend, which every Scheme file sends to until M-x remote-stop; the one
-running stops. KIND names the Scheme it is (\"scm\", the default, or
-\"guile\" for a serve.scm). `ray --tcp` serves scm on 4007 (the default),
+backend, which the REPL and every file in its language send to until M-x
+remote-stop; the one running stops. KIND names what it is (\"scm\", the
+default, \"lux\", \"guile\" for a serve.scm, \"sbcl\" for serve.lisp). `ray --tcp` serves scm on 4007 (the default),
 `scm --serve HOST:PORT` anywhere, lux `--serve`. Its image is the one a
 send changes, and the one completion and describe read.
 
@@ -334,32 +363,76 @@ the error pane (C-h e) as a failed send does."
   (let ((lang (%buffer-language (editor-pane-id) (%editor-active-buffer (editor-pane-id)))))
     (or (any (lambda (s) (and (equal? (cadddr s) lang) (car s))) *schemes*) "scm")))
 
+; WHAT IS INSTALLED (Kevin, 2026-11-23: "should edit check to see what is
+; installed first so that it knows possible backends that can be
+; started"): a backend's program is looked for when it is offered or
+; started -- not once at start-up, so one installed, or a *…-program*
+; changed, since is seen. Looking runs nothing.
+(define (program-found? program)
+  "Is PROGRAM there to run: a path to a file, or a name in a directory on
+$PATH?"
+  (and (string? program)
+       (not (string=? program ""))
+       (if (string-contains program "/")
+         (file-exists? (expand-home program))
+         (any (lambda (dir) (and (not (string=? dir "")) (file-exists? (string-append dir "/" program))))
+              (string-split (or (get-environment-variable "PATH") "") ":")))))
+
+(define (backend-missing name)
+  ; Why backend NAME (*schemes*) cannot start -- its program not found --
+  ; or #f when it can.
+  (match (assoc name *schemes*)
+    ((name program args language)
+      (let ((p (program)))
+        (and (not (program-found? p))
+             (string-append name " is not installed — no `" (if (string? p) p "?")
+                            "` on PATH; set " (program-variable name) " to where it is"))))
+    (_ #f)))
+
+(define (program-variable name)
+  ; The variable naming backend NAME's program.
+  (if (equal? name "scm") "*remote-program*" (string-append "*" name "-program*")))
+
+(define (installed-backends)
+  "The backends remote-start can start here: those whose program is found."
+  (filter (lambda (name) (not (backend-missing name))) (map car *schemes*)))
+
+(define (start-backend name)
+  ; Start NAME (*schemes*) as the backend, the one running stopped first --
+  ; unless its program is not installed, which raises why, the one running
+  ; left running.
+  (match (assoc name *schemes*)
+    ((name program args language)
+      (let ((missing (backend-missing name)))
+        (when missing (raise missing)))
+      (stop-backends)
+      (set! *remote* (%remote-start (program) 0 (args)))
+      (%remote-subscribe *remote*)
+      (remote-took! name)
+      *remote*)
+    (_ (echo "nothing called " name " to start — " (string-join (map car *schemes*) ", ")) #f)))
+
 (define (remote-start (which #f))
-  "Start a Scheme in a process of its own as THE backend — SLIME's M-x
-slime — which every Scheme file sends to until M-x remote-stop; the one
-running stops first. Asks WHICH — scm, lux or guile (*schemes*), the
-buffer's own first — and the buffer on screen takes that Scheme's
-language. It asks the server for its events, as remote-connect does: lux's
+  "Start a program in a process of its own as THE backend — SLIME's M-x
+slime — which the REPL and every file in its language send to until M-x
+remote-stop; the one running stops first. Asks WHICH — scm, lux, guile or
+sbcl (*schemes*), those installed, the buffer's own first — and a Scheme buffer on screen
+takes a Scheme's language. It asks the server for its events, as remote-connect does: lux's
 pauses. A loop that never ends is interrupted after *remote-timeout*
 seconds; a crash takes the server, not the editor. (remote-start
-\"guile\") asks nothing; scm-start, lux-start and guile-start are each one."
-  (define (go name)
-    (match (assoc name *schemes*)
-      ((name program args language)
-        (stop-backends)
-        (set! *remote* (%remote-start (program) 0 (args)))
-        (%remote-subscribe *remote*)
-        (remote-took! name)
-        *remote*)
-      (_ (echo "no Scheme called " name " — " (string-join (map car *schemes*) ", ")) #f)))
+\"guile\") asks nothing; scm-start, lux-start, guile-start and sbcl-start
+are each one."
   (cond
     ((%remote-refused) #f)
-    (which (go which))
+    (which (start-backend which))
+    ((null? (installed-backends))
+      (echo "none of " (string-join (map car *schemes*) ", ") " is installed — set " (string-join (map program-variable (map car *schemes*)) ", ")) #f)
     (else
-      (read-minibuffer "Start which Scheme: "
-                       (lambda (s) (go (string-trim-both s)))
-                       (map car *schemes*)
-                       (buffer-scheme))
+      (let ((offered (installed-backends)))
+        (read-minibuffer "Start which: "
+                         (lambda (s) (start-backend (string-trim-both s)))
+                         offered
+                         (if (member (buffer-scheme) offered) (buffer-scheme) (car offered))))
       #f)))
 
 (define (scm-start)
@@ -376,15 +449,16 @@ remote-stop closes it. (remote-start \"lux\")."
   (remote-start "lux"))
 
 (define (remote-stop)
-  "Stop the backend — the Scheme remote-start began, or drop the one
-remote-connect attached. The Scheme files send to the editor's image again."
+  "Stop the backend — scm, lux, Guile or SBCL, however it was started — or
+drop the one remote-connect attached. The REPL and the Scheme files are
+the editor's image's again."
   (if (not *remote*)
-    (echo "no Scheme running in a process of its own")
+    (echo "no backend running")
     (begin
       (%remote-close *remote*)
       (set! *remote* #f)
       (status-refresh)
-      (echo *remote-kind* " stopped — the Scheme files send to the editor's image"))))
+      (echo *remote-kind* " stopped — the REPL is the editor's image's"))))
 
 (define (remote-interrupt)
   "Stop what the buffer's other process is evaluating — a send that runs

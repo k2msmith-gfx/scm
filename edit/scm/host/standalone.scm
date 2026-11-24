@@ -98,7 +98,7 @@ the shell's own (edit/scm/)?"
               => (lambda (b) (or (%alist-ref b :conn #f) 'self)))
             ((editor-buffer? buf p) 'self)
             ((not (scheme-buffer? buf p)) #f)
-            ((remote-running) => (lambda (conn) conn))
+            ((scheme-remote) => (lambda (conn) conn))
             ((or (not p) (ray-buffer? buf)) #f)
             (else 'self)))))
 
@@ -107,7 +107,7 @@ the shell's own (edit/scm/)?"
     (let ((p (buffer-path buf)))
       (cond ((editor-buffer? buf p) (in-process-backend))
             ((not (scheme-buffer? buf p)) #f)
-            ((remote-running) (remote-backend *remote* *remote-kind*))
+            ((scheme-remote) (remote-backend *remote* *remote-kind*))
             (else (in-process-backend))))))
 
 (define (run-in-editor-image)
@@ -226,20 +226,23 @@ the shell's own (edit/scm/)?"
 (set! *help-open* (lambda () (unless (%panel) (%show-panel :repl))))
 
 ; ── The REPL: the transcript with a prompt ─────────────────────────────────
-; It evaluates where the ACTIVE BUFFER's sends do — this image, the scm
-; image remote-start / remote-connect attached (14-remote), or a Guile
-; buffer's Guile (15-guile) — so the REPL and the buffer always agree, and
-; its prompt says which: scm's `scheme λ > `, or Guile's own
-; `scheme@(guile-user)> `. RET submits a form the reader says is complete
+; It evaluates in THE backend while one runs — scm, lux, Guile or SBCL,
+; however started (14-remote) — else where the active buffer's sends go,
+; else this image, and its prompt says which: `scm λ > `, `lux λ > `,
+; Guile's own `scheme@(guile-user)> `, SBCL's `CL-USER> `, this image's
+; `scheme λ > `. RET submits a form the reader says is complete
 ; and continues one that is not; up and down walk the history.
 (define *repl-history* '())
 (define *repl-pending* "")
 
 (define (repl-backend)
-  ; Where the REPL's forms go: the active buffer's backend, else this image
-  ; — never a terminal one, which is a program with its own prompt.
-  (let ((b (backend-of (%editor-active-buffer (editor-pane-id)))))
-    (if (and b (not (equal? (%alist-ref b :name #f) "the terminal"))) b (in-process-backend))))
+  ; Where the REPL's forms go: THE backend while one runs, whatever buffer
+  ; is on screen (14-remote) -- scm, lux, Guile or SBCL alike; else the
+  ; active buffer's backend, else this image — never a terminal one, which
+  ; is a program with its own prompt.
+  (or (the-backend)
+      (let ((b (backend-of (%editor-active-buffer (editor-pane-id)))))
+        (if (and b (not (equal? (%alist-ref b :name #f) "the terminal"))) b (in-process-backend)))))
 
 (define (repl-guile?)
   (string-prefix? "guile" (%alist-ref (repl-backend) :name "")))

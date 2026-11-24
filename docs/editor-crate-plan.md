@@ -910,6 +910,24 @@ asked for ([repl.md](repl.md), "Events").
     `status-refresh` after every key, click, release and wake), and the
     REPL's prompt follows the buffer -- `lux λ > `, `scm λ > `, Guile's --
     redrawn at the next key, not only when it takes the keyboard.
+  - **All four alike** (Kevin, 2026-11-23: "I think it is best they all
+    work exactly the same or confusion will occur"). SBCL is a backend as
+    scm, lux and Guile are: `*remote*` holds it (no `*sbcl*` of its own),
+    `remote-start` offers it, `sbcl-start` is `(remote-start "sbcl")`
+    and subscribes as the others do, and `remote-stop` stops it. While a
+    backend runs the REPL is ITS REPL whatever buffer is on screen --
+    `CL-USER> ` after `sbcl-start` from a Scheme file -- and the files in
+    its language send to it: a Scheme file never sends to SBCL, a Lisp file
+    never to a Scheme. 14-remote's `*backend-kinds*` gives SBCL's
+    `lisp-backend` (packages, breaks) and `*backend-started*` resets its
+    state.
+  - **What is installed** (Kevin: "should edit check to see what is
+    installed first"): `program-found?` looks a backend's program up on
+    $PATH, or at its path, when it is offered or started -- running
+    nothing, and not cached, so one installed later is seen.
+    `remote-start` offers only `installed-backends`; starting one not
+    installed raises "guile is not installed — no `guile` on PATH; set
+    *guile-program* to where it is", the one running left running.
   - `%remote-address` answers #f once the server has closed the
     connection, so a closed lux window reads as nothing running.
   - Test: `one_backend_at_a_time_and_every_scheme_file_sends_to_it`, with
