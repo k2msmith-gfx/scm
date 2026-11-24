@@ -4900,6 +4900,48 @@ fn p_open_output_file(e: &mut Engine, a: &[Value]) -> PResult {
     }
 }
 
+/// What the built-ins are, for `doc` and `signature` -- a primitive has no
+/// definition to carry a docstring: name, how it is called, what it does.
+/// Begun (Kevin, 2026-11-23: "(doc 'load)" answered #f) with `load` and
+/// the names the REPL's banner says to try; any built-in can be added.
+const BUILTIN_DOCS: &[(&str, &str, &str)] = &[
+    (
+        "load",
+        "(load filename)",
+        "Read the file FILENAME and evaluate its forms in order, at top level, \
+         as if each were typed at the REPL; its value is the last form's. A \
+         relative FILENAME is from the current directory, where the program \
+         was started. Loading a changed file again redefines what it defines. \
+         An error stops the load at that form, keeping what came before, and \
+         the backtrace names the file and line.",
+    ),
+    (
+        "map",
+        "(map proc list1 list2 ...)",
+        "A list of (proc x1 x2 ...) for the lists' elements taken in step: \
+         (map + '(1 2) '(10 20)) is (11 22). It stops at the shortest list.",
+    ),
+    (
+        "doc",
+        "(doc 'name)",
+        "NAME's docstring, or #f when it has none. A definition has one when \
+         its body begins with a string: (define (f x) \"Adds one.\" (+ x 1)).",
+    ),
+    (
+        "signature",
+        "(signature 'name)",
+        "How NAME is called, as a string -- its parameters, optional and \
+         keyword ones included -- or #f when NAME is not a procedure.",
+    ),
+    (
+        "apropos",
+        "(apropos \"text\")",
+        "The global names containing TEXT, sorted, then those whose \
+         docstring contains it, as a list of symbols; case does not matter. \
+         With no argument, every global name.",
+    ),
+];
+
 /// `(load path)`: read and evaluate every form in the file at top level,
 /// naming the file in backtraces. Nested evaluation is ordinary here: the
 /// explicit stack is what makes it so.
@@ -5112,6 +5154,9 @@ pub fn install(vm: &mut Vm) {
     vm.define_vm_prim("doc", doc_prim);
     vm.define_vm_prim("signature", signature_prim);
     vm.define_vm_prim("apropos", apropos_prim);
+    for (name, signature, doc) in BUILTIN_DOCS {
+        vm.document_builtin(name, signature, doc);
+    }
     vm.define_vm_prim("%syntax-names", syntax_names_prim);
     vm.define_vm_prim("display", display);
     vm.define_vm_prim("write", write_prim);

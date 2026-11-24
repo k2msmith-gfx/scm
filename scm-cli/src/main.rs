@@ -803,6 +803,10 @@ impl Completer for Hooks {
     type Candidate = Pair;
     fn complete(&self, line: &str, pos: usize, _ctx: &rustyline::Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
         let head = &line[..pos];
+        // Inside a string, TAB completes a file's name: (load "exa<TAB>.
+        if let Some(open) = string_open_at(head) {
+            return Ok(file_candidates(head, open + 1));
+        }
         let start = head
             .rfind(|c: char| c.is_whitespace() || "()[]'`,\"".contains(c))
             .map(|i| i + 1)
@@ -819,6 +823,70 @@ impl Completer for Hooks {
             .collect();
         Ok((start, candidates))
     }
+}
+
+/// Where the string the end of HEAD is inside opens, if it is inside one:
+/// the index of its `"`. A `"` in a comment or a `#\"` opens none.
+fn string_open_at(head: &str) -> Option<usize> {
+    let mut open = None;
+    let mut chars = head.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match (open, c) {
+            (Some(_), '\\') => {
+                chars.next();
+            }
+            (Some(_), '"') => open = None,
+            (Some(_), _) => {}
+            (None, '"') => open = Some(i),
+            (None, ';') => {
+                for (_, c) in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            (None, '#') if chars.peek().map(|&(_, c)| c) == Some('\\') => {
+                chars.next();
+                chars.next();
+            }
+            (None, _) => {}
+        }
+    }
+    open
+}
+
+/// The files and directories whose names start what HEAD has typed since
+/// FROM, its string's first character: where to put the name, and the
+/// names, a directory's with its `/`. Relative to the current directory --
+/// the server's too when lux, from a terminal, runs this prompt on itself;
+/// `~/` is home. Hidden files only for a name begun with a dot.
+fn file_candidates(head: &str, from: usize) -> (usize, Vec<Pair>) {
+    let typed = &head[from..];
+    let (dir, prefix, at) = match typed.rfind('/') {
+        Some(slash) => (&typed[..=slash], &typed[slash + 1..], from + slash + 1),
+        None => ("", typed, from),
+    };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let look = match dir {
+        "" => ".".to_string(),
+        d if d.starts_with("~/") => format!("{home}/{}", &d[2..]),
+        d => d.to_string(),
+    };
+    let mut names: Vec<Pair> = std::fs::read_dir(&look)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
+                return None;
+            }
+            let shown = if e.path().is_dir() { format!("{name}/") } else { name };
+            Some(Pair { display: shown.clone(), replacement: shown })
+        })
+        .collect();
+    names.sort_by(|a, b| a.display.cmp(&b.display));
+    (at, names)
 }
 
 impl Hinter for Hooks {
@@ -1029,4 +1097,34 @@ fn serve_forever(mut session: Session, addr: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(test)]
+mod file_completion {
+    use super::*;
 
+    #[test]
+    fn a_string_open_at_the_end_is_found_and_others_are_not() {
+        assert_eq!(string_open_at(r#"(load "exa"#), Some(6));
+        assert_eq!(string_open_at(r#"(load "a.scm") (f"#), None);
+        assert_eq!(string_open_at(r#"(f "a\"b"#), Some(3), "an escaped quote stays inside");
+        assert_eq!(string_open_at("; say \"\n(f"), None, "a comment's quote opens none");
+        assert_eq!(string_open_at(r#"(f #\" "x"#), Some(7), "nor a character's");
+    }
+
+    #[test]
+    fn a_file_name_completes_in_its_directory() {
+        let dir = std::env::temp_dir().join(format!("scm-files-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("examples")).unwrap();
+        std::fs::write(dir.join("examples/ball.scm"), "").unwrap();
+        std::fs::write(dir.join("examples/bounce.scm"), "").unwrap();
+        std::fs::write(dir.join("examples/.hidden"), "").unwrap();
+        let head = format!("(load \"{}/examples/b", dir.display());
+        let (at, names) = file_candidates(&head, 7);
+        assert_eq!(at, head.len() - 1, "the name replaces what was typed after the last /");
+        let shown: Vec<&str> = names.iter().map(|p| p.display.as_str()).collect();
+        assert_eq!(shown, ["ball.scm", "bounce.scm"]);
+        let head = format!("(load \"{}/ex", dir.display());
+        let (_, names) = file_candidates(&head, 7);
+        assert_eq!(names.iter().map(|p| p.display.as_str()).collect::<Vec<_>>(), ["examples/"], "a directory with its /");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

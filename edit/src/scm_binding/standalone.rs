@@ -1087,6 +1087,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// TAB at the REPL inside a string completes a file's name, as in a
+    /// buffer (04-minibuffer's in-string?): (load "…/exa<TAB> descends into
+    /// examples/, and a second TAB takes its one file (Kevin, 2026-11-23).
+    #[test]
+    fn tab_in_a_string_at_the_repl_completes_a_file() {
+        let dir = std::env::temp_dir().join(format!("edit-repl-files-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("examples")).unwrap();
+        std::fs::write(dir.join("examples/ball.scm"), "").unwrap();
+        crate::app::resize(800, 600, 1.0);
+        let mut s = Session::boot(None, &[]).expect("boot");
+        s.call("(repl-focus)");
+        s.text(&format!("(load \"{}/exa", dir.display()));
+        s.key("tab");
+        assert_eq!(s.eval_to_string("(%edit :text)").unwrap(), format!("\"(load \\\"{}/examples/\"", dir.display()));
+        s.key("tab");
+        assert_eq!(s.eval_to_string("(%edit :text)").unwrap(), format!("\"(load \\\"{}/examples/ball.scm\"", dir.display()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A pane's right-click menu WORKS over that pane: a click on an item
     /// runs it. Over the terminal, the file tree and the REPL the pane's own
     /// click handler took the click first, so the menu popped up and its

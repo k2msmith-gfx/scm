@@ -621,6 +621,9 @@ pub struct Vm {
     /// docstring is a property of the *definition* and most closures have
     /// none: putting it in the object would cost every lambda a word.
     docs: HashMap<SymId, String>,
+    /// How a built-in is called, for `signature`, where it has been
+    /// written down (prim.rs's `BUILTIN_DOCS`); the rest say `(name …)`.
+    builtin_sigs: HashMap<SymId, &'static str>,
     /// Host functions, indexed by `PrimId` alongside `prims` and `vm_prims`.
     host_fns: Vec<Option<HostFn>>,
     /// S14: the environments `live_frames` built for frames with flat
@@ -906,6 +909,7 @@ impl Vm {
             host_fns: Vec::new(),
             view_envs: Vec::new(),
             docs: HashMap::default(),
+            builtin_sigs: HashMap::default(),
             current_call: Value::Unspecified,
             last_backtrace: Vec::new(),
             eval_count: 0,
@@ -1173,6 +1177,14 @@ impl Vm {
             .collect()
     }
 
+    /// Give built-in NAME its call and docstring: a primitive has no
+    /// definition for a docstring to be part of.
+    pub(crate) fn document_builtin(&mut self, name: &str, signature: &'static str, doc: &str) {
+        let sym = self.engine.interner.symbol(name);
+        self.docs.insert(sym, doc.to_string());
+        self.builtin_sigs.insert(sym, signature);
+    }
+
     /// The docstring recorded for a name, if it has one.
     pub fn doc_of(&self, sym: SymId) -> Option<&str> {
         self.docs.get(&sym).map(String::as_str)
@@ -1183,7 +1195,10 @@ impl Vm {
     pub fn signature_of(&self, sym: SymId) -> Option<String> {
         let v = self.global(sym)?;
         match v {
-            Value::Primitive(id) => Some(format!("({} …)", self.engine.prim_name(id))),
+            Value::Primitive(id) => Some(match self.builtin_sigs.get(&sym) {
+                Some(sig) => sig.to_string(),
+                None => format!("({} …)", self.engine.prim_name(id)),
+            }),
             Value::Obj(r) => {
                 let Obj::Closure {
                     params,

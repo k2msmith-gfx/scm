@@ -276,7 +276,13 @@ its own over the same `Vm` API (`live_frames`, `bindings_of`, `eval_in`).
 Line editing and history (`~/.scm_history`) through rustyline, with the
 session's own answers behind its hooks: `RET` inside an unfinished form
 inserts a newline because the reader says *incomplete*, and tab completes
-over the global names. Comma commands belong to the client, not the
+over the global names -- or, inside a string, a file's name: `(load "exa`
+TAB gives `examples/`, a directory with its slash, from the current
+directory (`~/` is home; hidden files only for a name begun with a dot).
+`--connect` lists the client's directory, which is the server's when lux
+runs this prompt on itself. `--name NAME` and `--owner` name the program a
+`--connect` prompt is in -- lux's banner and `lux> ` -- and say it ends
+with the prompt. Comma commands belong to the client, not the
 language: `,load FILE`, `,time EXPR`, `,expand FORM`, `,expand1 FORM`,
 `,bt`, `,tier`, `,help`, `,quit`. Results are pretty-printed to 80 columns
 and multiple values print one per line. Without a terminal -- a pipe, a
