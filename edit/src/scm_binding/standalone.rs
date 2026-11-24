@@ -227,21 +227,14 @@ impl Session {
         }
         // The tests answer no backend question unless they ask for one.
         if cfg!(test) {
-            session.call("(set! *ask-backend-on-open* #f)");
+            session.call("(set! *ask-backend-on-send* #f)");
         }
-        // The files named are opened without asking which backend; the one
-        // on screen is asked about once the editor has the keyboard.
-        session.call("(define %ask-backend *ask-backend-on-open*) (set! *ask-backend-on-open* #f)");
         for f in files {
             session.call(&format!("(open-path {})", lit(f)));
         }
         let names: Vec<String> = files.iter().map(|f| lit(f)).collect();
         session.call(&format!("(edit-open-files (list {}))", names.join(" ")));
         session.call("(focus-scene-editor)");
-        session.call("(set! *ask-backend-on-open* %ask-backend)");
-        if !files.is_empty() {
-            session.call("(offer-backend-here)");
-        }
         Ok(session)
     }
 

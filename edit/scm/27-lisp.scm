@@ -204,9 +204,33 @@ error, and a REPL line whole when its brackets close."
     (define (started)
       (guard (e (#t (unavailable-backend "sbcl" e)))
         (lisp-backend (sbcl-start))))
-    (if (sbcl-running?)
-      (started)
-      (on-first-send "sbcl" started (list (cons :prompt sbcl-prompt) (cons :whole? %lisp-complete?))))))
+    (define (also) (list (cons :prompt sbcl-prompt) (cons :whole? %lisp-complete?)))
+    (let ((buf (%editor-active-buffer (editor-pane-id))))
+      (cond ((sbcl-running?) (started))
+            ((not *ask-backend-on-send*) (on-first-send "sbcl" started (also)))
+            ; Answered no: its sends say how to start one.
+            ((hash-table-ref/default *backend-answered* buf #f)
+              (let ((no (lambda () (send-failed "no Lisp running — M-x sbcl-start starts SBCL"))))
+                (append (list (cons :name "sbcl (not running)")
+                              (cons :eval (lambda (src) (no)))
+                              (cons :eval-async (lambda (src k) (k (no)))))
+                        (also))))
+            ; The first send asks (14-remote, Kevin 2026-11-23).
+            (else
+              (let ((ask (lambda (src k)
+                           (read-minibuffer
+                             "Start sbcl? (y/n) "
+                             (lambda (ans)
+                               (if (member (string-downcase (string-trim-both ans)) '("y" "yes"))
+                                 (start-for-send "sbcl" src k)
+                                 (begin
+                                   (hash-table-set! *backend-answered* buf #t)
+                                   (k (send-failed "not sent — no Lisp running; M-x sbcl-start starts SBCL")))))
+                             :plain))))
+                (append (list (cons :name "sbcl (not running)")
+                              (cons :eval-async ask)
+                              (cons :eval (lambda (src) (send-failed "no Lisp running — M-x sbcl-start starts SBCL"))))
+                        (also))))))))
 
 ; Completion, the argument hint and the REPL's TAB ask the SBCL that is
 ; running, and start none to ask. With none running a Lisp buffer offers

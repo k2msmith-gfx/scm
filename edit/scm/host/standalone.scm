@@ -108,7 +108,68 @@ the shell's own (edit/scm/)?"
       (cond ((editor-buffer? buf p) (in-process-backend))
             ((not (scheme-buffer? buf p)) #f)
             ((scheme-remote) (remote-backend *remote* *remote-kind*))
+            ((asks-for-backend? buf) (asking-backend buf))
             (else (in-process-backend))))))
+
+; ── A backend, asked for on the first send ─────────────────────────────────
+; (Kevin, 2026-11-23, choosing this over asking on opening a file, which
+; asked about every file opened only to be read, took the keys typed next,
+; and put stopping a running lux one key from opening a Lisp file.) The
+; first send from a Scheme file -- C-c C-c, C-M-x, the REPL -- while no
+; Scheme backend runs asks "Run in: editor (RET), lux (l), scm (s), guile
+; (g)?", the installed ones only: RET runs it here, as before, and the
+; buffer is not asked again; a Scheme starts as remote-start would, and
+; the send goes to it. A Lisp file asks "Start sbcl? (y/n)" (27-lisp).
+; Starting one while another runs asks first whether to stop it. Opening a
+; file asks nothing; the *-start commands and the REPL's menu start one
+; without being asked. *ask-backend-on-send* #f: no question -- a Scheme
+; file runs here, a Lisp file's first send starts SBCL.
+
+(define (asks-for-backend? buf)
+  ; Would a send from BUF, a Scheme buffer with no Scheme backend running,
+  ; ask where to run?
+  (and *ask-backend-on-send*
+       (eq? (*remote-allowed?*) #t)
+       (not (ray-buffer? buf))
+       (not (hash-table-ref/default *backend-answered* buf #f))
+       (pair? (scheme-choices))))
+
+(define (scheme-choices)
+  ; The Schemes a Scheme file can be asked to start: (key . name), installed.
+  (let ((installed (installed-backends)))
+    (filter (lambda (kv) (member (cdr kv) installed)) '(("l" . "lux") ("s" . "scm") ("g" . "guile")))))
+
+(define (asking-backend buf)
+  ; This image's backend, but a send asks first where it should run.
+  (cons (cons :eval-async
+              (lambda (src k)
+                (let ((cs (scheme-choices)))
+                  (read-minibuffer
+                    (string-append "Run in: editor (RET), "
+                                   (string-join (map (lambda (kv) (string-append (cdr kv) " (" (car kv) ")")) cs) ", ")
+                                   "? ")
+                    (lambda (ans)
+                      (let* ((a (string-downcase (string-trim-both ans)))
+                             (pick (assoc a cs)))
+                        (cond ((member a '("" "e"))
+                                (hash-table-set! *backend-answered* buf #t)
+                                (status-refresh)
+                                (k ((backend-op (in-process-backend) :eval) src)))
+                              (pick
+                                (start-for-send (cdr pick) src k))
+                              (else (k (send-failed (string-append "not sent — " ans " is none of the choices")))))))
+                    :plain))))
+        (in-process-backend)))
+
+; The modeline says a Scheme file will ask, as it says where one runs.
+(set! *buffer-hint*
+  (lambda (buf)
+    (cond ((and (scheme-buffer? buf (buffer-path buf))
+                (not (editor-buffer? buf (buffer-path buf)))
+                (not (scheme-remote))
+                (asks-for-backend? buf))
+            "no backend — a send asks")
+          (else #f))))
 
 (define (run-in-editor-image)
   "Send this buffer's forms to the EDITOR's own image — where the editor's
@@ -139,69 +200,8 @@ the shell's own (edit/scm/)?"
            (%editor-toggle-markdown eid))
           ((any (lambda (e) (string-suffix? e low)) '(".png" ".jpg" ".jpeg")) (viewer %editor-open-image))
           ((video-path? p) (viewer %editor-open-video))
-          (else (visit-file-text p) (offer-backend p)))))
+          (else (visit-file-text p)))))
 
-; ── A backend, asked for on opening a file ─────────────────────────────────
-; (Kevin, 2026-11-23: "If one opens or creates a .scm file, ask 'open lux
-; (l), scm (s) or guile (g) backend? no (n)' ... If you say no (n), it
-; doesn't ask again for that file. If you open a .lisp file, it asks 'open
-; an sbcl backend? (y/n)'.") Only what is installed is offered (14-remote's
-; installed-backends), and starting one stops the one running, as
-; remote-start does. Not asked while the backend running already takes the
-; file, for the editor's own files and ray's scenes, or again for a file
-; answered no (this session; C-g asks next time). A Lisp file answered no
-; still starts SBCL on its first send: there is no Lisp here to send to.
-; init.scm can (set! *ask-backend-on-open* #f).
-(define *ask-backend-on-open* #t)
-(define *backend-declined* (make-hash-table equal?))   ; path -> #t
-
-(define (backend-offer buf)
-  ; What to ask for BUF: (prompt (key . backend) ...), or #f for nothing.
-  (let ((lang (%buffer-language (editor-pane-id) buf))
-        (installed (installed-backends))
-        (stops (if (remote-running) (string-append " (stops " *remote-kind* ")") "")))
-    (cond ((member lang '("scheme" "guile"))
-           (let ((cs (filter (lambda (kv) (member (cdr kv) installed))
-                             '(("l" . "lux") ("s" . "scm") ("g" . "guile")))))
-             (and (not (scheme-remote)) (pair? cs)
-                  (cons (string-append "Open a backend" stops " — "
-                                       (string-join (map (lambda (kv) (string-append (cdr kv) " (" (car kv) ")")) cs) ", ")
-                                       " — or no (n)? ")
-                        cs))))
-          ((equal? lang "lisp")
-           (and (not (sbcl-running?)) (member "sbcl" installed)
-                (list (string-append "Open an sbcl backend" stops "? (y/n) ") (cons "y" "sbcl"))))
-          (else #f))))
-
-(define (offer-backend p)
-  "Ask whether to start a backend for the file at P, just opened in the
-buffer on screen: a Scheme of those installed for a Scheme file, SBCL for
-a Lisp file. One key and RET; n, or RET alone, is no, and P is not asked
-about again."
-  (let ((buf (%editor-active-buffer (editor-pane-id))))
-    (when (and *ask-backend-on-open*
-               (eq? (*remote-allowed?*) #t)
-               (not (editor-buffer? buf p))
-               (not (ray-buffer? buf))
-               (not (hash-table-ref/default *backend-declined* p #f)))
-      (and-let* ((offer (backend-offer buf)))
-        (read-minibuffer
-          (car offer)
-          (lambda (ans)
-            (let ((pick (assoc (string-downcase (string-trim-both ans)) (cdr offer))))
-              (if pick
-                (guard (e ((string? e) (echo e)))
-                  (start-backend (cdr pick)))
-                (begin
-                  (hash-table-set! *backend-declined* p #t)
-                  (echo "no backend for " (%text (buffer-name buf)) " — M-x remote-start starts one")))))
-          :plain)))))
-
-(define (offer-backend-here)
-  ; The files named on the command line are opened without asking; the
-  ; one on screen is asked about once the editor has the keyboard.
-  (let ((p (buffer-path (%editor-active-buffer (editor-pane-id)))))
-    (when (string? p) (offer-backend p))))
 
 ; A relative path at a file prompt is under the file tree's root
 ; (files-set-root moves it).
@@ -701,6 +701,9 @@ about again."
 (define-menu
   :transcript
   (list (list "back to the editor" focus-scene-editor "C-x o")
+        (list "Start a backend…" remote-start)
+        (list "Stop the backend" remote-stop)
+        (list "Connect…" (lambda () (read-minibuffer "Connect to (HOST:PORT): " (lambda (a) (remote-connect (string-trim-both a))) :plain "127.0.0.1:4007")))
         (list "Copy" repl-copy "s-c")
         (list "Paste" repl-paste "s-v")
         (list "terminal" toggle-terminal)

@@ -222,7 +222,12 @@ itself)."
 ; every key, click, release and wake, for the buffer on screen.
 (define (buffer-runs-in buf)
   (let ((b (guard (e (#t #f)) (running-image-backend buf))))
-    (if b (%alist-ref b :name "") "")))
+    (if b (%alist-ref b :name "") (or (*buffer-hint* buf) ""))))
+
+; What the modeline says of BUF when it runs in this image, as a FORWARD
+; HOOK: #f for nothing, or a hint -- the standalone's "no backend — a send
+; asks".
+(define *buffer-hint* (lambda (buf) #f))
 
 (define (status-refresh . _)
   (guard (e (#t #f))
@@ -411,6 +416,40 @@ $PATH?"
       (remote-took! name)
       *remote*)
     (_ (echo "nothing called " name " to start — " (string-join (map car *schemes*) ", ")) #f)))
+
+;; ── Asked for on the first send (the standalone, and 27-lisp) ──────────────
+;; A send from a file with no backend for it may ask where to run
+;; (host/standalone.scm's asking-backend; 27-lisp's for SBCL). #f: no
+;; question -- a Scheme file runs in this image, a Lisp file's first send
+;; starts SBCL.
+(define *ask-backend-on-send* #t)
+(define *backend-answered* (make-hash-table equal?))   ; buf -> #t: asked once, not again
+
+(define (send-failed why)
+  ; A send's answer when it was not run, saying WHY.
+  (list (cons :status 'error) (cons :message why) (cons :output "")))
+
+(define (send-to b src k)
+  ; Send SRC to backend B, (K answer) when it answers.
+  (let ((async (backend-op b :eval-async)))
+    (if async (async src k) (k ((backend-op b :eval) src)))))
+
+(define (start-for-send name src k)
+  "Start backend NAME and send it SRC, (K answer) -- asking first, when
+another runs, whether to stop it. Kept, or NAME not starting, the send is
+not run and K hears why."
+  (define (go)
+    (guard (e ((string? e) (k (send-failed (string-append "not sent — " e)))))
+      (start-backend name)
+      (send-to (the-backend) src k)))
+  (if (remote-running)
+    (read-minibuffer (string-append *remote-kind* " is running — stop it and start " name "? (y/n) ")
+                     (lambda (ans)
+                       (if (member (string-downcase (string-trim-both ans)) '("y" "yes"))
+                         (go)
+                         (k (send-failed (string-append "not sent — " *remote-kind* " kept running")))))
+                     :plain)
+    (go)))
 
 (define (remote-start (which #f))
   "Start a program in a process of its own as THE backend — SLIME's M-x

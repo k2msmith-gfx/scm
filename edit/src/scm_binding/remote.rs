@@ -1061,25 +1061,27 @@ mod backend_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Opening a Scheme file asks which installed Scheme to start, a Lisp
-    /// file whether to start SBCL (Kevin: "If you say no (n), it doesn't
-    /// ask again for that file"); nothing is asked while the backend
-    /// running takes the file. The lux is a stand-in serving as scm.
+    /// The first send from a file with no backend for it asks where to run
+    /// (Kevin, 2026-11-23): a Scheme file the editor (RET) or a Scheme
+    /// installed, a Lisp file whether to start SBCL; opening asks nothing.
+    /// RET runs here and the buffer is not asked again; a Scheme started
+    /// takes the send and the other Scheme files; starting one while
+    /// another runs asks to stop it; a Lisp file answered no says how to
+    /// start one. The lux is a stand-in serving as scm.
     #[test]
-    fn opening_a_file_asks_for_a_backend_and_no_is_remembered() {
+    fn the_first_send_asks_where_to_run() {
         let on_path = |p: &str| std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success());
         if !on_path("scm") {
             eprintln!("skipped: no scm on PATH");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("edit-ask-backend-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("edit-ask-on-send-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
-        let (a, b, c, l) = (dir.join("a.scm"), dir.join("b.scm"), dir.join("c.scm"), dir.join("x.lisp"));
-        for f in [&a, &b, &c] {
-            std::fs::write(f, "(define x 1)\n").unwrap();
+        let (a, b, c, l, m) = (dir.join("a.scm"), dir.join("b.scm"), dir.join("c.scm"), dir.join("x.lisp"), dir.join("y.lisp"));
+        for f in [&a, &b, &c, &l, &m] {
+            std::fs::write(f, "").unwrap();
         }
-        std::fs::write(&l, "(defun f () 1)\n").unwrap();
         let log = dir.join("log");
         let lux = dir.join("lux");
         std::fs::write(&lux, format!("#!/bin/sh\necho \"$@\" >> {}\nfor x; do addr=$x; done\nexec scm --serve \"$addr\"\n", log.display())).unwrap();
@@ -1088,44 +1090,73 @@ mod backend_tests {
 
         crate::app::resize(800, 600, 1.0);
         let mut s = super::super::standalone::Session::boot(None, &[]).expect("boot");
-        s.call(&format!("(set! *lux-program* \"{}\") (set! *guile-program* \"no-such-guile\") (set! *ask-backend-on-open* #t)", lux.display()));
-        let open = |s: &mut super::super::standalone::Session, f: &std::path::Path| {
-            s.call("(mini-dismiss)");
-            s.call(&format!("(open-path \"{}\")", f.display()));
-        };
+        s.call(&format!("(set! *lux-program* \"{}\") (set! *guile-program* \"no-such-guile\") (set! *ask-backend-on-send* #t)", lux.display()));
+        let open = |s: &mut super::super::standalone::Session, f: &std::path::Path| s.call(&format!("(open-path \"{}\")", f.display()));
         let asked = |s: &mut super::super::standalone::Session| -> Option<String> {
             (crate::app::typing() == Some(crate::app::MINIBUFFER)).then(|| s.eval_to_string("(%edit :prompt)").unwrap())
         };
-        let answer = |s: &mut super::super::standalone::Session, key: &str| s.call(&format!("((%edit :on-submit) {key:?})"));
+        let send = |s: &mut super::super::standalone::Session, code: &str| {
+            s.call(&format!("(%editor-set-text 1 {code:?}) (%editor-goto-line 1 0) (eval-defun)"));
+            assert!(s.settle(10.0));
+        };
+        let answer = |s: &mut super::super::standalone::Session, key: &str| {
+            s.call(&format!("((%edit :on-submit) {key:?})"));
+            assert!(s.settle(30.0));
+        };
+        let runs = |s: &mut super::super::standalone::Session| s.eval_to_string("(buffer-runs-in (%editor-active-buffer 1))").unwrap();
 
-        // A Scheme file: the Schemes installed, Guile not.
+        // Opening asks nothing; the modeline says a send will.
         open(&mut s, &a);
-        let q = asked(&mut s).expect("asked on opening a.scm");
-        assert!(q.contains("lux (l)") && q.contains("scm (s)") && !q.contains("guile"), "{q}");
-        answer(&mut s, "n");
-        assert_eq!(s.eval_to_string("(if *remote* 1 0)").unwrap(), "0", "no starts nothing");
-        open(&mut s, &b);
-        assert!(asked(&mut s).is_some(), "another file is asked about");
-        s.call("(mini-dismiss)");
-        open(&mut s, &a);
-        assert_eq!(asked(&mut s), None, "a file answered no is not asked again");
+        assert_eq!(asked(&mut s), None, "opening asks nothing");
+        assert_eq!(runs(&mut s), "\"no backend — a send asks\"");
+        // RET: here, and not asked again.
+        send(&mut s, "(define here 1)");
+        let q = asked(&mut s).expect("the first send asks");
+        assert!(q.contains("editor (RET), lux (l), scm (s)") && !q.contains("guile"), "{q}");
+        answer(&mut s, "");
+        assert_eq!(s.eval_to_string("here").unwrap(), "1", "it ran here");
+        assert_eq!(runs(&mut s), "\"\"");
+        send(&mut s, "(define here 2)");
+        assert_eq!(asked(&mut s), None, "answered once");
+        assert_eq!(s.eval_to_string("here").unwrap(), "2");
 
-        // l starts lux on the file; a Scheme file opened then is not asked.
+        // l: lux starts on the file and takes the send, and the other
+        // Scheme files without asking.
         open(&mut s, &b);
+        send(&mut s, "(* 6 7)");
         answer(&mut s, "l");
         assert!(std::fs::read_to_string(&log).unwrap().starts_with(&format!("{} --serve ", b.display())));
-        assert_eq!(s.eval_to_string("*remote-kind*").unwrap(), "\"lux\"");
+        assert!(transcript().iter().any(|l| l == "=> 42"), "{:?}", transcript());
         open(&mut s, &c);
-        assert_eq!(asked(&mut s), None, "lux takes c.scm already");
+        send(&mut s, "(* 6 8)");
+        assert_eq!(asked(&mut s), None, "lux takes c.scm");
+        assert!(transcript().iter().any(|l| l == "=> 48"), "{:?}", transcript());
 
-        // A Lisp file asks about SBCL, saying what it stops.
-        open(&mut s, &l);
         if on_path("sbcl") {
-            let q = asked(&mut s).expect("asked on opening x.lisp");
-            assert!(q.contains("sbcl backend (stops lux)? (y/n)"), "{q}");
+            // A Lisp file asks about SBCL, then whether to stop lux.
+            open(&mut s, &l);
+            send(&mut s, "(+ 1 2)");
+            assert_eq!(asked(&mut s).as_deref(), Some("\"Start sbcl? (y/n) \""));
             answer(&mut s, "y");
-            assert_eq!(s.eval_to_string("(sbcl-running?)").unwrap(), "#t");
+            assert_eq!(asked(&mut s).as_deref(), Some("\"lux is running — stop it and start sbcl? (y/n) \""));
+            answer(&mut s, "y");
+            let t0 = std::time::Instant::now();
+            while !transcript().iter().any(|l| l == "=> 3") {
+                s.poll();
+                assert!(t0.elapsed() < std::time::Duration::from_secs(30), "{:?}", transcript());
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             assert_eq!(s.eval_to_string("(repl-prompt)").unwrap(), "\"CL-USER> \"");
+            s.call("(remote-stop)");
+            // No: the send says how, and is not asked again.
+            open(&mut s, &m);
+            send(&mut s, "(+ 1 2)");
+            assert!(asked(&mut s).is_some());
+            answer(&mut s, "n");
+            assert!(transcript().iter().any(|l| l.contains("no Lisp running")), "{:?}", transcript());
+            send(&mut s, "(+ 1 2)");
+            assert_eq!(asked(&mut s), None, "answered no once");
+            assert_eq!(s.eval_to_string("(sbcl-running?)").unwrap(), "#f");
         }
         s.call("(remote-stop)");
         let _ = std::fs::remove_dir_all(&dir);
