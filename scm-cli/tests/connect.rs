@@ -126,6 +126,40 @@ fn two_prompts_are_one_environment() {
     let _ = server.wait();
 }
 
+/// A program that starts a prompt on itself names it: lux, from a
+/// terminal, runs `scm --connect ADDR --name lux --owner`, and the banner
+/// and prompt say lux, and that C-d ends it -- not that it keeps running.
+#[test]
+fn a_named_prompt_says_whose_it_is() {
+    let (mut server, addr) = serve();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_scm"))
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                c.stdin.take().unwrap().write_all(b"(+ 1 2)\n")?;
+                c.wait_with_output()
+            })
+            .expect("run scm --connect");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let named = run(&["--connect", &addr, "--name", "lux", "--owner"]);
+    assert!(named.starts_with(&format!("lux (scm {}) on {addr} — C-c interrupts, C-d ends lux", env!("CARGO_PKG_VERSION"))), "{named}");
+    assert!(named.contains("lux> 3"), "the prompt is lux's: {named}");
+    assert!(!named.contains("scm> ") && !named.contains("keeps running"), "{named}");
+
+    // Unnamed, as before.
+    let plain = run(&["--connect", &addr]);
+    assert!(plain.contains("(the server keeps running)") && plain.contains("scm> 3"), "{plain}");
+
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
 #[test]
 fn an_interrupt_stops_a_runaway_and_leaves_the_session_alive() {
     let (mut server, addr) = serve();

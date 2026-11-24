@@ -210,6 +210,8 @@ fn main() -> ExitCode {
     let mut fuel: Option<u64> = None;
     let mut serve: Option<String> = None;
     let mut connect: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut owner = false;
     let mut rest: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -244,6 +246,17 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            "--name" => {
+                i += 1;
+                match args.get(i) {
+                    Some(a) => name = Some(a.clone()),
+                    None => {
+                        eprintln!("scm: --name wants the program's name, e.g. lux");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--owner" => owner = true,
             "-h" | "--help" => {
                 usage();
                 return ExitCode::SUCCESS;
@@ -268,7 +281,7 @@ fn main() -> ExitCode {
         }
         unsafe { signal(SIGINT, on_sigint as *const () as usize) };
         return match Remote::connect(&addr) {
-            Ok(r) => repl(Door::Remote(r)),
+            Ok(r) => repl(Door::Remote(r), Label { name, owner }),
             Err(e) => {
                 eprintln!("scm: cannot connect to {addr}: {e}");
                 ExitCode::FAILURE
@@ -312,12 +325,12 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        None => repl(Door::Local(Rc::new(RefCell::new(session)))),
+        None => repl(Door::Local(Rc::new(RefCell::new(session))), Label::default()),
     }
 }
 
 fn usage() {
-    println!("usage: scm [--fuel N] [--serve ADDR | --connect ADDR] [FILE | -e EXPR]");
+    println!("usage: scm [--fuel N] [--serve ADDR | --connect ADDR [--name NAME] [--owner]] [FILE | -e EXPR]");
     println!("       scm build FILE [-o OUT]");
     println!();
     println!("  no arguments   start the terminal REPL");
@@ -329,6 +342,9 @@ fn usage() {
     println!("  --connect ADDR a prompt on a server started elsewhere: its state, its");
     println!("                 globals, shared with every other client of it. C-d leaves");
     println!("                 the prompt and leaves the server running");
+    println!("  --name NAME    with --connect: the program the prompt is in, for its");
+    println!("                 banner and prompt (lux, from a terminal, says lux)");
+    println!("  --owner        with --connect: the server ends when this prompt does");
     println!("  --fuel N       stop after N safepoints; a runaway is an error,");
     println!("                 not a hang (plan requirement 8)");
     println!();
@@ -378,12 +394,22 @@ fn run_once(session: &mut Session, src: &str, source: &str) -> ExitCode {
     }
 }
 
+/// What a prompt calls itself. A program serving the protocol that starts a
+/// prompt on itself -- lux, from a terminal -- names itself, `--name lux`,
+/// for the banner and the prompt, and says with `--owner` that it ends when
+/// the prompt does, so the banner does not promise the server keeps running.
+#[derive(Default)]
+struct Label {
+    name: Option<String>,
+    owner: bool,
+}
+
 /// The terminal client. With a terminal: line editing, history, multi-line
 /// entry (`RET` inside an unfinished form inserts a newline, decided by the
 /// same parse the socket client asks for), tab completion over the global
 /// names, and the break REPL on an uncaught error. Without one -- a pipe,
 /// a test -- plain lines, so `echo '(+ 1 2)' | scm` still works.
-fn repl(mut door: Door) -> ExitCode {
+fn repl(mut door: Door, label: Label) -> ExitCode {
     // Through the door rather than from `env!`, so a remote prompt reports
     // the *server's* version. Two binaries of different ages can talk --
     // the protocol is built for it -- and the banner should not claim
@@ -402,14 +428,27 @@ fn repl(mut door: Door) -> ExitCode {
     let names: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     refresh_names(&mut door, &names);
     let tty = unsafe { isatty(0) } != 0;
-    match door.where_() {
-        None => println!("scm {version} — C-c interrupts, C-d leaves, ,help for commands"),
+    let shown = label.name.clone().unwrap_or_else(|| "scm".into());
+    match (door.where_(), &label.name) {
+        (None, _) => println!("scm {version} — C-c interrupts, C-d leaves, ,help for commands"),
         // Leaving a remote prompt is not stopping the server, which is the
-        // difference a user has to be told once.
-        Some(addr) => println!(
+        // difference a user has to be told once -- unless the server is
+        // the program that started this prompt, and ends with it.
+        (Some(addr), None) if !label.owner => println!(
             "scm {version} on {addr} — C-c interrupts, C-d leaves the prompt (the server keeps running)"
         ),
+        (Some(addr), _) => {
+            let by = if label.name.is_some() { format!(" (scm {version})") } else { format!(" {version}") };
+            let leave = if label.owner {
+                format!("C-d ends {shown}")
+            } else {
+                "C-d leaves the prompt (the server keeps running)".to_string()
+            };
+            println!("{shown}{by} on {addr} — C-c interrupts, {leave}");
+        }
     }
+    let prompt_text = format!("{shown}> ");
+    let more_text = format!("{:<w$}", "...", w = prompt_text.len());
     println!(
         "{} globals. (apropos \"vector\") searches names and docstrings, (doc 'map) and (signature 'map) explain one.",
         names.borrow().len()
@@ -446,7 +485,7 @@ fn repl(mut door: Door) -> ExitCode {
     loop {
         // One complete form, or a comma command.
         let src = if let Some(ed) = &editor {
-            match ed.borrow_mut().read("scm> ") {
+            match ed.borrow_mut().read(&prompt_text) {
                 Ok(text) => text,
                 Err(ReadlineError::Interrupted) => continue,
                 Err(ReadlineError::Eof) => break,
@@ -456,7 +495,7 @@ fn repl(mut door: Door) -> ExitCode {
                 }
             }
         } else {
-            let prompt = if pending.is_empty() { "scm> " } else { "...  " };
+            let prompt = if pending.is_empty() { &prompt_text } else { &more_text };
             print!("{prompt}");
             let _ = io::stdout().flush();
             let Some(line) = plain.next() else {
